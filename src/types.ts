@@ -1,5 +1,5 @@
-export const AGENT_IDS = ["pm-home", "app", "assistant", "dba"] as const;
-export type AgentId = (typeof AGENT_IDS)[number];
+export const AGENT_SLUGS = ["pm-home", "app", "assistant", "dba"] as const;
+export type AgentSlug = (typeof AGENT_SLUGS)[number];
 
 export const MESSAGE_TYPES = [
   "task",
@@ -19,10 +19,18 @@ export const MESSAGE_STATUSES = [
 ] as const;
 export type MessageStatus = (typeof MESSAGE_STATUSES)[number];
 
+export interface BoardAgent {
+  agent_code: string;
+  slug: AgentSlug;
+  label: string;
+  nickname: string | null;
+  active: boolean;
+}
+
 export interface BoardMessage {
   id: string;
-  from_agent: AgentId;
-  to_agent: AgentId;
+  from_agent: string;
+  to_agent: string;
   type: MessageType;
   subject: string;
   body: string;
@@ -30,4 +38,11 @@ export interface BoardMessage {
   status: MessageStatus;
   created_at: string;
   updated_at: string;
+}
+
+export interface AgentRegistry {
+  selfCode: string;
+  selfSlug: AgentSlug;
+  slugToCode: Map<string, string>;
+  codeToSlug: Map<string, string>;
 }

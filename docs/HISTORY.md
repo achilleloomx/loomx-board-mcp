@@ -16,3 +16,15 @@
 **Decisioni prese:** D-001, D-002, D-003, D-004
 **Blocchi / note:** In attesa della migrazione DB dal DBA — senza tabella `board_messages` i tool non possono operare
 **Prossima sessione:** Verificare risposta DBA, test end-to-end una volta che la tabella è disponibile
+
+## Sessione #1b — 2026-03-30
+
+**Obiettivo:** Adattare il codice allo schema effettivo del DBA (board_agents + agent_code FK)
+**Completato:**
+- Refactor completo: slug (CLI) → agent_code (DB) con resolution all'avvio da `board_agents`
+- Rinominato AgentId → AgentSlug, aggiunto AgentRegistry e BoardAgent types
+- `board_inbox` arricchisce risultati con slug per leggibilità
+- Build e test CLI OK
+**Decisioni prese:** D-005, D-006
+**Blocchi / note:** Serve la service role key dalla dashboard Supabase per il .env
+**Prossima sessione:** Configurare .env con credenziali reali, test end-to-end su Supabase live

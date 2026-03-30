@@ -36,4 +36,20 @@ Il Board MCP usa la service role key di Supabase (bypassa RLS) anziché token pe
 
 ---
 
-*Watermark: D-004*
+## D-005 — Slug→code resolution da board_agents
+
+Il CLI accetta slug (`--agent pm-home`) ma le query DB usano `agent_code` (es. `001`). All'avvio il server carica il registry da `board_agents` e costruisce le mappe slug↔code.
+
+**Motivazione:** Il DBA ha normalizzato `from_agent`/`to_agent` come FK verso `board_agents(agent_code)` anziché slug testuali hardcoded. Risolvere all'avvio mantiene il codice dei tool semplice e rispetta `board_agents` come source of truth.
+
+---
+
+## D-006 — Enrichment slug nei risultati board_inbox
+
+`board_inbox` arricchisce ogni messaggio con `from_agent_slug` e `to_agent_slug` per leggibilità, mantenendo i codici originali.
+
+**Motivazione:** Gli agenti ragionano per slug, non per codici numerici. L'enrichment avviene lato applicativo senza query aggiuntive (usa la mappa in memoria).
+
+---
+
+*Watermark: D-006*
