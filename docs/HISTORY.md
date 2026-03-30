@@ -28,3 +28,15 @@
 **Decisioni prese:** D-005, D-006
 **Blocchi / note:** Serve la service role key dalla dashboard Supabase per il .env
 **Prossima sessione:** Configurare .env con credenziali reali, test end-to-end su Supabase live
+
+## Sessione #1c — 2026-03-30
+
+**Obiettivo:** Connessione a Supabase e test end-to-end
+**Completato:**
+- Configurato .env con service role key
+- Test connessione: board_agents query OK (4 agenti)
+- Test end-to-end: INSERT (send pm→dba), SELECT (inbox dba), DELETE (cleanup) — tutto OK
+- Board MCP operativo su Supabase live (fvoxccwfysazwpchudwp, EU West Paris)
+**Decisioni prese:** nessuna
+**Blocchi / note:** nessuno
+**Prossima sessione:** Creare .mcp.json.example per i repo agenti, primo uso reale tra agenti
