@@ -1,4 +1,4 @@
-export const AGENT_IDS = ["pm", "app", "assistant", "dba"] as const;
+export const AGENT_IDS = ["pm-home", "app", "assistant", "dba"] as const;
 export type AgentId = (typeof AGENT_IDS)[number];
 
 export const MESSAGE_TYPES = [

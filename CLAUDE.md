@@ -106,11 +106,11 @@ loomx-board-mcp/
 | `done` | Notifica di completamento (ref_id → messaggio originale) |
 | `alignment_issue` | Inconsistenza governance rilevata dal PM |
 
-### Agent IDs
+### Agent IDs (slug da `board_agents` — source of truth nel DBA)
 
-| ID | Agente | Repo |
+| Slug | Agente | Repo |
 |---|---|---|
-| `pm` | Project Manager | loomx-home-pm |
+| `pm-home` | Project Manager | loomx-home-pm |
 | `app` | Product Owner | loomx-home-app |
 | `assistant` | Home Assistant | loomx-home-assistant |
 | `dba` | Database Admin | loomx-home-DBA |
