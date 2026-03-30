@@ -6,8 +6,6 @@
 
 ## In corso
 
-- [ ] Setup progetto (package.json, tsconfig, dipendenze)
-- [ ] Implementare i 4 tool MCP (board_send, board_inbox, board_ack, board_update_status)
 - [ ] Richiedere al DBA la migrazione `board_messages` (PR su loomx-home-DBA)
 
 ## Backlog
@@ -18,7 +16,8 @@
 
 ## Done
 
-(nessuno)
+- [x] Setup progetto (package.json, tsconfig, dipendenze)
+- [x] Implementare i 4 tool MCP (board_send, board_inbox, board_ack, board_update_status)
 
 ---
 
