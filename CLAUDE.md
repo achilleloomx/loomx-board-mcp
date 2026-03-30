@@ -182,6 +182,7 @@ SKILL_ROOT = .skills/skills
 |---|---|---|
 | `session-manager` | `$SKILL_ROOT/session-manager/SKILL.md` | Inizio/fine sessione, checkpoint, status report |
 | `security-auditor` | `$SKILL_ROOT/security-auditor/SKILL.md` | Review sicurezza prima di release |
+| `requirements-engineer` | `$SKILL_ROOT/requirements-engineer/SKILL.md` | Formalizzare requisiti prima di implementare |
 | `audit` | `$SKILL_ROOT/audit/SKILL.md` | Validare codice e PR prima del merge |
 | `sprint-manager` | `$SKILL_ROOT/sprint-manager/SKILL.md` | Pianificazione sprint, tracking, gate verification |
 
