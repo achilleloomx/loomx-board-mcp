@@ -1,12 +1,12 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getSupabaseClient } from "./supabase.js";
-import { AGENT_SLUGS, MESSAGE_TYPES, MESSAGE_STATUSES } from "./types.js";
+import { MESSAGE_TYPES, MESSAGE_STATUSES } from "./types.js";
 import type { AgentRegistry, MessageStatus } from "./types.js";
 
 const TABLE = "board_messages";
+const OVERVIEW_VIEW = "board_overview";
 
-const AgentSlugSchema = z.enum(AGENT_SLUGS);
 const MessageTypeSchema = z.enum(MESSAGE_TYPES);
 const StatusFilterSchema = z.enum(MESSAGE_STATUSES);
 
@@ -16,12 +16,20 @@ export function registerTools(
 ): void {
   const { selfCode, selfSlug, slugToCode, codeToSlug } = registry;
 
+  // Dynamic agent slug validation — no hardcoded enum
+  const validSlugs = [...slugToCode.keys()];
+  const validateRecipientSlug = (slug: string): string | null => {
+    if (!slugToCode.has(slug)) return `Unknown agent "${slug}". Valid: ${validSlugs.join(", ")}`;
+    if (slug === selfSlug) return "Cannot send a message to yourself";
+    return null;
+  };
+
   // --- board_send ---
   server.tool(
     "board_send",
-    "Send a message to another agent",
+    `Send a message to another agent. Valid recipients: ${validSlugs.filter(s => s !== selfSlug).join(", ")}`,
     {
-      to_agent: AgentSlugSchema.describe("Recipient agent slug"),
+      to_agent: z.string().min(1).describe(`Recipient agent slug (${validSlugs.filter(s => s !== selfSlug).join(", ")})`),
       type: MessageTypeSchema.describe("Message type"),
       subject: z.string().min(1).describe("Message subject"),
       body: z.string().min(1).describe("Message body"),
@@ -32,27 +40,15 @@ export function registerTools(
         .describe("Reference message ID (for done/replies)"),
     },
     async ({ to_agent, type, subject, body, ref_id }) => {
-      if (to_agent === selfSlug) {
+      const validationError = validateRecipientSlug(to_agent);
+      if (validationError) {
         return {
-          content: [
-            { type: "text", text: "Error: cannot send a message to yourself" },
-          ],
+          content: [{ type: "text", text: `Error: ${validationError}` }],
           isError: true,
         };
       }
 
-      const toCode = slugToCode.get(to_agent);
-      if (!toCode) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: `Error: unknown agent "${to_agent}"`,
-            },
-          ],
-          isError: true,
-        };
-      }
+      const toCode = slugToCode.get(to_agent)!;
 
       const db = getSupabaseClient();
       const { data, error } = await db
@@ -198,6 +194,62 @@ export function registerTools(
     }
   );
 
+  // --- board_broadcast ---
+  server.tool(
+    "board_broadcast",
+    "Send a message to all other active agents at once",
+    {
+      type: MessageTypeSchema.describe("Message type"),
+      subject: z.string().min(1).describe("Message subject"),
+      body: z.string().min(1).describe("Message body"),
+      ref_id: z
+        .string()
+        .uuid()
+        .optional()
+        .describe("Reference message ID (optional)"),
+    },
+    async ({ type, subject, body, ref_id }) => {
+      const db = getSupabaseClient();
+      const { data, error } = await db.rpc("board_broadcast", {
+        _from_agent: selfCode,
+        _type: type,
+        _subject: subject,
+        _body: body,
+        _ref_id: ref_id ?? null,
+      });
+
+      if (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error broadcasting message: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const enriched = (data ?? []).map((msg: any) => ({
+        ...msg,
+        to_agent_slug: codeToSlug.get(msg.to_agent) ?? msg.to_agent,
+      }));
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              { ok: true, sent_to: enriched.length, messages: enriched },
+              null,
+              2
+            ),
+          },
+        ],
+      };
+    }
+  );
+
   // --- board_update_status ---
   server.tool(
     "board_update_status",
@@ -233,6 +285,59 @@ export function registerTools(
           {
             type: "text",
             text: JSON.stringify({ ok: true, ...data }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  // --- board_overview ---
+  server.tool(
+    "board_overview",
+    "View all board messages with enriched agent info (slugs, names)",
+    {
+      status: StatusFilterSchema.optional().describe(
+        "Filter by status (default: all)"
+      ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Max messages to return (default: 50)"),
+    },
+    async ({ status, limit }) => {
+      const db = getSupabaseClient();
+      let query = db
+        .from(OVERVIEW_VIEW)
+        .select("*")
+        .order("created_at", { ascending: false })
+        .limit(limit ?? 50);
+
+      if (status) {
+        query = query.eq("status", status);
+      }
+
+      const { data, error } = await query;
+
+      if (error) {
+        return {
+          content: [
+            { type: "text", text: `Error reading overview: ${error.message}` },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              (data ?? []).length === 0
+                ? "No messages found."
+                : JSON.stringify(data, null, 2),
           },
         ],
       };

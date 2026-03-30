@@ -87,14 +87,16 @@ loomx-board-mcp/
 
 ## MCP Tools
 
-4 tool esposti a ogni agente:
+6 tool esposti a ogni agente:
 
 | Tool | Descrizione | Operazione DB |
 |---|---|---|
-| `board_send` | Invia messaggio a un altro agente | INSERT (from_agent = self) |
+| `board_send` | Invia messaggio a un altro agente (slug validati dinamicamente da board_agents) | INSERT (from_agent = self) |
+| `board_broadcast` | Invia messaggio a tutti gli agenti attivi | RPC board_broadcast |
 | `board_inbox` | Leggi messaggi in arrivo | SELECT (to_agent = self, status filtro) |
 | `board_ack` | Conferma ricezione messaggio | UPDATE status → acknowledged |
 | `board_update_status` | Aggiorna stato messaggio | UPDATE status → in_progress / done / cancelled |
+| `board_overview` | Vista globale messaggi con info agenti arricchite | SELECT da view board_overview |
 
 ### Tipi di messaggio
 
@@ -114,6 +116,7 @@ loomx-board-mcp/
 | `app` | Product Owner | loomx-home-app |
 | `assistant` | Home Assistant | loomx-home-assistant |
 | `dba` | Database Admin | loomx-home-DBA |
+| `board-mcp` | Board MCP Server | loomx-board-mcp |
 
 ---
 

@@ -1,4 +1,4 @@
-export const AGENT_SLUGS = ["pm-home", "app", "assistant", "dba"] as const;
+export const AGENT_SLUGS = ["pm-home", "app", "assistant", "dba", "board-mcp"] as const;
 export type AgentSlug = (typeof AGENT_SLUGS)[number];
 
 export const MESSAGE_TYPES = [
