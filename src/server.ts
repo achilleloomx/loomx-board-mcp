@@ -2,9 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { resolveAgentRegistry } from "./supabase.js";
 import { registerTools } from "./tools.js";
-import type { AgentSlug } from "./types.js";
-
-export async function startServer(slug: AgentSlug): Promise<void> {
+export async function startServer(slug: string): Promise<void> {
   const registry = await resolveAgentRegistry(slug);
 
   process.stderr.write(

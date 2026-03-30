@@ -87,7 +87,7 @@ loomx-board-mcp/
 
 ## MCP Tools
 
-6 tool esposti a ogni agente:
+7 tool esposti a ogni agente:
 
 | Tool | Descrizione | Operazione DB |
 |---|---|---|
@@ -97,6 +97,7 @@ loomx-board-mcp/
 | `board_ack` | Conferma ricezione messaggio | UPDATE status → acknowledged |
 | `board_update_status` | Aggiorna stato messaggio | UPDATE status → in_progress / done / cancelled |
 | `board_overview` | Vista globale messaggi con info agenti arricchite | SELECT da view board_overview |
+| `board_thread` | Recupera thread di conversazione (messaggio originale + risposte) | SELECT (id/ref_id match) |
 
 ### Tipi di messaggio
 

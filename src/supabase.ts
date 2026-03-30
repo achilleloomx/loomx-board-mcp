@@ -1,5 +1,5 @@
 import { createClient, SupabaseClient } from "@supabase/supabase-js";
-import type { AgentSlug, AgentRegistry, BoardAgent } from "./types.js";
+import type { AgentRegistry, BoardAgent } from "./types.js";
 
 let client: SupabaseClient | null = null;
 
@@ -20,7 +20,7 @@ export function getSupabaseClient(): SupabaseClient {
 }
 
 export async function resolveAgentRegistry(
-  slug: AgentSlug
+  slug: string
 ): Promise<AgentRegistry> {
   const db = getSupabaseClient();
 

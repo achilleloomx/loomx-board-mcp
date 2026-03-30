@@ -1,6 +1,3 @@
-export const AGENT_SLUGS = ["pm-home", "app", "assistant", "dba", "board-mcp"] as const;
-export type AgentSlug = (typeof AGENT_SLUGS)[number];
-
 export const MESSAGE_TYPES = [
   "task",
   "question",
@@ -21,7 +18,7 @@ export type MessageStatus = (typeof MESSAGE_STATUSES)[number];
 
 export interface BoardAgent {
   agent_code: string;
-  slug: AgentSlug;
+  slug: string;
   label: string;
   nickname: string | null;
   active: boolean;
@@ -42,7 +39,7 @@ export interface BoardMessage {
 
 export interface AgentRegistry {
   selfCode: string;
-  selfSlug: AgentSlug;
+  selfSlug: string;
   slugToCode: Map<string, string>;
   codeToSlug: Map<string, string>;
 }

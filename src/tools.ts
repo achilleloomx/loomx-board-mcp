@@ -343,4 +343,78 @@ export function registerTools(
       };
     }
   );
+
+  // --- board_thread ---
+  server.tool(
+    "board_thread",
+    "Retrieve a conversation thread: the original message and all replies referencing it",
+    {
+      message_id: z
+        .string()
+        .uuid()
+        .describe("ID of any message in the thread (original or reply)"),
+    },
+    async ({ message_id }) => {
+      const db = getSupabaseClient();
+
+      // First, find the root: if this message has a ref_id, the root is ref_id; otherwise it's the message itself
+      const { data: anchor, error: anchorErr } = await db
+        .from(TABLE)
+        .select("id, ref_id")
+        .eq("id", message_id)
+        .single();
+
+      if (anchorErr) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error finding message: ${anchorErr.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const rootId = anchor.ref_id ?? anchor.id;
+
+      // Fetch root + all replies
+      const { data, error } = await db
+        .from(TABLE)
+        .select("*")
+        .or(`id.eq.${rootId},ref_id.eq.${rootId}`)
+        .order("created_at", { ascending: true });
+
+      if (error) {
+        return {
+          content: [
+            { type: "text", text: `Error reading thread: ${error.message}` },
+          ],
+          isError: true,
+        };
+      }
+
+      const enriched = (data ?? []).map((msg) => ({
+        ...msg,
+        from_agent_slug: codeToSlug.get(msg.from_agent) ?? msg.from_agent,
+        to_agent_slug: codeToSlug.get(msg.to_agent) ?? msg.to_agent,
+      }));
+
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              enriched.length === 0
+                ? "No messages found in thread."
+                : JSON.stringify(
+                    { thread_root: rootId, count: enriched.length, messages: enriched },
+                    null,
+                    2
+                  ),
+          },
+        ],
+      };
+    }
+  );
 }
