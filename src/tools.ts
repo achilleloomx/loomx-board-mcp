@@ -223,11 +223,11 @@ export function registerTools(
     async ({ type, subject, body, summary, tags, ref_id }) => {
       const db = getSupabaseClient();
       const { data, error } = await db.rpc("board_broadcast", {
-        _from_agent: selfCode,
-        _type: type,
-        _subject: subject,
-        _body: body,
-        _ref_id: ref_id ?? null,
+        p_from_agent: selfCode,
+        p_type: type,
+        p_subject: subject,
+        p_body: body,
+        p_ref_id: ref_id ?? null,
       });
 
       if (error) {
@@ -445,7 +445,7 @@ export function registerTools(
     async ({ days }) => {
       const db = getSupabaseClient();
       const { data, error } = await db.rpc("board_archive_old", {
-        _days: days ?? 7,
+        p_days: days ?? 7,
       });
 
       if (error) {

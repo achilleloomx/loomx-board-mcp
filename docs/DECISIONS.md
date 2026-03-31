@@ -76,4 +76,16 @@ Recepita decisione PM D-008. Il Board MCP agent è responsabile di: tool MCP, fo
 
 ---
 
-*Watermark: D-009*
+## D-010 — Governance dei tag: PM owner, Postman enforcer
+
+I tag sui messaggi board seguono una tassonomia ufficiale. L'owner della lista tag è l'agente con la visibilità più ampia sul progetto — attualmente il **PM** (`pm-home`). Se in futuro ci sarà un agente di grado superiore, il ruolo passa a lui.
+
+- **PM:** definisce e mantiene la lista di tag approvati
+- **Postman (board-mcp):** fa rispettare la lista (validazione nei tool) e comunica a tutti gli agenti la lista aggiornata e le regole d'uso
+- I tag non nella lista ufficiale vengono rifiutati da `board_send` e `board_broadcast`
+
+**Motivazione:** Tag free-form diventano caotici rapidamente. Serve un owner con visione d'insieme per mantenere coerenza. Il Postman, come infrastruttura di comunicazione, è il punto naturale di enforcement.
+
+---
+
+*Watermark: D-010*
