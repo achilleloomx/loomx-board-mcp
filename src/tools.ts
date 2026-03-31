@@ -33,13 +33,15 @@ export function registerTools(
       type: MessageTypeSchema.describe("Message type"),
       subject: z.string().min(1).describe("Message subject"),
       body: z.string().min(1).describe("Message body"),
+      summary: z.string().optional().describe("Short summary (saves tokens for recipient — they see this first)"),
+      tags: z.array(z.string()).optional().describe("Tags for topic filtering (e.g. ['schema', 'urgent'])"),
       ref_id: z
         .string()
         .uuid()
         .optional()
         .describe("Reference message ID (for done/replies)"),
     },
-    async ({ to_agent, type, subject, body, ref_id }) => {
+    async ({ to_agent, type, subject, body, summary, tags, ref_id }) => {
       const validationError = validateRecipientSlug(to_agent);
       if (validationError) {
         return {
@@ -59,6 +61,8 @@ export function registerTools(
           type,
           subject,
           body,
+          summary: summary ?? null,
+          tags: tags ?? [],
           ref_id: ref_id ?? null,
           status: "pending",
         })
@@ -92,11 +96,12 @@ export function registerTools(
   // --- board_inbox ---
   server.tool(
     "board_inbox",
-    "Read incoming messages for this agent",
+    "Read incoming messages for this agent (excludes archived)",
     {
       status: StatusFilterSchema.optional().describe(
         "Filter by status (default: all)"
       ),
+      tag: z.string().optional().describe("Filter by tag (e.g. 'schema')"),
       limit: z
         .number()
         .int()
@@ -105,17 +110,22 @@ export function registerTools(
         .optional()
         .describe("Max messages to return (default: 20)"),
     },
-    async ({ status, limit }) => {
+    async ({ status, tag, limit }) => {
       const db = getSupabaseClient();
       let query = db
         .from(TABLE)
         .select("*")
         .eq("to_agent", selfCode)
+        .is("archived_at", null)
         .order("created_at", { ascending: false })
         .limit(limit ?? 20);
 
       if (status) {
         query = query.eq("status", status);
+      }
+
+      if (tag) {
+        query = query.contains("tags", [tag]);
       }
 
       const { data, error } = await query;
@@ -202,13 +212,15 @@ export function registerTools(
       type: MessageTypeSchema.describe("Message type"),
       subject: z.string().min(1).describe("Message subject"),
       body: z.string().min(1).describe("Message body"),
+      summary: z.string().optional().describe("Short summary (saves tokens for recipients)"),
+      tags: z.array(z.string()).optional().describe("Tags for topic filtering"),
       ref_id: z
         .string()
         .uuid()
         .optional()
         .describe("Reference message ID (optional)"),
     },
-    async ({ type, subject, body, ref_id }) => {
+    async ({ type, subject, body, summary, tags, ref_id }) => {
       const db = getSupabaseClient();
       const { data, error } = await db.rpc("board_broadcast", {
         _from_agent: selfCode,
@@ -412,6 +424,51 @@ export function registerTools(
                     null,
                     2
                   ),
+          },
+        ],
+      };
+    }
+  );
+
+  // --- board_archive ---
+  server.tool(
+    "board_archive",
+    "Archive old done/cancelled messages (sets archived_at). Uses board_archive_old DB function.",
+    {
+      days: z
+        .number()
+        .int()
+        .min(1)
+        .optional()
+        .describe("Archive messages older than N days (default: 7)"),
+    },
+    async ({ days }) => {
+      const db = getSupabaseClient();
+      const { data, error } = await db.rpc("board_archive_old", {
+        _days: days ?? 7,
+      });
+
+      if (error) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error archiving messages: ${error.message}`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              { ok: true, archived_count: data },
+              null,
+              2
+            ),
           },
         ],
       };

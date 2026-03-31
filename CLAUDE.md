@@ -87,17 +87,18 @@ loomx-board-mcp/
 
 ## MCP Tools
 
-7 tool esposti a ogni agente:
+9 tool esposti a ogni agente:
 
 | Tool | Descrizione | Operazione DB |
 |---|---|---|
-| `board_send` | Invia messaggio a un altro agente (slug validati dinamicamente da board_agents) | INSERT (from_agent = self) |
+| `board_send` | Invia messaggio con summary e tags opzionali | INSERT (from_agent = self) |
 | `board_broadcast` | Invia messaggio a tutti gli agenti attivi | RPC board_broadcast |
-| `board_inbox` | Leggi messaggi in arrivo | SELECT (to_agent = self, status filtro) |
+| `board_inbox` | Leggi messaggi in arrivo (esclusi archiviati, filtro tag) | SELECT (to_agent = self) |
 | `board_ack` | Conferma ricezione messaggio | UPDATE status → acknowledged |
 | `board_update_status` | Aggiorna stato messaggio | UPDATE status → in_progress / done / cancelled |
 | `board_overview` | Vista globale messaggi con info agenti arricchite | SELECT da view board_overview |
 | `board_thread` | Recupera thread di conversazione (messaggio originale + risposte) | SELECT (id/ref_id match) |
+| `board_archive` | Archivia messaggi done/cancelled più vecchi di N giorni | RPC board_archive_old |
 
 ### Tipi di messaggio
 

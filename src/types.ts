@@ -31,8 +31,11 @@ export interface BoardMessage {
   type: MessageType;
   subject: string;
   body: string;
+  summary: string | null;
+  tags: string[];
   ref_id: string | null;
   status: MessageStatus;
+  archived_at: string | null;
   created_at: string;
   updated_at: string;
 }
