@@ -52,4 +52,28 @@ Il CLI accetta slug (`--agent pm-home`) ma le query DB usano `agent_code` (es. `
 
 ---
 
-*Watermark: D-006*
+## D-007 — Validazione dinamica slug da board_agents
+
+Rimosso `AGENT_SLUGS` hardcoded da `types.ts`. Ora `board_send` valida i destinatari a runtime usando la mappa `slugToCode` costruita all'avvio da `board_agents`. Anche `index.ts` accetta qualsiasi stringa come `--agent` e delega la validazione a `resolveAgentRegistry`.
+
+**Motivazione:** Con l'aggiunta di nuovi agenti (es. board-mcp/005) l'enum statico richiedeva rilasci. La validazione dinamica rende il sistema zero-config per nuovi agenti.
+
+---
+
+## D-008 — Board MCP agent come product owner della piattaforma di comunicazione
+
+Recepita decisione PM D-008. Il Board MCP agent è responsabile di: tool MCP, formato messaggi, logica applicativa. Il DBA resta fornitore schema su richiesta. Il PM definisce governance d'uso.
+
+**Motivazione:** La piattaforma board sta evolvendo (tags, summary, thread, archive, staging area). Serve un owner chiaro per la roadmap feature.
+
+---
+
+## D-009 — Inbox esclude messaggi archiviati di default
+
+`board_inbox` filtra automaticamente `WHERE archived_at IS NULL`. I messaggi archiviati sono visibili solo tramite `board_overview` o query dirette.
+
+**Motivazione:** Riduce il rumore nell'inbox degli agenti. I messaggi completati e vecchi non servono nel flusso quotidiano.
+
+---
+
+*Watermark: D-009*

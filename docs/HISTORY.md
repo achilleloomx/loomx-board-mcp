@@ -4,6 +4,23 @@
 
 ---
 
+## Sessione #2 — 2026-03-31
+
+**Obiettivo:** Evoluzione Board MCP da 4 a 9 tool, registrazione agente, recepimento D-008
+**Completato:**
+- Registrazione board-mcp (code 005, nickname Postman) su board_agents
+- Implementati 5 nuovi tool: board_overview, board_broadcast, board_thread, board_archive
+- Validazione dinamica slug (rimosso AGENT_SLUGS hardcoded)
+- Supporto tags (invio + filtro inbox), summary (invio), archived_at (esclusione inbox)
+- Recepita D-008: board-mcp è product owner della piattaforma di comunicazione
+- Comunicazione con DBA per schema changes (tags, summary, archived_at) — tutto applicato
+- Notificato PM e tutti gli agenti della registrazione e del nickname Postman
+**Decisioni prese:** D-007, D-008, D-009
+**Blocchi / note:** RPC board_broadcast non supporta ancora summary/tags (richiesta al DBA in backlog)
+**Prossima sessione:** Staging area, aggiornamento RPC broadcast, .mcp.json.example per i repo agenti
+
+---
+
 ## Sessione #1 — 2026-03-30
 
 **Obiettivo:** Setup iniziale del progetto e implementazione completa dei tool MCP
