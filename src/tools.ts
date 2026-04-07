@@ -1,11 +1,13 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getSupabaseClient } from "./supabase.js";
-import { MESSAGE_TYPES, MESSAGE_STATUSES } from "./types.js";
+import { MESSAGE_TYPES, MESSAGE_STATUSES, GTD_STATUSES, GTD_PRIORITIES } from "./types.js";
 import type { AgentRegistry, MessageStatus } from "./types.js";
 
 const TABLE = "board_messages";
 const OVERVIEW_VIEW = "board_overview";
+const GTD_TABLE = "loomx_items";
+const GTD_ITEM_PROJECTS_TABLE = "loomx_item_projects";
 
 const MessageTypeSchema = z.enum(MESSAGE_TYPES);
 const StatusFilterSchema = z.enum(MESSAGE_STATUSES);
@@ -469,6 +471,380 @@ export function registerTools(
               null,
               2
             ),
+          },
+        ],
+      };
+    }
+  );
+
+  // =========================================================================
+  // GTD Tools (loomx_items)
+  // =========================================================================
+
+  const GtdStatusSchema = z.enum(GTD_STATUSES);
+  const GtdPrioritySchema = z.enum(GTD_PRIORITIES);
+  const isLoomy = selfSlug === "loomy";
+
+  // --- gtd_inbox ---
+  server.tool(
+    "gtd_inbox",
+    "Read GTD items owned by this agent, ordered by priority DESC then deadline ASC",
+    {
+      status: GtdStatusSchema.optional().describe(
+        "Filter by GTD status (default: all except done/trash)"
+      ),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(100)
+        .optional()
+        .describe("Max items to return (default: 20)"),
+    },
+    async ({ status, limit }) => {
+      const db = getSupabaseClient();
+      let query = db
+        .from(GTD_TABLE)
+        .select("*")
+        .eq("owner", selfSlug)
+        .order("priority", { ascending: false })
+        .order("deadline", { ascending: true, nullsFirst: false })
+        .limit(limit ?? 20);
+
+      if (status) {
+        query = query.eq("gtd_status", status);
+      } else {
+        query = query.not("gtd_status", "in", "(done,trash)");
+      }
+
+      const { data, error } = await query;
+
+      if (error) {
+        return {
+          content: [
+            { type: "text", text: `Error reading GTD inbox: ${error.message}` },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              (data ?? []).length === 0
+                ? "No GTD items found."
+                : JSON.stringify(data, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  // --- gtd_add ---
+  server.tool(
+    "gtd_add",
+    "Create a new GTD item",
+    {
+      title: z.string().min(1).describe("Item title"),
+      body: z.string().optional().describe("Item body/details"),
+      gtd_status: GtdStatusSchema.optional().describe(
+        "GTD status (default: inbox)"
+      ),
+      owner: z.string().optional().describe(
+        `Owner agent slug (default: ${selfSlug})`
+      ),
+      priority: GtdPrioritySchema.optional().describe(
+        "Priority level (default: normal)"
+      ),
+      deadline: z.string().optional().describe("Deadline (ISO 8601 date/datetime)"),
+      source: z.string().optional().describe("Origin of this item (e.g. board, manual, sync)"),
+      source_ref: z.string().optional().describe("Reference ID in the source system"),
+    },
+    async ({ title, body, gtd_status, owner, priority, deadline, source, source_ref }) => {
+      const targetOwner = owner ?? selfSlug;
+
+      // Only loomy can create items for other agents
+      if (targetOwner !== selfSlug && !isLoomy) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Error: only loomy can create items for other agents. You can only create items with owner="${selfSlug}".`,
+            },
+          ],
+          isError: true,
+        };
+      }
+
+      const db = getSupabaseClient();
+      const { data, error } = await db
+        .from(GTD_TABLE)
+        .insert({
+          title,
+          body: body ?? null,
+          gtd_status: gtd_status ?? "inbox",
+          owner: targetOwner,
+          priority: priority ?? "normal",
+          deadline: deadline ?? null,
+          source: source ?? null,
+          source_ref: source_ref ?? null,
+        })
+        .select("id, title, gtd_status, owner, created_at")
+        .single();
+
+      if (error) {
+        return {
+          content: [
+            { type: "text", text: `Error creating GTD item: ${error.message}` },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ ok: true, ...data }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  // --- gtd_update ---
+  server.tool(
+    "gtd_update",
+    "Update an existing GTD item. Only the owner can update (loomy can update any item).",
+    {
+      id: z.string().uuid().describe("ID of the GTD item to update"),
+      title: z.string().min(1).optional().describe("New title"),
+      body: z.string().optional().describe("New body"),
+      gtd_status: GtdStatusSchema.optional().describe("New GTD status"),
+      priority: GtdPrioritySchema.optional().describe("New priority"),
+      deadline: z.string().nullable().optional().describe("New deadline (ISO 8601, or null to clear)"),
+      waiting_on: z.string().nullable().optional().describe("Agent slug this item is waiting on (or null to clear)"),
+    },
+    async ({ id, title, body, gtd_status, priority, deadline, waiting_on }) => {
+      const db = getSupabaseClient();
+
+      // Build update payload — only include provided fields
+      const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+      if (title !== undefined) updates.title = title;
+      if (body !== undefined) updates.body = body;
+      if (gtd_status !== undefined) updates.gtd_status = gtd_status;
+      if (priority !== undefined) updates.priority = priority;
+      if (deadline !== undefined) updates.deadline = deadline;
+      if (waiting_on !== undefined) updates.waiting_on = waiting_on;
+
+      let query = db
+        .from(GTD_TABLE)
+        .update(updates)
+        .eq("id", id);
+
+      // Ownership check: non-loomy agents can only update their own items
+      if (!isLoomy) {
+        query = query.eq("owner", selfSlug);
+      }
+
+      const { data, error } = await query
+        .select("id, title, gtd_status, priority, owner, updated_at")
+        .single();
+
+      if (error) {
+        return {
+          content: [
+            { type: "text", text: `Error updating GTD item: ${error.message}` },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ ok: true, ...data }, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  // --- gtd_query ---
+  server.tool(
+    "gtd_query",
+    `Flexible query for GTD items. ${isLoomy ? "As loomy, you can see all agents' items." : "Filters to your own items unless loomy."}`,
+    {
+      owner: z.string().optional().describe("Filter by owner agent slug"),
+      gtd_status: GtdStatusSchema.optional().describe("Filter by GTD status"),
+      priority: GtdPrioritySchema.optional().describe("Filter by priority"),
+      project_id: z.string().uuid().optional().describe("Filter by project ID (via loomx_item_projects)"),
+      limit: z
+        .number()
+        .int()
+        .min(1)
+        .max(200)
+        .optional()
+        .describe("Max items to return (default: 50)"),
+    },
+    async ({ owner, gtd_status, priority, project_id, limit }) => {
+      const db = getSupabaseClient();
+
+      // If project_id is specified, we need to join through loomx_item_projects
+      if (project_id) {
+        // First get item IDs linked to this project
+        const { data: links, error: linkErr } = await db
+          .from(GTD_ITEM_PROJECTS_TABLE)
+          .select("item_id")
+          .eq("project_id", project_id);
+
+        if (linkErr) {
+          return {
+            content: [
+              { type: "text", text: `Error querying project links: ${linkErr.message}` },
+            ],
+            isError: true,
+          };
+        }
+
+        const itemIds = (links ?? []).map((l: any) => l.item_id);
+        if (itemIds.length === 0) {
+          return {
+            content: [{ type: "text", text: "No GTD items found for this project." }],
+          };
+        }
+
+        let query = db
+          .from(GTD_TABLE)
+          .select("*")
+          .in("id", itemIds)
+          .order("priority", { ascending: false })
+          .order("deadline", { ascending: true, nullsFirst: false })
+          .limit(limit ?? 50);
+
+        // Ownership filter
+        if (!isLoomy) {
+          query = query.eq("owner", selfSlug);
+        } else if (owner) {
+          query = query.eq("owner", owner);
+        }
+
+        if (gtd_status) query = query.eq("gtd_status", gtd_status);
+        if (priority) query = query.eq("priority", priority);
+
+        const { data, error } = await query;
+
+        if (error) {
+          return {
+            content: [
+              { type: "text", text: `Error querying GTD items: ${error.message}` },
+            ],
+            isError: true,
+          };
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text:
+                (data ?? []).length === 0
+                  ? "No GTD items found."
+                  : JSON.stringify(data, null, 2),
+            },
+          ],
+        };
+      }
+
+      // Standard query without project filter
+      let query = db
+        .from(GTD_TABLE)
+        .select("*")
+        .order("priority", { ascending: false })
+        .order("deadline", { ascending: true, nullsFirst: false })
+        .limit(limit ?? 50);
+
+      // Ownership filter
+      if (!isLoomy) {
+        query = query.eq("owner", selfSlug);
+      } else if (owner) {
+        query = query.eq("owner", owner);
+      }
+
+      if (gtd_status) query = query.eq("gtd_status", gtd_status);
+      if (priority) query = query.eq("priority", priority);
+
+      const { data, error } = await query;
+
+      if (error) {
+        return {
+          content: [
+            { type: "text", text: `Error querying GTD items: ${error.message}` },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text:
+              (data ?? []).length === 0
+                ? "No GTD items found."
+                : JSON.stringify(data, null, 2),
+          },
+        ],
+      };
+    }
+  );
+
+  // --- gtd_complete ---
+  server.tool(
+    "gtd_complete",
+    "Mark a GTD item as done (shortcut). Only the owner can complete (loomy can complete any item).",
+    {
+      id: z.string().uuid().describe("ID of the GTD item to complete"),
+    },
+    async ({ id }) => {
+      const db = getSupabaseClient();
+      const now = new Date().toISOString();
+
+      let query = db
+        .from(GTD_TABLE)
+        .update({
+          gtd_status: "done",
+          completed_at: now,
+          updated_at: now,
+        })
+        .eq("id", id);
+
+      // Ownership check
+      if (!isLoomy) {
+        query = query.eq("owner", selfSlug);
+      }
+
+      const { data, error } = await query
+        .select("id, title, gtd_status, completed_at")
+        .single();
+
+      if (error) {
+        return {
+          content: [
+            { type: "text", text: `Error completing GTD item: ${error.message}` },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ ok: true, ...data }, null, 2),
           },
         ],
       };

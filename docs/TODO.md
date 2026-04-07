@@ -1,6 +1,8 @@
 # TODO — Board MCP Server
 
-> Task dello sviluppatore MCP.
+> DEPRECATO — i task sono in loomx_items su Supabase. Usare tool gtd_inbox/gtd_add.
+
+> ~~Task dello sviluppatore MCP.~~
 
 ---
 

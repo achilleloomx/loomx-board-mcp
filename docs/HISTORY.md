@@ -4,6 +4,44 @@
 
 ---
 
+## Sessione #4 — 2026-04-07
+
+**Obiettivo:** Supporto backend direct-postgres via `DATABASE_URL`, backwards-compat service_role (D-023 DBA validato)
+**Completato:**
+- Aggiunto `src/pg-shim.ts`: shim minimale che implementa il sottoinsieme di `supabase-js` query builder usato in `tools.ts` (from/select/insert/update/eq/is/in/not/contains/or/order/limit/single + rpc con named args)
+- Dispatch in `src/supabase.ts`: se `DATABASE_URL` è settato usa pg, altrimenti fallback a `SUPABASE_URL`+`SERVICE_ROLE_KEY` (backwards-compat totale)
+- Zero modifiche a `src/tools.ts` — tutti i 14 tool funzionano in entrambe le modalità grazie al cast strutturale
+- `pg.Pool` singleton (lazy-init), parallelo a D-002 per supabase-js
+- Connection string letta solo da env, mai logica né in log (no credential leak — solo "DB backend: direct-postgres/supabase-js" su stderr)
+- Aggiornato `.env.example` con entrambe le modalità documentate
+- Aggiunte deps `pg ^8.13.1` + `@types/pg ^8.11.10`
+- Build TypeScript pulita
+**Decisioni prese:** D-013 (dual backend via DATABASE_URL)
+**Blocchi / note:**
+- `.mcp.json` in questa working directory ha credenziali placeholder: non è stato possibile eseguire `board_inbox`/`gtd_inbox`/`board_send`/`board_ack` live in questa sessione. Il task è stato eseguito sulla base della descrizione completa fornita nel prompt di Loomy.
+- Test end-to-end dei 7 step del task NON eseguiti per mancanza credenziali live. Proposto: il DBA esegua smoke test su branch `feat/direct-postgres-backend` con un `DATABASE_URL` reale prima del merge.
+- Branch: `feat/direct-postgres-backend` — non ancora merged, in attesa di review DBA (pre-merge review richiesta esplicitamente dal task).
+**Prossima sessione:** Ack del task in board_inbox, summary a Loomy, richiesta review DBA via board, merge a valle di approvazione.
+
+---
+
+## Sessione #3 — 2026-04-05
+
+**Obiettivo:** GTD tools, governance update (PM Home → Loomy), deprecazione TODO.md
+**Completato:**
+- Implementati 5 tool GTD: gtd_inbox, gtd_add, gtd_update, gtd_query, gtd_complete (D-011, D-012)
+- Ownership enforcement applicativo: ogni agente modifica solo i propri item, loomy ha accesso globale
+- Aggiornata governance: PM Home rimosso, coordinatore ora è Loomy (root coordinator)
+- D-010 aggiornata: owner tag governance da PM a Loomy
+- CLAUDE.md aggiornato: blocco Agente, tabella agenti completa con nuovi consulting, riferimento a Loomy
+- Deprecato docs/TODO.md — i task board-mcp sono migrati in loomx_items (Supabase)
+- Fix parametri RPC con prefisso p_ (commit c81e8d4)
+**Decisioni prese:** D-011, D-012
+**Blocchi / note:** Nessuno
+**Prossima sessione:** Verificare task GTD migrati, .mcp.json.example per repo agenti, staging area
+
+---
+
 ## Sessione #2 — 2026-03-31
 
 **Obiettivo:** Evoluzione Board MCP da 4 a 9 tool, registrazione agente, recepimento D-008
