@@ -46,3 +46,25 @@ export interface AgentRegistry {
   slugToCode: Map<string, string>;
   codeToSlug: Map<string, string>;
 }
+
+// --- GTD (loomx_items) ---
+
+export const GTD_STATUSES = [
+  "inbox",
+  "next_action",
+  "waiting",
+  "scheduled",
+  "someday",
+  "in_progress",
+  "done",
+  "trash",
+] as const;
+export type GtdStatus = (typeof GTD_STATUSES)[number];
+
+export const GTD_PRIORITIES = [
+  "low",
+  "normal",
+  "high",
+  "critical",
+] as const;
+export type GtdPriority = (typeof GTD_PRIORITIES)[number];
