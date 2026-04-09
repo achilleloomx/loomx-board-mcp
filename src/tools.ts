@@ -617,7 +617,7 @@ export function registerTools(
   // --- gtd_update ---
   server.tool(
     "gtd_update",
-    "Update an existing GTD item. Only the owner can update (loomy can update any item).",
+    "Update an existing GTD item. Only the owner can update (loomy can update any item). Only loomy can reassign owner.",
     {
       id: z.string().uuid().describe("ID of the GTD item to update"),
       title: z.string().min(1).optional().describe("New title"),
@@ -626,9 +626,20 @@ export function registerTools(
       priority: GtdPrioritySchema.optional().describe("New priority"),
       deadline: z.string().nullable().optional().describe("New deadline (ISO 8601, or null to clear)"),
       waiting_on: z.string().nullable().optional().describe("Agent slug this item is waiting on (or null to clear)"),
+      owner: z.string().min(1).optional().describe("Reassign owner (loomy only)"),
     },
-    async ({ id, title, body, gtd_status, priority, deadline, waiting_on }) => {
+    async ({ id, title, body, gtd_status, priority, deadline, waiting_on, owner }) => {
       const db = getSupabaseClient();
+
+      // Only loomy can reassign owner
+      if (owner !== undefined && !isLoomy) {
+        return {
+          content: [
+            { type: "text", text: `Error: only loomy can reassign item owner. You cannot change the owner field.` },
+          ],
+          isError: true,
+        };
+      }
 
       // Build update payload — only include provided fields
       const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
@@ -638,6 +649,7 @@ export function registerTools(
       if (priority !== undefined) updates.priority = priority;
       if (deadline !== undefined) updates.deadline = deadline;
       if (waiting_on !== undefined) updates.waiting_on = waiting_on;
+      if (owner !== undefined) updates.owner = owner;
 
       let query = db
         .from(GTD_TABLE)
