@@ -11,7 +11,7 @@
 ```
 agent_id: board-mcp
 role: infra
-db: Supabase LoomX Home (namespace board_*)
+db: Supabase LoomX Home (namespace board_*, loomx_*, home_*)
 ```
 
 ---
@@ -84,8 +84,8 @@ loomx-board-mcp/
 │   ├── index.ts           ← entry: parse --agent, start server
 │   ├── server.ts          ← MCP server + capabilities + stdio transport
 │   ├── supabase.ts        ← Supabase client
-│   ├── tools.ts           ← board_* + gtd_* tool definitions
-│   └── types.ts           ← BoardMessage, GtdStatus, GtdPriority, etc.
+│   ├── tools.ts           ← board_* + gtd_* + home_* tool definitions
+│   └── types.ts           ← BoardMessage, GtdStatus, MealType, etc.
 ├── docs/
 │   ├── TODO.md            ← task dello sviluppatore MCP
 │   ├── DECISIONS.md       ← decisioni architetturali del server
@@ -97,7 +97,7 @@ loomx-board-mcp/
 
 ## MCP Tools
 
-14 tool esposti a ogni agente:
+14 tool base esposti a ogni agente + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
 
 ### Board Tools (board_messages)
 
@@ -124,6 +124,23 @@ loomx-board-mcp/
 
 > **Regola ownership GTD:** ogni agente puo' modificare solo i propri item (owner = self). Loomy puo' leggere e modificare item di qualsiasi agente.
 
+### Home Tools (home_* tables — condizionali)
+
+Registrati solo se `HOME_FAMILY_ID` e `HOME_USER_ID` sono settati in env. Scoped alla famiglia configurata.
+
+| Tool | Descrizione | Operazione DB |
+|---|---|---|
+| `home_grocery_categories` | Lista categorie spesa famiglia | SELECT home_shopping_categories |
+| `home_grocery_list` | Leggi lista della spesa attiva | SELECT home_shopping_items |
+| `home_grocery_add` | Aggiungi prodotto alla lista spesa | INSERT home_shopping_items |
+| `home_grocery_update` | Aggiorna prodotto (quantita', check, ecc.) | UPDATE home_shopping_items |
+| `home_grocery_remove` | Rimuovi prodotto dalla lista | DELETE home_shopping_items |
+| `home_menu_read` | Leggi menu settimanale con tutti i piatti | SELECT home_weekly_menus + home_menu_items |
+| `home_menu_write` | Crea/aggiorna voce menu (auto-crea weekly menu) | INSERT/UPDATE home_menu_items |
+| `home_school_menu_read` | Leggi menu scolastico per un bambino | SELECT home_school_menus |
+
+> **Configurazione:** aggiungere `HOME_FAMILY_ID` e `HOME_USER_ID` nell'env dell'agente che necessita accesso ai dati famiglia (es. Evaristo/assistant).
+
 ### Tipi di messaggio
 
 | Type | Uso |
@@ -147,6 +164,7 @@ loomx-board-mcp/
 | `loomx-commercialisti` | PO Commercialisti | LoomXCommercialisti |
 | `damato` | PO D'Amato | DamatoArredamenti_Website |
 | `sintesi-impianti` | Consulting | — |
+| `mcpromo` | Consulting — MCpromo (Antonelli) | 01. Progetti/20. MCpromo |
 
 ---
 
@@ -167,6 +185,17 @@ Ogni repo agente ha un `.mcp.json` (in `.gitignore`) + `.mcp.json.example`:
       }
     }
   }
+}
+```
+
+Per agenti con accesso ai dati famiglia (es. assistant/Evaristo), aggiungere:
+
+```json
+"env": {
+  "SUPABASE_URL": "...",
+  "SUPABASE_SERVICE_ROLE_KEY": "...",
+  "HOME_FAMILY_ID": "<uuid famiglia>",
+  "HOME_USER_ID": "<uuid utente auth>"
 }
 ```
 

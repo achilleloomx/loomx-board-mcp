@@ -126,4 +126,20 @@ L'implementazione usa un thin shim (`src/pg-shim.ts`) che espone il sottoinsieme
 
 ---
 
-*Watermark: D-013*
+## D-014 — Home tools: family scoping via HOME_FAMILY_ID + HOME_USER_ID
+
+I tool `home_*` (grocery, menu, school menu) operano su tabelle `home_*` scoped a una famiglia. Il family_id e lo user_id (per i campi `added_by`/`checked_by`) vengono letti da env vars `HOME_FAMILY_ID` e `HOME_USER_ID` all'avvio. Se non presenti, i tool home_* non vengono registrati.
+
+**Motivazione:** Il Board MCP usa service_role (bypassa RLS), quindi il family scoping deve avvenire a livello applicativo (stesso pattern di D-004/D-011 per board/GTD). Le env vars permettono di configurare quali agenti hanno accesso ai dati famiglia senza modifiche al codice. Solo gli agenti che operano nel contesto famiglia (es. Evaristo/assistant) impostano queste variabili.
+
+---
+
+## D-015 — Delete support in pg-shim per grocery_remove
+
+Aggiunto metodo `delete()` a `PgQuery` in `pg-shim.ts` per supportare `DELETE FROM ... WHERE ... RETURNING ...`. Necessario per `home_grocery_remove`.
+
+**Motivazione:** Il shim copriva solo select/insert/update (D-013). La rimozione di prodotti dalla lista spesa richiede DELETE effettivo (non soft-delete, la tabella non ha campo `is_active`).
+
+---
+
+*Watermark: D-015*

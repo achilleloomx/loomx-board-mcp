@@ -68,3 +68,19 @@ export const GTD_PRIORITIES = [
   "critical",
 ] as const;
 export type GtdPriority = (typeof GTD_PRIORITIES)[number];
+
+// --- Home (home_* tables — family data) ---
+
+export const MEAL_TYPES = [
+  "breakfast",
+  "lunch",
+  "dinner",
+  "snack",
+] as const;
+export type MealType = (typeof MEAL_TYPES)[number];
+
+export const MENU_STATUSES = ["draft", "approved"] as const;
+export type MenuStatus = (typeof MENU_STATUSES)[number];
+
+export const SCHOOL_MENU_SOURCES = ["manual", "scraper"] as const;
+export type SchoolMenuSource = (typeof SCHOOL_MENU_SOURCES)[number];

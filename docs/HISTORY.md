@@ -4,6 +4,49 @@
 
 ---
 
+## Sessione #6 — 2026-04-09
+
+**Obiettivo:** Estendere Board MCP con tool home_* per Evaristo (task da Loomy)
+**Completato:**
+- Implementati 8 tool home_*: home_grocery_categories, home_grocery_list, home_grocery_add, home_grocery_update, home_grocery_remove, home_menu_read, home_menu_write, home_school_menu_read
+- Tool condizionali: registrati solo se HOME_FAMILY_ID + HOME_USER_ID sono in env (D-014)
+- Aggiunto delete() a pg-shim.ts per supportare grocery_remove (D-015)
+- Tipi Home aggiunti a types.ts: MealType, MenuStatus, SchoolMenuSource
+- Auto-creazione lista spesa e weekly menu quando non esistono
+- Build TypeScript pulita, zero errori
+- CLAUDE.md aggiornato con tabella Home Tools e configurazione env
+**Decisioni prese:** D-014, D-015
+**Blocchi / note:** Nessun blocco. Test live non eseguiti (serve HOME_FAMILY_ID/HOME_USER_ID reali).
+**Prossima sessione:** Test live con Evaristo, implementare gtd_link_agent/gtd_unlink_agent (GTD backlog)
+
+---
+
+## Sessione #5b — 2026-04-09
+
+**Obiettivo:** Eseguire task pendente "Registrare agente mcpromo in board_agents" + chiusura messaggi board
+**Completato:**
+- Verificato che mcpromo era gia' registrato (agent_code=023, inserito in sessione #5)
+- Chiuso messaggio board 9b820bfe (task Loomy → board-mcp) come done
+- Chiuso messaggio board 405e90e3 (direct-postgres task) come done
+- Inviato summary a Loomy con ref al task originale
+**Decisioni prese:** nessuna
+**Blocchi / note:** Nessuno
+**Prossima sessione:** Implementare gtd_link_agent/gtd_unlink_agent/gtd_list_agents (GTD item 94d193ba, next_action), design staging area (GTD item 91435dfc, high priority)
+
+---
+
+## Sessione #5 — 2026-04-09
+
+**Obiettivo:** Registrare agente mcpromo in board_agents (task da Loomy)
+**Completato:**
+- Inserito agente mcpromo in board_agents: slug=mcpromo, agent_code=023, label="Consulting — MCpromo (Antonelli)", repo="01. Progetti/20. MCpromo", scope=consulting, active=true
+- Aggiornato CLAUDE.md: aggiunta riga mcpromo nella tabella Agent IDs
+**Decisioni prese:** nessuna (operazione CRUD standard)
+**Blocchi / note:** Nessuno
+**Prossima sessione:** Verificare che mcpromo possa usare il board (configurare .mcp.json nel repo MCpromo)
+
+---
+
 ## Sessione #4 — 2026-04-07
 
 **Obiettivo:** Supporto backend direct-postgres via `DATABASE_URL`, backwards-compat service_role (D-023 DBA validato)

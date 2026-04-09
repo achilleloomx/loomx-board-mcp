@@ -33,7 +33,7 @@ function ident(name: string): string {
 }
 
 class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
-  private _op: "select" | "insert" | "update" = "select";
+  private _op: "select" | "insert" | "update" | "delete" = "select";
   private _cols = "*";
   private _filters: Filter[] = [];
   private _orders: OrderSpec[] = [];
@@ -46,7 +46,7 @@ class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
   constructor(private pool: pg.Pool, private table: string) {}
 
   select(cols = "*"): this {
-    if (this._op === "insert" || this._op === "update") {
+    if (this._op === "insert" || this._op === "update" || this._op === "delete") {
       this._returning = cols;
     } else {
       this._op = "select";
@@ -64,6 +64,11 @@ class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
   update(data: Row): this {
     this._op = "update";
     this._updateData = data;
+    return this;
+  }
+
+  delete(): this {
+    this._op = "delete";
     return this;
   }
 
@@ -258,6 +263,10 @@ class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
           return `${ident(c)} = $${params.length}`;
         });
         sql = `UPDATE ${ident(this.table)} SET ${sets.join(", ")}`;
+        sql += this._buildWhere(params);
+        sql += this._buildReturning();
+      } else if (this._op === "delete") {
+        sql = `DELETE FROM ${ident(this.table)}`;
         sql += this._buildWhere(params);
         sql += this._buildReturning();
       }

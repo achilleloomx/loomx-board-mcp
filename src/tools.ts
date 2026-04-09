@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getSupabaseClient } from "./supabase.js";
-import { MESSAGE_TYPES, MESSAGE_STATUSES, GTD_STATUSES, GTD_PRIORITIES } from "./types.js";
+import { MESSAGE_TYPES, MESSAGE_STATUSES, GTD_STATUSES, GTD_PRIORITIES, MEAL_TYPES, MENU_STATUSES } from "./types.js";
 import type { AgentRegistry, MessageStatus } from "./types.js";
 
 const TABLE = "board_messages";
@@ -850,4 +850,429 @@ export function registerTools(
       };
     }
   );
+
+  // =========================================================================
+  // Home Tools (home_* tables — family data for Evaristo / Home Assistant)
+  // Scoped by HOME_FAMILY_ID + HOME_USER_ID env vars.
+  // =========================================================================
+
+  const homeFamily = process.env.HOME_FAMILY_ID;
+  const homeUser = process.env.HOME_USER_ID;
+
+  if (homeFamily && homeUser) {
+    const HOME_SHOPPING_LISTS = "home_shopping_lists";
+    const HOME_SHOPPING_ITEMS = "home_shopping_items";
+    const HOME_SHOPPING_CATEGORIES = "home_shopping_categories";
+    const HOME_WEEKLY_MENUS = "home_weekly_menus";
+    const HOME_MENU_ITEMS = "home_menu_items";
+    const HOME_SCHOOL_MENUS = "home_school_menus";
+
+    const MealTypeSchema = z.enum(MEAL_TYPES);
+    const MenuStatusSchema = z.enum(MENU_STATUSES);
+
+    // Helper: find or create active shopping list for the family
+    async function resolveActiveList(): Promise<{ id: string } | { error: string }> {
+      const db = getSupabaseClient();
+      const { data: lists, error: listErr } = await db
+        .from(HOME_SHOPPING_LISTS)
+        .select("id")
+        .eq("family_id", homeFamily!)
+        .eq("is_active", true)
+        .order("created_at", { ascending: false })
+        .limit(1);
+
+      if (listErr) return { error: listErr.message };
+      if (lists && lists.length > 0) return { id: (lists[0] as any).id };
+
+      // Auto-create an active list
+      const { data: newList, error: createErr } = await db
+        .from(HOME_SHOPPING_LISTS)
+        .insert({ family_id: homeFamily!, name: "Lista della spesa", is_active: true })
+        .select("id")
+        .single();
+
+      if (createErr) return { error: createErr.message };
+      return { id: (newList as any).id };
+    }
+
+    // Helper: find or create weekly menu for the family
+    async function resolveWeeklyMenu(weekStart: string): Promise<{ id: string } | { error: string }> {
+      const db = getSupabaseClient();
+      const { data: menus, error: menuErr } = await db
+        .from(HOME_WEEKLY_MENUS)
+        .select("id")
+        .eq("family_id", homeFamily!)
+        .eq("week_start", weekStart)
+        .limit(1);
+
+      if (menuErr) return { error: menuErr.message };
+      if (menus && menus.length > 0) return { id: (menus[0] as any).id };
+
+      const { data: newMenu, error: createErr } = await db
+        .from(HOME_WEEKLY_MENUS)
+        .insert({ family_id: homeFamily!, week_start: weekStart, status: "draft" })
+        .select("id")
+        .single();
+
+      if (createErr) return { error: createErr.message };
+      return { id: (newMenu as any).id };
+    }
+
+    process.stderr.write(
+      `[board-mcp] Home tools enabled (family=${homeFamily.substring(0, 8)}…)\n`
+    );
+
+    // --- home_grocery_categories ---
+    server.tool(
+      "home_grocery_categories",
+      "List shopping categories for the family (use category IDs when adding items)",
+      {},
+      async () => {
+        const db = getSupabaseClient();
+        const { data, error } = await db
+          .from(HOME_SHOPPING_CATEGORIES)
+          .select("*")
+          .eq("family_id", homeFamily!)
+          .order("sort_order", { ascending: true });
+
+        if (error) {
+          return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: JSON.stringify(data ?? [], null, 2) }] };
+      }
+    );
+
+    // --- home_grocery_list ---
+    server.tool(
+      "home_grocery_list",
+      "List shopping items from the active grocery list",
+      {
+        list_id: z.string().uuid().optional().describe("Shopping list ID (default: active list)"),
+        checked: z.boolean().optional().describe("Filter: true = purchased, false = pending"),
+        limit: z.number().int().min(1).max(200).optional().describe("Max items (default: 100)"),
+      },
+      async ({ list_id, checked, limit }) => {
+        const db = getSupabaseClient();
+
+        let targetListId = list_id;
+        if (!targetListId) {
+          const result = await resolveActiveList();
+          if ("error" in result) {
+            return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+          }
+          targetListId = result.id;
+        }
+
+        let query = db
+          .from(HOME_SHOPPING_ITEMS)
+          .select("*")
+          .eq("list_id", targetListId)
+          .order("created_at", { ascending: false })
+          .limit(limit ?? 100);
+
+        if (checked !== undefined) {
+          query = query.eq("is_checked", checked);
+        }
+
+        const { data, error } = await query;
+
+        if (error) {
+          return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
+        }
+        return {
+          content: [{
+            type: "text",
+            text: (data ?? []).length === 0
+              ? "No shopping items found."
+              : JSON.stringify(data, null, 2),
+          }],
+        };
+      }
+    );
+
+    // --- home_grocery_add ---
+    server.tool(
+      "home_grocery_add",
+      "Add an item to the shopping list",
+      {
+        product_name: z.string().min(1).describe("Product name"),
+        quantity: z.number().optional().describe("Quantity (default: 1)"),
+        unit: z.string().optional().describe("Unit of measure (default: 'pz'). Common: pz, kg, g, l, ml"),
+        category_id: z.string().uuid().optional().describe("Shopping category ID (use home_grocery_categories to list)"),
+        notes: z.string().optional().describe("Notes"),
+        list_id: z.string().uuid().optional().describe("Shopping list ID (default: active list)"),
+      },
+      async ({ product_name, quantity, unit, category_id, notes, list_id }) => {
+        const db = getSupabaseClient();
+
+        let targetListId = list_id;
+        if (!targetListId) {
+          const result = await resolveActiveList();
+          if ("error" in result) {
+            return { content: [{ type: "text", text: `Error: ${result.error}` }], isError: true };
+          }
+          targetListId = result.id;
+        }
+
+        const insertData: Record<string, unknown> = {
+          list_id: targetListId,
+          product_name,
+          quantity: quantity ?? 1,
+          unit: unit ?? "pz",
+          added_by: homeUser!,
+          is_checked: false,
+        };
+        if (category_id) insertData.category_id = category_id;
+        if (notes) insertData.notes = notes;
+
+        const { data, error } = await db
+          .from(HOME_SHOPPING_ITEMS)
+          .insert(insertData)
+          .select("id, product_name, quantity, unit, created_at")
+          .single();
+
+        if (error) {
+          return { content: [{ type: "text", text: `Error adding item: ${error.message}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...data }, null, 2) }] };
+      }
+    );
+
+    // --- home_grocery_update ---
+    server.tool(
+      "home_grocery_update",
+      "Update a shopping item (quantity, checked status, etc.)",
+      {
+        id: z.string().uuid().describe("Shopping item ID"),
+        product_name: z.string().min(1).optional().describe("New product name"),
+        quantity: z.number().optional().describe("New quantity"),
+        unit: z.string().optional().describe("New unit"),
+        category_id: z.string().uuid().optional().describe("New category ID"),
+        notes: z.string().optional().describe("New notes"),
+        is_checked: z.boolean().optional().describe("Mark as purchased (true) or pending (false)"),
+      },
+      async ({ id, product_name, quantity, unit, category_id, notes, is_checked }) => {
+        const db = getSupabaseClient();
+
+        const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+        if (product_name !== undefined) updates.product_name = product_name;
+        if (quantity !== undefined) updates.quantity = quantity;
+        if (unit !== undefined) updates.unit = unit;
+        if (category_id !== undefined) updates.category_id = category_id;
+        if (notes !== undefined) updates.notes = notes;
+        if (is_checked !== undefined) {
+          updates.is_checked = is_checked;
+          if (is_checked) {
+            updates.checked_at = new Date().toISOString();
+            updates.checked_by = homeUser!;
+          } else {
+            updates.checked_at = null;
+            updates.checked_by = null;
+          }
+        }
+
+        const { data, error } = await db
+          .from(HOME_SHOPPING_ITEMS)
+          .update(updates)
+          .eq("id", id)
+          .select("id, product_name, quantity, unit, is_checked, updated_at")
+          .single();
+
+        if (error) {
+          return { content: [{ type: "text", text: `Error updating item: ${error.message}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...data }, null, 2) }] };
+      }
+    );
+
+    // --- home_grocery_remove ---
+    server.tool(
+      "home_grocery_remove",
+      "Remove an item from the shopping list",
+      {
+        id: z.string().uuid().describe("Shopping item ID to remove"),
+      },
+      async ({ id }) => {
+        const db = getSupabaseClient();
+        const { data, error } = await (db as any)
+          .from(HOME_SHOPPING_ITEMS)
+          .delete()
+          .eq("id", id)
+          .select("id, product_name")
+          .single();
+
+        if (error) {
+          return { content: [{ type: "text", text: `Error removing item: ${error.message}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, removed: data }, null, 2) }] };
+      }
+    );
+
+    // --- home_menu_read ---
+    server.tool(
+      "home_menu_read",
+      "Read the weekly family menu with all meal items. Returns menu metadata + items grouped by day.",
+      {
+        week_start: z.string().describe("Monday of the week (ISO date YYYY-MM-DD)"),
+      },
+      async ({ week_start }) => {
+        const db = getSupabaseClient();
+
+        // Find the weekly menu
+        const { data: menus, error: menuErr } = await db
+          .from(HOME_WEEKLY_MENUS)
+          .select("*")
+          .eq("family_id", homeFamily!)
+          .eq("week_start", week_start)
+          .limit(1);
+
+        if (menuErr) {
+          return { content: [{ type: "text", text: `Error: ${menuErr.message}` }], isError: true };
+        }
+        if (!menus || menus.length === 0) {
+          return { content: [{ type: "text", text: `No menu found for week starting ${week_start}.` }] };
+        }
+
+        const menu = menus[0] as any;
+
+        // Fetch all items for this menu
+        const { data: items, error: itemErr } = await db
+          .from(HOME_MENU_ITEMS)
+          .select("*")
+          .eq("menu_id", menu.id)
+          .order("day_of_week", { ascending: true });
+
+        if (itemErr) {
+          return { content: [{ type: "text", text: `Error reading items: ${itemErr.message}` }], isError: true };
+        }
+
+        return {
+          content: [{
+            type: "text",
+            text: JSON.stringify({ menu, items: items ?? [] }, null, 2),
+          }],
+        };
+      }
+    );
+
+    // --- home_menu_write ---
+    server.tool(
+      "home_menu_write",
+      "Create or update a meal item in the weekly menu. Auto-creates the weekly menu if it doesn't exist.",
+      {
+        week_start: z.string().describe("Monday of the week (ISO date YYYY-MM-DD)"),
+        id: z.string().uuid().optional().describe("Menu item ID — provide to UPDATE an existing item, omit to INSERT"),
+        day_of_week: z.number().int().min(1).max(7).describe("ISO day: 1=Mon, 2=Tue, … 7=Sun"),
+        meal_type: MealTypeSchema.describe("Meal type"),
+        dish_name: z.string().min(1).describe("Dish/meal name"),
+        ingredients: z.any().optional().describe("Ingredients (JSONB)"),
+        member_ids: z.array(z.string().uuid()).optional().describe("Family members this meal is for"),
+        guest_names: z.array(z.string()).optional().describe("Guest names (free text)"),
+        notes: z.string().optional().describe("Notes"),
+        covered_by_school: z.boolean().optional().describe("Meal provided by school (default: false)"),
+      },
+      async ({ week_start, id, day_of_week, meal_type, dish_name, ingredients, member_ids, guest_names, notes, covered_by_school }) => {
+        const db = getSupabaseClient();
+
+        if (id) {
+          // UPDATE existing item
+          const updates: Record<string, unknown> = {};
+          if (day_of_week !== undefined) updates.day_of_week = day_of_week;
+          if (meal_type !== undefined) updates.meal_type = meal_type;
+          if (dish_name !== undefined) updates.dish_name = dish_name;
+          if (ingredients !== undefined) updates.ingredients = ingredients;
+          if (member_ids !== undefined) updates.member_ids = member_ids;
+          if (guest_names !== undefined) updates.guest_names = guest_names;
+          if (notes !== undefined) updates.notes = notes;
+          if (covered_by_school !== undefined) updates.covered_by_school = covered_by_school;
+
+          const { data, error } = await db
+            .from(HOME_MENU_ITEMS)
+            .update(updates)
+            .eq("id", id)
+            .select("id, day_of_week, meal_type, dish_name")
+            .single();
+
+          if (error) {
+            return { content: [{ type: "text", text: `Error updating menu item: ${error.message}` }], isError: true };
+          }
+          return { content: [{ type: "text", text: JSON.stringify({ ok: true, action: "updated", ...data }, null, 2) }] };
+        }
+
+        // INSERT — ensure weekly menu exists
+        const menuResult = await resolveWeeklyMenu(week_start);
+        if ("error" in menuResult) {
+          return { content: [{ type: "text", text: `Error: ${menuResult.error}` }], isError: true };
+        }
+
+        const insertData: Record<string, unknown> = {
+          menu_id: menuResult.id,
+          day_of_week,
+          meal_type,
+          dish_name,
+          covered_by_school: covered_by_school ?? false,
+        };
+        if (ingredients !== undefined) insertData.ingredients = ingredients;
+        if (member_ids) insertData.member_ids = member_ids;
+        if (guest_names) insertData.guest_names = guest_names;
+        if (notes) insertData.notes = notes;
+
+        const { data, error } = await db
+          .from(HOME_MENU_ITEMS)
+          .insert(insertData)
+          .select("id, day_of_week, meal_type, dish_name, created_at")
+          .single();
+
+        if (error) {
+          return { content: [{ type: "text", text: `Error creating menu item: ${error.message}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: JSON.stringify({ ok: true, action: "created", menu_id: menuResult.id, ...data }, null, 2) }] };
+      }
+    );
+
+    // --- home_school_menu_read ---
+    server.tool(
+      "home_school_menu_read",
+      "Read school lunch menus for a family member (child). Returns entries for a given week.",
+      {
+        member_id: z.string().uuid().describe("Family member ID (child)"),
+        week_start: z.string().optional().describe("Monday of the week (ISO date YYYY-MM-DD). Default: all available."),
+        limit: z.number().int().min(1).max(100).optional().describe("Max entries (default: 50)"),
+      },
+      async ({ member_id, week_start, limit }) => {
+        const db = getSupabaseClient();
+
+        let query = db
+          .from(HOME_SCHOOL_MENUS)
+          .select("*")
+          .eq("family_id", homeFamily!)
+          .eq("member_id", member_id)
+          .order("week_start", { ascending: false })
+          .order("day_of_week", { ascending: true })
+          .limit(limit ?? 50);
+
+        if (week_start) {
+          query = query.eq("week_start", week_start);
+        }
+
+        const { data, error } = await query;
+
+        if (error) {
+          return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
+        }
+        return {
+          content: [{
+            type: "text",
+            text: (data ?? []).length === 0
+              ? "No school menu entries found."
+              : JSON.stringify(data, null, 2),
+          }],
+        };
+      }
+    );
+  } else {
+    process.stderr.write(
+      "[board-mcp] Home tools disabled (HOME_FAMILY_ID/HOME_USER_ID not set)\n"
+    );
+  }
 }
