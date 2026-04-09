@@ -4,6 +4,20 @@
 
 ---
 
+## Sessione #7 — 2026-04-09
+
+**Obiettivo:** Aggiungere campo owner opzionale a gtd_update (task da Loomy via board)
+**Completato:**
+- Aggiunto parametro opzionale `owner` a `gtd_update` in tools.ts
+- Validazione applicativa: solo loomy può reassegnare owner, errore esplicito per altri agenti
+- Il campo owner viene incluso nel payload di update solo se fornito
+- Build TypeScript pulita, push su master (dd032df)
+**Decisioni prese:** D-016
+**Blocchi / note:** MCP board non connesso in questa sessione — task eseguito da descrizione nel prompt. board_inbox/gtd_inbox non verificabili live.
+**Prossima sessione:** Implementare gtd_link_agent/gtd_unlink_agent (backlog GTD), test live home_* tools
+
+---
+
 ## Sessione #6 — 2026-04-09
 
 **Obiettivo:** Estendere Board MCP con tool home_* per Evaristo (task da Loomy)

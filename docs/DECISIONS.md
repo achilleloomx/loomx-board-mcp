@@ -142,4 +142,12 @@ Aggiunto metodo `delete()` a `PgQuery` in `pg-shim.ts` per supportare `DELETE FR
 
 ---
 
-*Watermark: D-015*
+## D-016 — gtd_update: optional owner reassignment (loomy-only)
+
+Aggiunto parametro opzionale `owner` a `gtd_update`. Solo loomy può modificarlo — gli altri agenti ricevono un errore esplicito se tentano di reassegnare un item.
+
+**Motivazione:** Loomy, come root coordinator, ha bisogno di poter riassegnare task GTD tra agenti senza passare da delete+create. La validazione applicativa (non DB) è coerente con il pattern D-011.
+
+---
+
+*Watermark: D-016*
