@@ -4,6 +4,7 @@ export const MESSAGE_TYPES = [
   "blocker",
   "done",
   "alignment_issue",
+  "info",
 ] as const;
 export type MessageType = (typeof MESSAGE_TYPES)[number];
 

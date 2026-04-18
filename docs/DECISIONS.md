@@ -150,4 +150,37 @@ Aggiunto parametro opzionale `owner` a `gtd_update`. Solo loomy può modificarlo
 
 ---
 
-*Watermark: D-016*
+## D-017 — HOME_USER_ID deve essere un auth.users(id) Supabase
+
+`HOME_USER_ID` (env var dei tool home_*) è l'identità che viene scritta nei campi `home_shopping_items.added_by` e `home_shopping_items.checked_by`. Questi campi sono FK verso `auth.users(id)` (schema auth di Supabase), quindi `HOME_USER_ID` **deve** essere un auth user id reale — non un `home_family_members.id`, non un profile id, non uno slug agente.
+
+**Contesto incidente (sessione #8):** Evaristo/assistant aveva nel `.mcp.json` un `HOME_USER_ID` che puntava a un id non-auth, causando FK violation su ogni `home_grocery_add`. Il DBA ha confermato (msg 7d7fa363) che l'auth user id corretto per Evaristo è `5a2df80b-aa01-4b68-976e-192d6ca4227e`.
+
+**Implementazione:**
+1. `home_grocery_add` e `home_grocery_update` traducono ora le FK violation su `added_by`/`checked_by` in un messaggio d'errore esplicito che indica la causa (HOME_USER_ID non valido) e come ripararla (`.mcp.json` dell'agente).
+2. Lo startup log dei home tools stampa ora il prefix di `HOME_USER_ID` + una nota che deve essere un `auth.users(id)` — rende visibile il misconfig al primo avvio.
+3. `.env.example` e CLAUDE.md documentano esplicitamente il vincolo.
+
+**Motivazione:** Il Board MCP usa service_role e bypassa RLS, quindi le FK del DB sono l'ultima difesa contro identità invalide. Non possiamo (e non vogliamo) verificare runtime l'esistenza in `auth.users` prima di ogni insert — troppo costoso e invasivo. La combinazione "messaggio d'errore parlante + docs chiari + log di startup" è il compromesso giusto: l'errore è auto-diagnosticante e la prossima configurazione non ripete lo stesso errore.
+
+**Alternativa scartata:** probe startup contro `auth.users`. Richiede permessi extra sullo schema `auth`, e fallirebbe silenziosamente se il DBA cambia lo schema. Non ne vale la pena.
+
+---
+
+## D-018 — Rename slug agente `loomx-commercialisti` → `loomx-tracker`
+
+Lo slug dell'agente PO è stato rinominato da `loomx-commercialisti` a `loomx-tracker`. Task originato da Loomy (msg 77c30e65), migration DBA già applicata al DB (29 righe rinominate, zero RLS hardcoded).
+
+**Impatto sul sorgente:** **zero modifiche al codice applicativo**. Grazie a D-007 (validazione dinamica slug da `board_agents`), il registry viene costruito al runtime all'avvio dal DB — non esistono enum/label/validazioni hardcoded nel codice. L'unica modifica nel repo è CLAUDE.md (tabella Agent IDs, riga documentativa) + version bump patch (0.1.0 → 0.1.1) per tracciabilità.
+
+**Verifica:** `grep -r "loomx-commercialisti" src/ dist/` → 0 matches. Unica occorrenza pre-sessione: CLAUDE.md:167.
+
+**Motivazione:** D-007 (validazione dinamica) ha già pagato il suo costo quando è stata introdotta: oggi i rename di slug sono operazioni zero-code nel board-mcp. La migration è interamente lato DB + configurazione `.mcp.json` dei consumer che usavano lo slug vecchio.
+
+**Azioni cross-repo necessarie (non in questo repo):**
+- Consumer con `.mcp.json` che puntava a `--agent loomx-commercialisti` devono aggiornare a `loomx-tracker` (repo LoomXCommercialisti).
+- Messaggi board già inviati a/da `loomx-commercialisti` sono già stati migrati dal DBA (29 righe).
+
+---
+
+*Watermark: D-018*

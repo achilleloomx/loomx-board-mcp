@@ -140,6 +140,8 @@ Registrati solo se `HOME_FAMILY_ID` e `HOME_USER_ID` sono settati in env. Scoped
 | `home_school_menu_read` | Leggi menu scolastico per un bambino | SELECT home_school_menus |
 
 > **Configurazione:** aggiungere `HOME_FAMILY_ID` e `HOME_USER_ID` nell'env dell'agente che necessita accesso ai dati famiglia (es. Evaristo/assistant).
+>
+> **IMPORTANTE (D-017):** `HOME_USER_ID` deve essere un `auth.users(id)` Supabase valido — viene scritto in `home_shopping_items.added_by` / `checked_by` che sono FK verso `auth.users`. Se metti un `home_family_members.id` o un profile id, `home_grocery_add` fallisce con FK violation. Per Evaristo il valore corretto è `5a2df80b-aa01-4b68-976e-192d6ca4227e` (confermato dal DBA).
 
 ### Tipi di messaggio
 
@@ -150,6 +152,7 @@ Registrati solo se `HOME_FAMILY_ID` e `HOME_USER_ID` sono settati in env. Scoped
 | `blocker` | Segnalazione di blocco |
 | `done` | Notifica di completamento (ref_id → messaggio originale) |
 | `alignment_issue` | Inconsistenza governance rilevata |
+| `info` | Messaggio informativo generico (es. status update, notifica) |
 
 ### Agent IDs (slug da `board_agents` — source of truth nel DBA)
 
@@ -161,10 +164,11 @@ Registrati solo se `HOME_FAMILY_ID` e `HOME_USER_ID` sono settati in env. Scoped
 | `dba` | Database Admin | loomx-home-DBA |
 | `board-mcp` | Board MCP Server | loomx-board-mcp |
 | `sito-loomx` | PO Sito LoomX | LoomXweb |
-| `loomx-commercialisti` | PO Commercialisti | LoomXCommercialisti |
+| `loomx-tracker` | PO Tracker (ex-Commercialisti) | LoomXCommercialisti |
 | `damato` | PO D'Amato | DamatoArredamenti_Website |
 | `sintesi-impianti` | Consulting | — |
 | `mcpromo` | Consulting — MCpromo (Antonelli) | 01. Progetti/20. MCpromo |
+| `marketing` | Muse — Marketing Agent | hub/marketing/ |
 
 ---
 
@@ -195,9 +199,11 @@ Per agenti con accesso ai dati famiglia (es. assistant/Evaristo), aggiungere:
   "SUPABASE_URL": "...",
   "SUPABASE_SERVICE_ROLE_KEY": "...",
   "HOME_FAMILY_ID": "<uuid famiglia>",
-  "HOME_USER_ID": "<uuid utente auth>"
+  "HOME_USER_ID": "<uuid auth.users(id) — NON family member_id>"
 }
 ```
+
+> `HOME_USER_ID` deve essere un `auth.users(id)` valido (vedi D-017). Valore corretto per Evaristo: `5a2df80b-aa01-4b68-976e-192d6ca4227e`.
 
 ---
 

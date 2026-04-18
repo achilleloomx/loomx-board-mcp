@@ -882,6 +882,24 @@ export function registerTools(
     const MealTypeSchema = z.enum(MEAL_TYPES);
     const MenuStatusSchema = z.enum(MENU_STATUSES);
 
+    // Helper: translate FK violations on added_by/checked_by into actionable
+    // error messages. These fields reference auth.users(id); the most common
+    // misconfiguration is HOME_USER_ID pointing to a home_family_members(id)
+    // or another table's pk instead of the real auth user_id (see D-017).
+    function translateHomeFkError(message: string): string {
+      const msg = message || "";
+      const userPrefix = homeUser ? `${homeUser.substring(0, 8)}…` : "<unset>";
+      if (/added_by|checked_by/i.test(msg) && /violat|foreign key/i.test(msg)) {
+        return (
+          `FK violation on added_by/checked_by — HOME_USER_ID (${userPrefix}) ` +
+          `is not a valid auth.users(id). Fix: in the agent's .mcp.json set ` +
+          `HOME_USER_ID to the Supabase auth user_id (NOT a family member_id ` +
+          `or profile id). Original error: ${msg}`
+        );
+      }
+      return msg;
+    }
+
     // Helper: find or create active shopping list for the family
     async function resolveActiveList(): Promise<{ id: string } | { error: string }> {
       const db = getSupabaseClient();
@@ -931,7 +949,10 @@ export function registerTools(
     }
 
     process.stderr.write(
-      `[board-mcp] Home tools enabled (family=${homeFamily.substring(0, 8)}…)\n`
+      `[board-mcp] Home tools enabled (family=${homeFamily.substring(0, 8)}…, user=${homeUser.substring(0, 8)}…)\n`
+    );
+    process.stderr.write(
+      `[board-mcp] Note: HOME_USER_ID must be a valid auth.users(id) — it's written into home_shopping_items.added_by / checked_by (see D-017)\n`
     );
 
     // --- home_grocery_categories ---
@@ -1044,7 +1065,10 @@ export function registerTools(
           .single();
 
         if (error) {
-          return { content: [{ type: "text", text: `Error adding item: ${error.message}` }], isError: true };
+          return {
+            content: [{ type: "text", text: `Error adding item: ${translateHomeFkError(error.message)}` }],
+            isError: true,
+          };
         }
         return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...data }, null, 2) }] };
       }
@@ -1091,7 +1115,10 @@ export function registerTools(
           .single();
 
         if (error) {
-          return { content: [{ type: "text", text: `Error updating item: ${error.message}` }], isError: true };
+          return {
+            content: [{ type: "text", text: `Error updating item: ${translateHomeFkError(error.message)}` }],
+            isError: true,
+          };
         }
         return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...data }, null, 2) }] };
       }
