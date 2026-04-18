@@ -4,6 +4,32 @@
 
 ---
 
+## Sessione #10 — 2026-04-19
+
+**Obiettivo:** Implementare i 9 tool MCP per Work Items (iniziativa governance-compliance D-024). Pre-condition: tabella `loomx_work_items` già LIVE (migration DBA 20260419150000, RLS attive).
+**Completato:**
+- Letta spec integrale in `hub/initiatives/governance-compliance/design.md` §3 + §5.2 + migration DBA `20260419150000_loomx_work_items.sql` per disallineamenti design↔schema.
+- `src/types.ts`: aggiunti `WI_STATUSES`, `WI_END_STATUSES`, `WI_TEMPLATE_LAYERS`, `WorkItem` interface.
+- `src/wi.ts` (nuovo file, 500+ righe): handler puri riutilizzabili — `wiStart`, `wiEnd`, `wiStatus`, `wiQuery`, `wiCheckpoint`, `wiLinkTemplate`, `wiPause`, `wiResume`, `wiSwitch` + helper `deriveTemplateLayer`, `mapEndStatus`, `mapEndToGtdStatus`. Enforcement application-level del vincolo `one_active_wi_per_agent` + ownership (non-loomy può toccare solo i propri WI).
+- `src/tools.ts`: registrati i 9 tool MCP con Zod schemas, wrapper che chiama gli handler di `wi.ts` (import dinamico per mantenere la separazione).
+- `tests/wi.test.ts` (nuovo, ~540 righe): 27 unit test (12 happy + 15 error/edge) con fake DB client che mima il subset di supabase-js usato dagli handler. Zero dipendenze di test esterne — usa `node:test` via `tsx --test`.
+- `package.json`: version 0.1.1 → 0.2.0, script `test` aggiunto.
+- `src/server.ts`: version "0.1.0" → "0.2.0".
+- `CLAUDE.md`: sezione "WI Tools" con matrice 9 tool + elenco deviations dal design + regola derivazione `template_layer`.
+- Build pulito: `npx tsc` zero errori. Test: **27/27 PASS**.
+
+**Decisioni prese:** D-019 (deviations wi_end/side_effects/switch marker).
+**Deviations dal design documentate:**
+1. `wi_end --status=waiting` → WI.status='paused' (CHECK schema non ammette 'waiting'), GTD.gtd_status='waiting'.
+2. `side_effects_pending` → scritto dentro `side_effects_log` JSONB con marker `{pending: true}` (schema ha unica colonna log; skill v2 flipperà a executed).
+3. `wi_switch` marker `auto_closed_by_switch=true` dentro `in_flight_state` JSONB (nessuna colonna dedicata).
+4. `wi_end --failed` → `[BLOCKER] <reason>` in `loomx_items.body`; `loomx_item_tags` non toccato (fuori scope).
+
+**Blocchi / note:** MCP board non connesso in questa sessione (`.mcp.json` è placeholder) — niente `board_inbox`/`gtd_inbox` live. Nessun smoke E2E contro Supabase: i test coprono la logica applicativa via fake DB, ma validazione contro schema reale (check constraint, exclude GiST) demandata a uno smoke test live dal prossimo consumer connesso.
+**Prossima sessione:** Smoke test live del set WI (wi_start → wi_checkpoint → wi_end) da un consumer connesso; coordinare con skill session-manager v2 per l'executor di `side_effects_log` pending entries.
+
+---
+
 ## Sessione #9 — 2026-04-19
 
 **Obiettivo:** Rename slug agente `loomx-commercialisti` → `loomx-tracker` (task Loomy msg 77c30e65, DBA migration già applicata con 29 righe rinominate e via libera esplicita).

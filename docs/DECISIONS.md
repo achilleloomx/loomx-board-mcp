@@ -183,4 +183,28 @@ Lo slug dell'agente PO è stato rinominato da `loomx-commercialisti` a `loomx-tr
 
 ---
 
-*Watermark: D-018*
+## D-019 — WI tools: deviations applicate rispetto al design governance-compliance §5.2
+
+Implementati i 9 tool `wi_*` (v0.2.0) secondo `hub/initiatives/governance-compliance/design.md` §5.2. Il design **non coincide al 100%** con lo schema DB consegnato dal DBA (migration 20260419150000 / D-032). Per non bloccare il rollout della skill session-manager v2 si applicano 4 deviations, tutte documentate in `CLAUDE.md` sezione "WI Tools":
+
+1. **`wi_end --status=waiting`** — `loomx_work_items.status` CHECK non include `waiting`. Mapping: WI → `paused`, GTD → `waiting`. Semanticamente corretto: WI è in attesa (paused) e il GTD riflette lo stato "waiting_for" dell'AGENT-STANDARD.
+2. **`side_effects_pending`** — schema ha un unico `side_effects_log JSONB` (D-032), non due colonne. Le entry "pending" vengono scritte con marker `{pending: true, scheduled_at, payload}`. La skill v2 le consumerà e aggiungerà entry `{executed: true, ...}` nello stesso array (append-only come da COMMENT COLUMN).
+3. **`wi_switch` marker `auto_closed_by_switch=true`** — nessuna colonna dedicata nello schema. Scritto dentro `in_flight_state` JSONB (è già campo append-only per stato runtime). Audit queries dovranno usare `in_flight_state->>'auto_closed_by_switch' = 'true'`.
+4. **`wi_end --failed`** — il design prevede "tag blocker" sul GTD. `loomx_items` non ha colonna tags (è junction table `loomx_item_tags`); toccarla richiederebbe lookup/insert su una tabella separata → fuori scope MCP server (che per convenzione non manipola tabelle non direttamente referenziate). Soluzione adottata: prepend `[BLOCKER] <reason>` in `loomx_items.body`, GTD passa a `next_action`. Future iteration: se un tool `gtd_tag_add` arriva, wi_end lo chiamerà.
+
+**Enforcement `one_active_wi_per_agent`:** doppio livello:
+- DB: `EXCLUDE USING gist (agent_slug WITH =) WHERE (status = 'active')` (D-032.a).
+- Application: `wi_start`/`wi_resume` fanno pre-SELECT e ritornano errore chiaro prima di colpire il constraint (UX: messaggio include l'id del WI active).
+
+**Derivazione `template_layer`:** quando non fornito esplicitamente, deriva da `template_name`:
+- ≤2 segmenti separati da `-` → `L1` (universale)
+- 3+ segmenti → `L2` (cluster / agent-specific)
+- `template_name` assente → `on-the-fly`
+
+Funzione euristica semplice in attesa del catalogo template completo (Fase 2.6 plan governance-compliance). Override sempre possibile via parametro `template_layer`.
+
+**Test:** 27 unit test in `tests/wi.test.ts` con fake DB client (copre handler puri di `src/wi.ts`, non l'integrazione MCP). Schema-level enforcement (CHECK, EXCLUDE) demandato a smoke test live al primo consumer connesso.
+
+---
+
+*Watermark: D-019*

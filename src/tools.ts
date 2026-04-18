@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getSupabaseClient } from "./supabase.js";
-import { MESSAGE_TYPES, MESSAGE_STATUSES, GTD_STATUSES, GTD_PRIORITIES, MEAL_TYPES, MENU_STATUSES } from "./types.js";
+import { MESSAGE_TYPES, MESSAGE_STATUSES, GTD_STATUSES, GTD_PRIORITIES, MEAL_TYPES, MENU_STATUSES, WI_END_STATUSES, WI_TEMPLATE_LAYERS } from "./types.js";
 import type { AgentRegistry, MessageStatus } from "./types.js";
 
 const TABLE = "board_messages";
@@ -1314,4 +1314,182 @@ export function registerTools(
       "[board-mcp] Home tools disabled (HOME_FAMILY_ID/HOME_USER_ID not set)\n"
     );
   }
+
+  // =========================================================================
+  // Work Item Tools (loomx_work_items — governance-compliance D-024)
+  // =========================================================================
+
+  const WiStatusSchema = z.enum([
+    "active",
+    "paused",
+    "done",
+    "emergency",
+    "exempt",
+    "failed",
+  ]);
+  const WiEndStatusSchema = z.enum(WI_END_STATUSES);
+  const WiLayerSchema = z.enum(WI_TEMPLATE_LAYERS);
+
+  const toText = <T,>(res: import("./wi.js").WiResult<T>) => {
+    if (!res.ok) {
+      return {
+        content: [{ type: "text" as const, text: `Error: ${res.error}` }],
+        isError: true,
+      };
+    }
+    return {
+      content: [
+        { type: "text" as const, text: JSON.stringify({ ok: true, ...res.data }, null, 2) },
+      ],
+    };
+  };
+
+  const wiCtx = { selfSlug, isLoomy };
+
+  // --- wi_start ---
+  server.tool(
+    "wi_start",
+    "Open a new Work Item. If gtd_item_id is given, the linked GTD moves to in_progress; otherwise a GTD is auto-created with owner=agent_slug and title=intent.",
+    {
+      intent: z.string().min(1).describe("Human-readable intent (becomes GTD title if none provided)"),
+      agent_slug: z.string().optional().describe(`Agent slug (default: ${selfSlug}). Only loomy can open for another agent.`),
+      gtd_item_id: z.string().uuid().optional().describe("Existing GTD to link (else auto-create)"),
+      template_name: z.string().optional().describe("Template name (e.g. fix-bug, menu-plan)"),
+      template_version: z.string().optional().describe("Template version (semver)"),
+      template_layer: WiLayerSchema.optional().describe("Override layer — L1/L2/on-the-fly"),
+      pre_conditions: z.record(z.any()).optional().describe("JSONB pre-conditions state"),
+      session_id: z.string().optional().describe("Session tag for multi-WI correlation"),
+    },
+    async (args) => {
+      const { wiStart } = await import("./wi.js");
+      const db = getSupabaseClient();
+      return toText(await wiStart(db, args, wiCtx));
+    }
+  );
+
+  // --- wi_end ---
+  server.tool(
+    "wi_end",
+    "Close a Work Item. status='done'|'failed'|'waiting'. GTD status cascades (done→done, waiting→waiting, failed→next_action). 'waiting' maps to WI.status='paused' (DB CHECK constraint — see CLAUDE.md WI section).",
+    {
+      wi_id: z.string().uuid().describe("Work Item id"),
+      status: WiEndStatusSchema.describe("End keyword: done | failed | waiting"),
+      failure_reason: z.string().optional().describe("Required when status=failed"),
+      post_conditions_state: z.record(z.any()).optional().describe("JSONB post-conditions result"),
+      side_effects_pending: z.array(z.any()).optional().describe("Side-effects queued for skill v2 executor"),
+    },
+    async (args) => {
+      const { wiEnd } = await import("./wi.js");
+      const db = getSupabaseClient();
+      return toText(await wiEnd(db, args, wiCtx));
+    }
+  );
+
+  // --- wi_status ---
+  server.tool(
+    "wi_status",
+    "Return the currently active WI for an agent (default: self).",
+    {
+      agent_slug: z.string().optional().describe(`Agent slug (default: ${selfSlug})`),
+    },
+    async (args) => {
+      const { wiStatus } = await import("./wi.js");
+      const db = getSupabaseClient();
+      return toText(await wiStatus(db, args, wiCtx));
+    }
+  );
+
+  // --- wi_query ---
+  server.tool(
+    "wi_query",
+    `Query WIs with optional filters. ${isLoomy ? "As loomy you see all agents." : "Filtered to your own WIs."}`,
+    {
+      agent_slug: z.string().optional().describe("Filter by agent (loomy only; other agents are auto-filtered to self)"),
+      status: WiStatusSchema.optional().describe("Filter by lifecycle status"),
+      template_name: z.string().optional().describe("Filter by template"),
+      since: z.string().optional().describe("ISO timestamp — only WIs started at/after this time"),
+      limit: z.number().int().min(1).max(200).optional().describe("Max rows (default: 50)"),
+    },
+    async (args) => {
+      const { wiQuery } = await import("./wi.js");
+      const db = getSupabaseClient();
+      return toText(await wiQuery(db, args, wiCtx));
+    }
+  );
+
+  // --- wi_checkpoint ---
+  server.tool(
+    "wi_checkpoint",
+    "Append a mid-flight checkpoint: merge files_touched, increment tool_use_count, stamp notes. Bumps last_checkpoint_at.",
+    {
+      wi_id: z.string().uuid().describe("Work Item id"),
+      files_touched_delta: z.array(z.string()).optional().describe("Files to append to files_touched (deduped)"),
+      tool_use_count: z.number().int().nonnegative().optional().describe("Tool uses to add to the running total"),
+      notes: z.string().optional().describe("Freeform checkpoint note"),
+    },
+    async (args) => {
+      const { wiCheckpoint } = await import("./wi.js");
+      const db = getSupabaseClient();
+      return toText(await wiCheckpoint(db, args, wiCtx));
+    }
+  );
+
+  // --- wi_link_template ---
+  server.tool(
+    "wi_link_template",
+    "Attach or change template metadata on an existing WI. template_layer is derived from the name when not provided.",
+    {
+      wi_id: z.string().uuid().describe("Work Item id"),
+      template_name: z.string().min(1).describe("Template name"),
+      template_version: z.string().min(1).describe("Template version"),
+      template_layer: WiLayerSchema.optional().describe("Override layer (else derived)"),
+    },
+    async (args) => {
+      const { wiLinkTemplate } = await import("./wi.js");
+      const db = getSupabaseClient();
+      return toText(await wiLinkTemplate(db, args, wiCtx));
+    }
+  );
+
+  // --- wi_pause ---
+  server.tool(
+    "wi_pause",
+    "Pause the active WI (frees the one-active slot for the agent).",
+    { wi_id: z.string().uuid().describe("Work Item id") },
+    async (args) => {
+      const { wiPause } = await import("./wi.js");
+      const db = getSupabaseClient();
+      return toText(await wiPause(db, args, wiCtx));
+    }
+  );
+
+  // --- wi_resume ---
+  server.tool(
+    "wi_resume",
+    "Resume a paused WI. Fails if another active WI already exists for the agent.",
+    { wi_id: z.string().uuid().describe("Work Item id") },
+    async (args) => {
+      const { wiResume } = await import("./wi.js");
+      const db = getSupabaseClient();
+      return toText(await wiResume(db, args, wiCtx));
+    }
+  );
+
+  // --- wi_switch ---
+  server.tool(
+    "wi_switch",
+    "Close the current active WI (status=done, auto_closed_by_switch) and open a new one. Explicit scope change — forces the agent to acknowledge the context shift.",
+    {
+      old_wi_id: z.string().uuid().describe("WI id to close"),
+      new_intent: z.string().min(1).describe("Intent for the new WI"),
+      new_template: z.string().optional().describe("Template name"),
+      new_template_version: z.string().optional().describe("Template version"),
+      new_template_layer: WiLayerSchema.optional().describe("Template layer"),
+    },
+    async (args) => {
+      const { wiSwitch } = await import("./wi.js");
+      const db = getSupabaseClient();
+      return toText(await wiSwitch(db, args, wiCtx));
+    }
+  );
 }

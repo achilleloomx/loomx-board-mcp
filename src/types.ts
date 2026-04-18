@@ -85,3 +85,48 @@ export type MenuStatus = (typeof MENU_STATUSES)[number];
 
 export const SCHOOL_MENU_SOURCES = ["manual", "scraper"] as const;
 export type SchoolMenuSource = (typeof SCHOOL_MENU_SOURCES)[number];
+
+// --- Work Items (loomx_work_items — governance-compliance D-024) ---
+
+export const WI_STATUSES = [
+  "active",
+  "paused",
+  "done",
+  "emergency",
+  "exempt",
+  "failed",
+] as const;
+export type WiStatus = (typeof WI_STATUSES)[number];
+
+export const WI_END_STATUSES = ["done", "failed", "waiting"] as const;
+export type WiEndStatus = (typeof WI_END_STATUSES)[number];
+
+export const WI_TEMPLATE_LAYERS = ["L1", "L2", "on-the-fly"] as const;
+export type WiTemplateLayer = (typeof WI_TEMPLATE_LAYERS)[number];
+
+export interface WorkItem {
+  id: string;
+  gtd_item_id: string;
+  agent_slug: string;
+  template_name: string | null;
+  template_version: string | null;
+  template_layer: WiTemplateLayer | null;
+  intent: string;
+  pre_conditions: Record<string, unknown>;
+  in_flight_state: {
+    files_touched?: string[];
+    tool_uses?: number;
+    notes?: string[];
+    [k: string]: unknown;
+  };
+  post_conditions_state: Record<string, unknown>;
+  side_effects_log: unknown[];
+  status: WiStatus;
+  emergency_reason: string | null;
+  exempt_reason: string | null;
+  failure_reason: string | null;
+  started_at: string;
+  ended_at: string | null;
+  last_checkpoint_at: string;
+  session_id: string | null;
+}

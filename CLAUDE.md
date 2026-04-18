@@ -143,6 +143,36 @@ Registrati solo se `HOME_FAMILY_ID` e `HOME_USER_ID` sono settati in env. Scoped
 >
 > **IMPORTANTE (D-017):** `HOME_USER_ID` deve essere un `auth.users(id)` Supabase valido — viene scritto in `home_shopping_items.added_by` / `checked_by` che sono FK verso `auth.users`. Se metti un `home_family_members.id` o un profile id, `home_grocery_add` fallisce con FK violation. Per Evaristo il valore corretto è `5a2df80b-aa01-4b68-976e-192d6ca4227e` (confermato dal DBA).
 
+### WI Tools (loomx_work_items — governance-compliance D-024)
+
+9 tool per gestire Work Items (istanza operativa di un GTD in esecuzione).
+Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (tool set).
+
+| Tool | Descrizione | Operazione DB |
+|---|---|---|
+| `wi_start` | Apre nuovo WI (auto-crea GTD se non dato); enforce 1 active/agent | INSERT loomx_work_items + UPDATE/INSERT loomx_items |
+| `wi_end` | Chiude WI (status=done/failed/waiting); cascada GTD | UPDATE loomx_work_items + loomx_items |
+| `wi_status` | Ritorna WI active per un agente | SELECT (agent_slug, status=active) |
+| `wi_query` | Query WI con filtri (owner auto-scoped per non-loomy) | SELECT con filtri |
+| `wi_checkpoint` | Merge files_touched, increment tool_uses, append notes | UPDATE in_flight_state JSONB |
+| `wi_link_template` | Aggancia template_name/version/layer a WI esistente | UPDATE template_* |
+| `wi_pause` | Sospende WI active → paused (libera slot active) | UPDATE status=paused |
+| `wi_resume` | Riprende WI paused → active (verifica 1 active/agent) | UPDATE status=active |
+| `wi_switch` | Chiude active (auto_closed_by_switch) + apre nuovo | UPDATE old + wi_start new |
+
+> **Regola ownership WI:** ogni agente può modificare solo i propri WI (`agent_slug = self`). Loomy può leggere/modificare qualsiasi WI.
+
+**Deviations dal design (§3/§5.2):**
+1. `wi_end` con `status='waiting'` — il design §5.2 lo ammette come end-status ma la CHECK di `loomx_work_items.status` non include `waiting`. Mapping applicato: WI → `paused`, GTD → `waiting` (documentato in `mapEndStatus`).
+2. `side_effects_pending` — il design menziona array pending separato; lo schema ha un solo `side_effects_log JSONB` (D-032). Le entry pending vengono scritte come `{pending: true, scheduled_at, payload}`; la skill session-manager v2 le convertirà in `{executed: true, ...}`.
+3. `wi_switch` marker `auto_closed_by_switch=true` scritto dentro `in_flight_state` JSONB (nessuna colonna dedicata in schema).
+4. `wi_end --failed` aggiunge `[BLOCKER] <reason>` in `loomx_items.body`; non manipola `loomx_item_tags` (richiederebbe lookup/insert su tabella separata — fuori scope).
+
+**Derivazione `template_layer`:** se non fornito esplicitamente (`wi_start` / `wi_link_template`), viene derivato da `template_name`:
+- ≤2 segmenti (`fix-bug`, `menu-plan`) → `L1`
+- 3+ segmenti (`fix-bug-frontend`, `deploy-vercel-staging`) → `L2`
+- `template_name` assente → `on-the-fly`
+
 ### Tipi di messaggio
 
 | Type | Uso |
