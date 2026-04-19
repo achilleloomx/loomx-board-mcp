@@ -17,3 +17,10 @@ Thumbs.db
 # Editor
 .vscode/
 .idea/
+
+# Claude Code local state (runtime, machine-specific)
+.claude/cache/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/*.bak*
+stderr.log

@@ -1476,8 +1476,11 @@ export function registerTools(
     },
     async (args) => {
       const { wiStart } = await import("./wi.js");
+      const { syncWiCache } = await import("./wiCache.js");
       const db = getSupabaseClient();
-      return toText(await wiStart(db, args, wiCtx));
+      const res = await wiStart(db, args, wiCtx);
+      if (res.ok) await syncWiCache(db, args.agent_slug ?? selfSlug);
+      return toText(res);
     }
   );
 
@@ -1494,8 +1497,14 @@ export function registerTools(
     },
     async (args) => {
       const { wiEnd } = await import("./wi.js");
+      const { syncWiCache, archiveWiToHistory } = await import("./wiCache.js");
       const db = getSupabaseClient();
-      return toText(await wiEnd(db, args, wiCtx));
+      const res = await wiEnd(db, args, wiCtx);
+      if (res.ok) {
+        await archiveWiToHistory(db, args.wi_id);
+        await syncWiCache(db, selfSlug);
+      }
+      return toText(res);
     }
   );
 
@@ -1543,8 +1552,11 @@ export function registerTools(
     },
     async (args) => {
       const { wiCheckpoint } = await import("./wi.js");
+      const { syncWiCache } = await import("./wiCache.js");
       const db = getSupabaseClient();
-      return toText(await wiCheckpoint(db, args, wiCtx));
+      const res = await wiCheckpoint(db, args, wiCtx);
+      if (res.ok) await syncWiCache(db, selfSlug);
+      return toText(res);
     }
   );
 
@@ -1560,8 +1572,11 @@ export function registerTools(
     },
     async (args) => {
       const { wiLinkTemplate } = await import("./wi.js");
+      const { syncWiCache } = await import("./wiCache.js");
       const db = getSupabaseClient();
-      return toText(await wiLinkTemplate(db, args, wiCtx));
+      const res = await wiLinkTemplate(db, args, wiCtx);
+      if (res.ok) await syncWiCache(db, selfSlug);
+      return toText(res);
     }
   );
 
@@ -1572,8 +1587,11 @@ export function registerTools(
     { wi_id: z.string().uuid().describe("Work Item id") },
     async (args) => {
       const { wiPause } = await import("./wi.js");
+      const { syncWiCache } = await import("./wiCache.js");
       const db = getSupabaseClient();
-      return toText(await wiPause(db, args, wiCtx));
+      const res = await wiPause(db, args, wiCtx);
+      if (res.ok) await syncWiCache(db, selfSlug);
+      return toText(res);
     }
   );
 
@@ -1584,8 +1602,11 @@ export function registerTools(
     { wi_id: z.string().uuid().describe("Work Item id") },
     async (args) => {
       const { wiResume } = await import("./wi.js");
+      const { syncWiCache } = await import("./wiCache.js");
       const db = getSupabaseClient();
-      return toText(await wiResume(db, args, wiCtx));
+      const res = await wiResume(db, args, wiCtx);
+      if (res.ok) await syncWiCache(db, selfSlug);
+      return toText(res);
     }
   );
 
@@ -1602,8 +1623,14 @@ export function registerTools(
     },
     async (args) => {
       const { wiSwitch } = await import("./wi.js");
+      const { syncWiCache, archiveWiToHistory } = await import("./wiCache.js");
       const db = getSupabaseClient();
-      return toText(await wiSwitch(db, args, wiCtx));
+      const res = await wiSwitch(db, args, wiCtx);
+      if (res.ok) {
+        await archiveWiToHistory(db, args.old_wi_id);
+        await syncWiCache(db, selfSlug);
+      }
+      return toText(res);
     }
   );
 }

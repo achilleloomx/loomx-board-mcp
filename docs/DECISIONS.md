@@ -230,4 +230,16 @@ Funzione euristica semplice in attesa del catalogo template completo (Fase 2.6 p
 
 **Strategia client-side vs colonne esplicite:** la rimozione del body avviene lato applicativo (`const { body, ...meta } = row`) anziché selezionando colonne esplicite in SQL. Questo è più robusto perché: (a) non dipende dallo schema esatto della view `board_overview` (il DBA può aggiungere colonne senza impattare il MCP); (b) zero modifiche al pg-shim (D-013). Il costo è un round-trip leggermente più grande (body fetch + drop), accettabile in questo contesto (dataset piccolo, tool già in stdio locale).
 
-*Watermark: D-020*
+---
+
+## D-021 — Cache locale WI scritta dal server MCP (fix gap governance D-024)
+
+Dopo ogni `wi_start` / `wi_end` / `wi_checkpoint` / `wi_link_template` / `wi_pause` / `wi_resume` / `wi_switch` il server scrive `.claude/cache/current-work-item.json` del project dir dell'agente chiamante (mirror del WI active). `wi_end` / `wi_switch` archiviano inoltre il WI chiuso in `.claude/cache/wi-history/<id>.json`.
+
+**Motivazione:** il design `hub/initiatives/governance-compliance/design.md §3.3` prevede cache-mirror scritto atomicamente da `wi-start/wi-end`. Il PreToolUse `governance-gate.sh` legge solo la cache locale. Originariamente la responsabilità era delegata alla skill session-manager v2, non ancora attiva su nessun agente: la cache non veniva mai scritta. Nelle sessioni dove il gate è deployato il blocco "no cache" funziona; in tutte le altre non c'è enforcement. Spostare la scrittura nel server MCP rimuove la dipendenza dalla skill e rende il flusso self-healing.
+
+**Implementazione:** `src/wiCache.ts` con `syncWiCache(db, agentSlug)` + `archiveWiToHistory(db, wiId)`. Project dir da `CLAUDE_PROJECT_DIR` con fallback a `process.cwd()`. Scrittura atomica tmp+rename, best-effort (errori su stderr, non propagano). Chiamate nei wrapper `tools.ts` per preservare la purezza dei pure handler di `wi.ts` già coperti da test.
+
+**Scoperta collaterale:** `governance-gate.sh` richiede `jq`. Su Windows Git Bash stock LoomX `jq` non è presente: il gate diventa permissivo (`command -v jq` fallisce → exit 0 con WARN), quindi resta safe solo il check "cache esiste / non esiste". Follow-up: o dichiarare `jq` requisito LoomX, o riscrivere il parser per i campi critici.
+
+*Watermark: D-021*
