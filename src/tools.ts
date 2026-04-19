@@ -98,7 +98,7 @@ export function registerTools(
   // --- board_inbox ---
   server.tool(
     "board_inbox",
-    "Read incoming messages for this agent (excludes archived)",
+    "Read incoming messages for this agent (excludes archived). preview_only=true (default) omits body to save tokens — use board_get(id) for full content.",
     {
       status: StatusFilterSchema.optional().describe(
         "Filter by status (default: all)"
@@ -111,8 +111,12 @@ export function registerTools(
         .max(100)
         .optional()
         .describe("Max messages to return (default: 20)"),
+      preview_only: z
+        .boolean()
+        .optional()
+        .describe("Omit body field (default: true). Set false to receive full body — avoid in batch."),
     },
-    async ({ status, tag, limit }) => {
+    async ({ status, tag, limit, preview_only }) => {
       const db = getSupabaseClient();
       let query = db
         .from(TABLE)
@@ -141,12 +145,16 @@ export function registerTools(
         };
       }
 
-      // Enrich with slugs for readability
-      const enriched = (data ?? []).map((msg) => ({
-        ...msg,
-        from_agent_slug: codeToSlug.get(msg.from_agent) ?? msg.from_agent,
-        to_agent_slug: codeToSlug.get(msg.to_agent) ?? msg.to_agent,
-      }));
+      const omitBody = preview_only !== false;
+      // Enrich with slugs for readability; strip body in preview mode
+      const enriched = (data ?? []).map((msg) => {
+        const { body, ...meta } = msg;
+        return {
+          ...(omitBody ? meta : msg),
+          from_agent_slug: codeToSlug.get(msg.from_agent) ?? msg.from_agent,
+          to_agent_slug: codeToSlug.get(msg.to_agent) ?? msg.to_agent,
+        };
+      });
 
       return {
         content: [
@@ -308,7 +316,7 @@ export function registerTools(
   // --- board_overview ---
   server.tool(
     "board_overview",
-    "View all board messages with enriched agent info (slugs, names)",
+    "View all board messages with enriched agent info. By default omits body to stay within token limits — use include_body=true or board_get(id) for full content.",
     {
       status: StatusFilterSchema.optional().describe(
         "Filter by status (default: all)"
@@ -319,15 +327,19 @@ export function registerTools(
         .min(1)
         .max(100)
         .optional()
-        .describe("Max messages to return (default: 50)"),
+        .describe("Max messages to return (default: 20)"),
+      include_body: z
+        .boolean()
+        .optional()
+        .describe("Include full message body (default: false — meta only)"),
     },
-    async ({ status, limit }) => {
+    async ({ status, limit, include_body }) => {
       const db = getSupabaseClient();
       let query = db
         .from(OVERVIEW_VIEW)
         .select("*")
         .order("created_at", { ascending: false })
-        .limit(limit ?? 50);
+        .limit(limit ?? 20);
 
       if (status) {
         query = query.eq("status", status);
@@ -344,16 +356,57 @@ export function registerTools(
         };
       }
 
+      const omitBody = !include_body;
+      const rows = omitBody
+        ? (data ?? []).map(({ body, ...meta }: any) => meta)
+        : (data ?? []);
+
       return {
         content: [
           {
             type: "text",
             text:
-              (data ?? []).length === 0
+              rows.length === 0
                 ? "No messages found."
-                : JSON.stringify(data, null, 2),
+                : JSON.stringify(rows, null, 2),
           },
         ],
+      };
+    }
+  );
+
+  // --- board_get ---
+  server.tool(
+    "board_get",
+    "Read a single message with full body. Use this after board_inbox/board_overview to load the full content of a specific message.",
+    {
+      message_id: z.string().uuid().describe("ID of the message to read"),
+    },
+    async ({ message_id }) => {
+      const db = getSupabaseClient();
+      const { data, error } = await db
+        .from(TABLE)
+        .select("*")
+        .eq("id", message_id)
+        .single();
+
+      if (error) {
+        return {
+          content: [
+            { type: "text", text: `Error reading message: ${error.message}` },
+          ],
+          isError: true,
+        };
+      }
+
+      const enriched = {
+        ...data,
+        from_agent_slug: codeToSlug.get(data.from_agent) ?? data.from_agent,
+        to_agent_slug: codeToSlug.get(data.to_agent) ?? data.to_agent,
+      };
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(enriched, null, 2) }],
       };
     }
   );
@@ -488,7 +541,7 @@ export function registerTools(
   // --- gtd_inbox ---
   server.tool(
     "gtd_inbox",
-    "Read GTD items owned by this agent, ordered by priority DESC then deadline ASC",
+    "Read GTD items owned by this agent, ordered by priority DESC then deadline ASC. By default omits body and adds body_preview (200 chars) — use gtd_get(id) for full content.",
     {
       status: GtdStatusSchema.optional().describe(
         "Filter by GTD status (default: all except done/trash)"
@@ -500,8 +553,12 @@ export function registerTools(
         .max(100)
         .optional()
         .describe("Max items to return (default: 20)"),
+      preview_only: z
+        .boolean()
+        .optional()
+        .describe("Omit body, include body_preview 200 chars (default: true). Set false for full body."),
     },
-    async ({ status, limit }) => {
+    async ({ status, limit, preview_only }) => {
       const db = getSupabaseClient();
       let query = db
         .from(GTD_TABLE)
@@ -528,14 +585,22 @@ export function registerTools(
         };
       }
 
+      const omitBody = preview_only !== false;
+      const rows = omitBody
+        ? (data ?? []).map(({ body, ...meta }: any) => ({
+            ...meta,
+            body_preview: body ? body.slice(0, 200) : null,
+          }))
+        : (data ?? []);
+
       return {
         content: [
           {
             type: "text",
             text:
-              (data ?? []).length === 0
+              rows.length === 0
                 ? "No GTD items found."
-                : JSON.stringify(data, null, 2),
+                : JSON.stringify(rows, null, 2),
           },
         ],
       };
@@ -688,7 +753,7 @@ export function registerTools(
   // --- gtd_query ---
   server.tool(
     "gtd_query",
-    `Flexible query for GTD items. ${isLoomy ? "As loomy, you can see all agents' items." : "Filters to your own items unless loomy."}`,
+    `Flexible query for GTD items. ${isLoomy ? "As loomy, you can see all agents' items." : "Filters to your own items unless loomy."} By default omits body and adds body_preview (200 chars) — use gtd_get(id) for full content.`,
     {
       owner: z.string().optional().describe("Filter by owner agent slug"),
       gtd_status: GtdStatusSchema.optional().describe("Filter by GTD status"),
@@ -700,9 +765,13 @@ export function registerTools(
         .min(1)
         .max(200)
         .optional()
-        .describe("Max items to return (default: 50)"),
+        .describe("Max items to return (default: 20)"),
+      preview_only: z
+        .boolean()
+        .optional()
+        .describe("Omit body, include body_preview 200 chars (default: true). Set false for full body."),
     },
-    async ({ owner, gtd_status, priority, project_id, limit }) => {
+    async ({ owner, gtd_status, priority, project_id, limit, preview_only }) => {
       const db = getSupabaseClient();
 
       // If project_id is specified, we need to join through loomx_item_projects
@@ -735,7 +804,7 @@ export function registerTools(
           .in("id", itemIds)
           .order("priority", { ascending: false })
           .order("deadline", { ascending: true, nullsFirst: false })
-          .limit(limit ?? 50);
+          .limit(limit ?? 20);
 
         // Ownership filter
         if (!isLoomy) {
@@ -758,14 +827,19 @@ export function registerTools(
           };
         }
 
+        const omitBodyP = preview_only !== false;
+        const rowsP = omitBodyP
+          ? (data ?? []).map(({ body, ...meta }: any) => ({ ...meta, body_preview: body ? body.slice(0, 200) : null }))
+          : (data ?? []);
+
         return {
           content: [
             {
               type: "text",
               text:
-                (data ?? []).length === 0
+                rowsP.length === 0
                   ? "No GTD items found."
-                  : JSON.stringify(data, null, 2),
+                  : JSON.stringify(rowsP, null, 2),
             },
           ],
         };
@@ -777,7 +851,7 @@ export function registerTools(
         .select("*")
         .order("priority", { ascending: false })
         .order("deadline", { ascending: true, nullsFirst: false })
-        .limit(limit ?? 50);
+        .limit(limit ?? 20);
 
       // Ownership filter
       if (!isLoomy) {
@@ -800,14 +874,19 @@ export function registerTools(
         };
       }
 
+      const omitBody = preview_only !== false;
+      const rows = omitBody
+        ? (data ?? []).map(({ body, ...meta }: any) => ({ ...meta, body_preview: body ? body.slice(0, 200) : null }))
+        : (data ?? []);
+
       return {
         content: [
           {
             type: "text",
             text:
-              (data ?? []).length === 0
+              rows.length === 0
                 ? "No GTD items found."
-                : JSON.stringify(data, null, 2),
+                : JSON.stringify(rows, null, 2),
           },
         ],
       };
@@ -859,6 +938,41 @@ export function registerTools(
             text: JSON.stringify({ ok: true, ...data }, null, 2),
           },
         ],
+      };
+    }
+  );
+
+  // --- gtd_get ---
+  server.tool(
+    "gtd_get",
+    "Read a single GTD item with full body. Only the owner can read (loomy can read any item).",
+    {
+      id: z.string().uuid().describe("GTD item ID"),
+    },
+    async ({ id }) => {
+      const db = getSupabaseClient();
+      let query = db
+        .from(GTD_TABLE)
+        .select("*")
+        .eq("id", id);
+
+      if (!isLoomy) {
+        query = query.eq("owner", selfSlug);
+      }
+
+      const { data, error } = await query.single();
+
+      if (error) {
+        return {
+          content: [
+            { type: "text", text: `Error reading GTD item: ${error.message}` },
+          ],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
       };
     }
   );

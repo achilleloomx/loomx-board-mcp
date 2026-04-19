@@ -207,4 +207,27 @@ Funzione euristica semplice in attesa del catalogo template completo (Fase 2.6 p
 
 ---
 
-*Watermark: D-019*
+---
+
+## D-020 — Preview mode: lista = meta, detail = on-demand (v0.3.0)
+
+**Problema originante:** l'agente `app` ha chiamato `board_overview` in sessione 2026-04-19 e ha ricevuto 132.596 chars in un unico tool result, superando il limite max token del harness. L'agente è andato in errore e ha dovuto salvare il risultato su file per leggerlo a chunk — anti-pattern.
+
+**Principio architetturale adottato:** lista = **preview** (meta + summary, mai body); detail = caricato on-demand per il singolo item rilevante. Default limit aggressivo (20) + paginazione via `offset` (futura).
+
+**Implementazione:**
+- `board_overview`: `include_body: bool = false` (default: body omesso client-side; limit 50→20).
+- `board_inbox`: `preview_only: bool = true` (default: body omesso; slug enrichment invariato).
+- `gtd_inbox` + `gtd_query`: `preview_only: bool = true` (default: body omesso, aggiunto `body_preview` prime 200 chars; limit 50→20 per `gtd_query`).
+- Nuovo tool `board_get(message_id)`: legge singolo messaggio con body completo.
+- Nuovo tool `gtd_get(id)`: legge singolo GTD item con body completo (ownership check).
+
+**Backward-compat:** tutti i flag hanno default che riducono l'output — gli agenti vecchi ricevono meno dati (desiderato) ma nessuna breaking change di schema. `include_body=true` / `preview_only=false` ripristinano il comportamento pre-v0.3.0.
+
+**Misure smoke test post-deploy:**
+- `board_overview` default: 13.373 chars per 20 msg (era 132k su limit 50 — ~10x riduzione).
+- `board_inbox preview_only=true` 20 msg: 11.124 chars.
+
+**Strategia client-side vs colonne esplicite:** la rimozione del body avviene lato applicativo (`const { body, ...meta } = row`) anziché selezionando colonne esplicite in SQL. Questo è più robusto perché: (a) non dipende dallo schema esatto della view `board_overview` (il DBA può aggiungere colonne senza impattare il MCP); (b) zero modifiche al pg-shim (D-013). Il costo è un round-trip leggermente più grande (body fetch + drop), accettabile in questo contesto (dataset piccolo, tool già in stdio locale).
+
+*Watermark: D-020*
