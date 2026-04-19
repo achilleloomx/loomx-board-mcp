@@ -4,6 +4,19 @@
 
 ---
 
+## Sessione #13 — 2026-04-19
+
+**Obiettivo:** Commit e build del fix D-021 (cache WI locale + governance gate hook), preparato in sessione precedente ma non committato.
+**Completato:**
+- **Commit `f3cfc7a`** su master: `src/wiCache.ts` (syncWiCache + archiveWiToHistory), `src/tools.ts` (hook nei wrapper wi_*), `.claude/hooks/governance-gate.sh`, `.claude/settings.json`, `tests/smoke-gate.sh`, `docs/DECISIONS.md` (D-021), `.gitignore` (esclusioni .claude/cache/).
+- **Build**: `npm run build` — zero errori TypeScript, `dist/wiCache.js` presente.
+- **Smoke test gate**: test 1 (block senza cache) ✅, test 2 (pass con WI active) ✅, test 3/4 (mutazioni jq) ❌ perché `jq` non installato in Git Bash Windows — expected, documentato in D-021 "Scoperta collaterale".
+- **MCP smoke test live** (wi_start→cache→wi_end→history): non eseguibile in questo repo (`.mcp.json` placeholder), da eseguire su istanza agente consumer reale.
+**Decisioni prese:** nessuna nuova (D-021 già in DECISIONS.md).
+**Blocchi / note:** `jq` non disponibile in Git Bash stock Windows — gate permissivo per test 3/4. Follow-up già documentato in D-021.
+
+---
+
 ## Sessione #12 — 2026-04-19
 
 **Obiettivo:** Registrare nuovo agente `gardenstone` (Gardenstone SRL Lucca) — primo cliente pagante LoomX Tracker.
