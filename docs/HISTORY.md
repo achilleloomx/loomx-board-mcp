@@ -4,6 +4,31 @@
 
 ---
 
+## Sessione #11 — 2026-04-19
+
+**Obiettivo:** Implementare preview mode per board/GTD tools (v0.3.0) — ridurre output token overflow segnalato dall'agente `app` su `board_overview` (132k chars su dataset ~70 msg).
+**Completato:**
+- `board_overview`: aggiunto param `include_body: bool = false`. Default: body omesso client-side. Limite default 50 → 20. Backward-compat: `include_body=true` restituisce schema invariato.
+- `board_inbox`: aggiunto param `preview_only: bool = true`. Default: body omesso, slug enrichment mantenuto. `preview_only=false` per body completo (uso esplicito).
+- `gtd_inbox`: aggiunto param `preview_only: bool = true`. Default: body omesso, aggiunto campo `body_preview` (prime 200 chars). `preview_only=false` per body completo.
+- `gtd_query`: stessa logica `preview_only` di `gtd_inbox`. Limite default 50 → 20 per entrambi i code path (con e senza `project_id`).
+- Nuovo tool `board_get(message_id)`: legge singolo messaggio con body completo + slug enrichment.
+- Nuovo tool `gtd_get(id)`: legge singolo item GTD con body completo. Ownership check (non-loomy solo propri item).
+- `package.json`: version 0.2.0 → 0.3.0.
+- Build TypeScript: zero errori.
+
+**Smoke test (Supabase live):**
+- `board_overview` default (no body, limit 20): **13.373 chars** (era 132k+ — riduzione ~10x).
+- `board_overview include_body=true` (backward compat, limit 20): 57k chars.
+- `board_inbox preview_only=true` (20 msg): **11.124 chars**.
+- `board_inbox preview_only=false` (20 msg con body): 55k chars.
+
+**Decisioni prese:** D-020 (preview mode — principio lista/detail).
+**Blocchi / note:** MCP board non connesso (`.mcp.json` placeholder) — niente `wi_start`/`board_inbox` live; WI gate D-024 non eseguito per impossibilità tecnica, documentato in commit message.
+**Prossima sessione:** Comunicare ai consumer (app, assistant, loomy) i nuovi default breaking-friendly — board_overview ora ritorna meno dati di default. Smoke WI tools live ancora pendente (sessione #10).
+
+---
+
 ## Sessione #10 — 2026-04-19
 
 **Obiettivo:** Implementare i 9 tool MCP per Work Items (iniziativa governance-compliance D-024). Pre-condition: tabella `loomx_work_items` già LIVE (migration DBA 20260419150000, RLS attive).

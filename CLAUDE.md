@@ -4,6 +4,8 @@
 > Sei lo **sviluppatore del Board MCP Server** per il progetto LoomX Home.
 > Standard di riferimento: `../../../00. LoomX Consulting/AGENT-STANDARD.md`
 
+> **Task tracking**: GTD nel DB (`loomx_items`, D-004) + Work Items (D-024). `docs/TODO.md` deprecato, non creare ne' aggiornare.
+
 ---
 
 ## Agente
@@ -87,7 +89,6 @@ loomx-board-mcp/
 │   ├── tools.ts           ← board_* + gtd_* + home_* tool definitions
 │   └── types.ts           ← BoardMessage, GtdStatus, MealType, etc.
 ├── docs/
-│   ├── TODO.md            ← task dello sviluppatore MCP
 │   ├── DECISIONS.md       ← decisioni architetturali del server
 │   └── HISTORY.md         ← storico sessioni
 └── .skills/               ← skill library (git submodule)
@@ -97,29 +98,35 @@ loomx-board-mcp/
 
 ## MCP Tools
 
-14 tool base esposti a ogni agente + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
+16 tool base esposti a ogni agente + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
 
 ### Board Tools (board_messages)
+
+> **v0.3.0 preview mode (D-020):** `board_inbox` e `board_overview` omettono il body per default. Usa `board_get(id)` per il body completo di un messaggio specifico.
 
 | Tool | Descrizione | Operazione DB |
 |---|---|---|
 | `board_send` | Invia messaggio con summary e tags opzionali | INSERT (from_agent = self) |
 | `board_broadcast` | Invia messaggio a tutti gli agenti attivi | RPC board_broadcast |
-| `board_inbox` | Leggi messaggi in arrivo (esclusi archiviati, filtro tag) | SELECT (to_agent = self) |
+| `board_inbox` | Leggi messaggi in arrivo — **`preview_only=true` default** (no body) | SELECT (to_agent = self) |
+| `board_get` | Body completo di un singolo messaggio (detail on-demand) | SELECT by id |
 | `board_ack` | Conferma ricezione messaggio | UPDATE status → acknowledged |
 | `board_update_status` | Aggiorna stato messaggio | UPDATE status → in_progress / done / cancelled |
-| `board_overview` | Vista globale messaggi con info agenti arricchite | SELECT da view board_overview |
+| `board_overview` | Vista globale — **`include_body=false` default**, limit 20 | SELECT da view board_overview |
 | `board_thread` | Recupera thread di conversazione (messaggio originale + risposte) | SELECT (id/ref_id match) |
 | `board_archive` | Archivia messaggi done/cancelled piu' vecchi di N giorni | RPC board_archive_old |
 
 ### GTD Tools (loomx_items)
 
+> **v0.3.0 preview mode (D-020):** `gtd_inbox` e `gtd_query` omettono body per default e aggiungono `body_preview` (200 chars). Usa `gtd_get(id)` per il body completo.
+
 | Tool | Descrizione | Operazione DB |
 |---|---|---|
-| `gtd_inbox` | Leggi item GTD dell'agente (priority DESC, deadline ASC) | SELECT (owner = self) |
+| `gtd_inbox` | Leggi item GTD dell'agente — **`preview_only=true` default** (body_preview 200 chars) | SELECT (owner = self) |
+| `gtd_get` | Body completo di un singolo GTD item (detail on-demand) | SELECT by id |
 | `gtd_add` | Crea nuovo item GTD | INSERT |
 | `gtd_update` | Aggiorna item esistente (owner-only, loomy puo' tutto) | UPDATE |
-| `gtd_query` | Query flessibile con filtri owner/status/priority/project | SELECT + JOIN |
+| `gtd_query` | Query flessibile — **`preview_only=true` default**, limit 20 | SELECT + JOIN |
 | `gtd_complete` | Shortcut per segnare item come done | UPDATE (gtd_status = done) |
 
 > **Regola ownership GTD:** ogni agente puo' modificare solo i propri item (owner = self). Loomy puo' leggere e modificare item di qualsiasi agente.
