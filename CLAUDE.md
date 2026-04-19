@@ -206,6 +206,7 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 | `sintesi-impianti` | Consulting | — |
 | `mcpromo` | Consulting — MCpromo (Antonelli) | 01. Progetti/20. MCpromo |
 | `marketing` | Muse — Marketing Agent | hub/marketing/ |
+| `gardenstone` | Consulting — Gardenstone SRL Lucca (primo cliente pagante Tracker) | — |
 
 ---
 

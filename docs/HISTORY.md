@@ -4,6 +4,18 @@
 
 ---
 
+## Sessione #12 — 2026-04-19
+
+**Obiettivo:** Registrare nuovo agente `gardenstone` (Gardenstone SRL Lucca) — primo cliente pagante LoomX Tracker.
+**Completato:**
+- **Nessuna modifica TypeScript necessaria.** La validazione recipient in `board_send` è completamente DB-driven (`resolveAgentRegistry` carica `board_agents active=true` all'avvio). Il DBA ha già registrato `gardenstone` in `board_agents`. Basta un restart del server MCP.
+- `CLAUDE.md`: aggiunto `gardenstone` alla tabella Agent IDs.
+**Decisioni prese:** nessuna (architettura già corretta per D-005).
+**Blocchi / note:** MCP non connesso (`.mcp.json` placeholder) — `wi_start`/`board_send` non invocabili live; WI gate manuale non eseguibile, stesso pattern di sessione #11.
+**Deploy:** restart MCP richiesto su tutte le istanze agente che vogliono inviare a / ricevere da `gardenstone`.
+
+---
+
 ## Sessione #11 — 2026-04-19
 
 **Obiettivo:** Implementare preview mode per board/GTD tools (v0.3.0) — ridurre output token overflow segnalato dall'agente `app` su `board_overview` (132k chars su dataset ~70 msg).
