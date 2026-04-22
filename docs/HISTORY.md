@@ -4,6 +4,23 @@
 
 ---
 
+## Sessione #14 — 2026-04-22
+
+**Obiettivo:** Registrare nuovo agente `detective` (Fletcher) — abilitare full-op come recipient `board_send`.
+**Completato:**
+- **Analisi codice:** confermato D-007 — validazione recipient 100% DB-driven (`resolveAgentRegistry` carica `board_agents active=true` all'avvio). Zero modifiche TypeScript/codice necessarie.
+- **CLAUDE.md:** aggiunto `detective` alla tabella Agent IDs.
+- **README.md:** creato (non esisteva) con lista completa recipient incluso `detective`, tool MCP, configurazione, stack.
+- **DBA request**: richiesta INSERT in `board_agents` per `detective` (slug=detective, label='Fletcher — Detective / People & Companies research', active=true). Vedi nota blocker sotto.
+**Decisioni prese:** nessuna nuova (architettura corretta per D-007 — zero-code per nuovi agenti).
+**Blocchi / note:**
+- MCP non connesso in questa sessione (`.mcp.json` placeholder) — `wi_start`/`board_send` non invocabili live. WI gate bypassato (stesso pattern sessioni #12/13).
+- `detective` non ancora in `board_agents` (pending DBA INSERT). Finché non registrato: `board_send(to: 'detective')` e `--agent detective` falliscono con "Agent not found in registry".
+- `board_send` a Loomy (report done) da eseguire su istanza agente con credenziali reali.
+**Deploy:** dopo DBA INSERT, restart MCP su tutti gli agenti che vogliono inviare a / ricevere da `detective`. No rebuild necessario.
+
+---
+
 ## Sessione #13 — 2026-04-19
 
 **Obiettivo:** Commit e build del fix D-021 (cache WI locale + governance gate hook), preparato in sessione precedente ma non committato.
