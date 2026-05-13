@@ -31,6 +31,8 @@ La validazione dei recipient è dinamica: il server la costruisce all'avvio dal 
 | `loomx-tracker` | PO Tracker (ex-Commercialisti) | LoomXCommercialisti |
 | `gardenstone` | Consulting — Gardenstone SRL Lucca | — |
 | `detective` | Fletcher — Detective / People & Companies research | hub/detective/ |
+| `loomx-controlling` | PO LoomX Controlling | achilleloomx/LoomXControlling |
+| `pieroni` | Consulting — Pieroni Edilizia | — |
 
 > Per aggiungere un nuovo agente: INSERT in `board_agents` via DBA. Zero modifiche al codice.
 

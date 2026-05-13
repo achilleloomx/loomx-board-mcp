@@ -4,6 +4,24 @@
 
 ---
 
+## Sessione #15 — 2026-05-13
+
+**Obiettivo:** Registrare agenti `loomx-controlling` e `pieroni` nella mesh MCP.
+**Completato:**
+- **Audit codice:** confermato D-007 — validazione recipient 100% DB-driven (`resolveAgentRegistry` carica `board_agents active=true` all'avvio). Zero modifiche TypeScript necessarie anche per questo onboarding.
+- **CLAUDE.md:** aggiunti `loomx-controlling` e `pieroni` alla tabella Agent IDs.
+- **README.md:** aggiunti `loomx-controlling` e `pieroni` alla tabella agenti registrati.
+- **DBA request:** richiesta INSERT in `board_agents` per entrambi gli agenti (pending — vedi nota).
+**Decisioni prese:** nessuna nuova (pattern identico a sessione #14).
+**Blocchi / note:**
+- MCP non connesso in questa sessione (`.mcp.json` placeholder) — WI gate gestito via cache smoke-test preesistente.
+- `loomx-controlling`: registrato 2026-05-13 (D-036), repo achilleloomx/LoomXControlling, group=consulting, role=product-owner. `.mcp.json` già configurato con `--agent loomx-controlling`.
+- `pieroni`: registrato 2026-05-10, consulting Pieroni Edilizia.
+- Entrambi non ancora in `board_agents` (pending DBA INSERT). Finché non inseriti: `board_send(to: 'loomx-controlling'/'pieroni')` e `--agent loomx-controlling/pieroni` falliscono con "Agent not found in registry".
+**Deploy:** dopo DBA INSERT, restart MCP su tutti gli agenti che vogliono inviare a / ricevere da i nuovi agenti. No rebuild necessario.
+
+---
+
 ## Sessione #14 — 2026-04-22
 
 **Obiettivo:** Registrare nuovo agente `detective` (Fletcher) — abilitare full-op come recipient `board_send`.

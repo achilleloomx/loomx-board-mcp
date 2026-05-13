@@ -208,6 +208,8 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 | `marketing` | Muse — Marketing Agent | hub/marketing/ |
 | `gardenstone` | Consulting — Gardenstone SRL Lucca (primo cliente pagante Tracker) | — |
 | `detective` | Fletcher — Detective / People & Companies research | hub/detective/ |
+| `loomx-controlling` | PO LoomX Controlling | achilleloomx/LoomXControlling (01. Progetti/23. LoomX Controlling/) |
+| `pieroni` | Consulting — Pieroni Edilizia | — |
 
 ---
 
