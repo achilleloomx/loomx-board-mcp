@@ -977,6 +977,186 @@ export function registerTools(
     }
   );
 
+  const GTD_ITEM_AGENTS_TABLE = "loomx_item_agents";
+
+  // --- gtd_link_agent ---
+  server.tool(
+    "gtd_link_agent",
+    "Add an agent as co-engaged on a GTD item (collaborator/watcher). Only the item owner or loomy can link agents.",
+    {
+      item_id: z.string().uuid().describe("GTD item ID"),
+      agent_slug: z.string().min(1).describe("Slug of the agent to link"),
+      role: z.string().optional().describe("Co-engagement role (default: collaborator). Suggested values: collaborator, watcher"),
+    },
+    async ({ item_id, agent_slug, role }) => {
+      const db = getSupabaseClient();
+
+      if (!isLoomy) {
+        const { data: item, error: itemErr } = await db
+          .from(GTD_TABLE)
+          .select("owner")
+          .eq("id", item_id)
+          .single();
+        if (itemErr || !item) {
+          return {
+            content: [{ type: "text", text: `Error: GTD item not found or access denied` }],
+            isError: true,
+          };
+        }
+        if (item.owner !== selfSlug) {
+          return {
+            content: [{ type: "text", text: `Error: only the item owner (${item.owner}) or loomy can link agents` }],
+            isError: true,
+          };
+        }
+      }
+
+      if (!slugToCode.has(agent_slug)) {
+        return {
+          content: [{ type: "text", text: `Error: unknown agent slug "${agent_slug}". Valid: ${validSlugs.join(", ")}` }],
+          isError: true,
+        };
+      }
+
+      const { data, error } = await db
+        .from(GTD_ITEM_AGENTS_TABLE)
+        .insert({
+          item_id,
+          agent_slug,
+          role: role ?? "collaborator",
+          added_by: selfSlug,
+        })
+        .select("item_id, agent_slug, role, added_by, added_at")
+        .single();
+
+      if (error) {
+        return {
+          content: [{ type: "text", text: `Error linking agent: ${error.message}` }],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [{ type: "text", text: JSON.stringify({ ok: true, ...data }, null, 2) }],
+      };
+    }
+  );
+
+  // --- gtd_unlink_agent ---
+  server.tool(
+    "gtd_unlink_agent",
+    "Remove a co-engaged agent from a GTD item. Only the item owner or loomy can unlink agents.",
+    {
+      item_id: z.string().uuid().describe("GTD item ID"),
+      agent_slug: z.string().min(1).describe("Slug of the agent to unlink"),
+    },
+    async ({ item_id, agent_slug }) => {
+      const db = getSupabaseClient();
+
+      if (!isLoomy) {
+        const { data: item, error: itemErr } = await db
+          .from(GTD_TABLE)
+          .select("owner")
+          .eq("id", item_id)
+          .single();
+        if (itemErr || !item) {
+          return {
+            content: [{ type: "text", text: `Error: GTD item not found or access denied` }],
+            isError: true,
+          };
+        }
+        if (item.owner !== selfSlug) {
+          return {
+            content: [{ type: "text", text: `Error: only the item owner (${item.owner}) or loomy can unlink agents` }],
+            isError: true,
+          };
+        }
+      }
+
+      const { data, error } = await db
+        .from(GTD_ITEM_AGENTS_TABLE)
+        .delete()
+        .eq("item_id", item_id)
+        .eq("agent_slug", agent_slug)
+        .select("item_id, agent_slug")
+        .single();
+
+      if (error) {
+        return {
+          content: [{ type: "text", text: `Error unlinking agent: ${error.message}` }],
+          isError: true,
+        };
+      }
+
+      if (!data) {
+        return {
+          content: [{ type: "text", text: `Error: no link found for item ${item_id} / agent ${agent_slug}` }],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [{ type: "text", text: JSON.stringify({ ok: true, unlinked: data }, null, 2) }],
+      };
+    }
+  );
+
+  // --- gtd_list_agents ---
+  server.tool(
+    "gtd_list_agents",
+    "List all co-engaged agents on a GTD item. Accessible by the item owner, any co-engaged agent, or loomy.",
+    {
+      item_id: z.string().uuid().describe("GTD item ID"),
+    },
+    async ({ item_id }) => {
+      const db = getSupabaseClient();
+
+      if (!isLoomy) {
+        // Verify the caller is the item owner OR is co-engaged on this item
+        const { data: item } = await db
+          .from(GTD_TABLE)
+          .select("owner")
+          .eq("id", item_id)
+          .single();
+
+        const isOwner = item?.owner === selfSlug;
+
+        if (!isOwner) {
+          const { data: link } = await db
+            .from(GTD_ITEM_AGENTS_TABLE)
+            .select("agent_slug")
+            .eq("item_id", item_id)
+            .eq("agent_slug", selfSlug)
+            .single();
+
+          if (!link) {
+            return {
+              content: [{ type: "text", text: `Error: access denied — you are neither the item owner nor co-engaged on this item` }],
+              isError: true,
+            };
+          }
+        }
+      }
+
+      const { data, error } = await db
+        .from(GTD_ITEM_AGENTS_TABLE)
+        .select("agent_slug, role, added_by, added_at")
+        .eq("item_id", item_id)
+        .order("added_at");
+
+      if (error) {
+        return {
+          content: [{ type: "text", text: `Error listing agents: ${error.message}` }],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [{ type: "text", text: JSON.stringify({ item_id, agents: data ?? [] }, null, 2) }],
+      };
+    }
+  );
+
   // =========================================================================
   // Home Tools (home_* tables — family data for Evaristo / Home Assistant)
   // Scoped by HOME_FAMILY_ID + HOME_USER_ID env vars.

@@ -243,3 +243,25 @@ Dopo ogni `wi_start` / `wi_end` / `wi_checkpoint` / `wi_link_template` / `wi_pau
 **Scoperta collaterale:** `governance-gate.sh` richiede `jq`. Su Windows Git Bash stock LoomX `jq` non è presente: il gate diventa permissivo (`command -v jq` fallisce → exit 0 con WARN), quindi resta safe solo il check "cache esiste / non esiste". Follow-up: o dichiarare `jq` requisito LoomX, o riscrivere il parser per i campi critici.
 
 *Watermark: D-021*
+
+---
+
+## D-022 — Co-engagement tools: gtd_link_agent, gtd_unlink_agent, gtd_list_agents (v0.4.0)
+
+Implementati 3 tool per gestire la junction table `loomx_item_agents` (migration DBA 20260407130000). La tabella era live su Supabase dal 2026-04-07 ma nessun tool MCP la gestiva.
+
+**Schema referenziato:**
+```sql
+loomx_item_agents (item_id UUID, agent_slug TEXT, role TEXT DEFAULT 'collaborator',
+                   added_by TEXT, added_at TIMESTAMPTZ, PRIMARY KEY (item_id, agent_slug))
+```
+
+**Ownership rules (applicative, stesso pattern D-011):**
+- `gtd_link_agent` / `gtd_unlink_agent`: solo il proprietario dell'item (owner) o loomy possono modificare i link.
+- `gtd_list_agents`: il proprietario, qualsiasi agente co-engaged sull'item, o loomy possono leggere.
+
+**Motivo:** la migration DBA nota esplicitamente "La gestione dei link è prerogativa di Loomy (service_role) o di tool MCP dedicati che verranno aggiunti da Postman in iterazione successiva". Questi tool sono l'iterazione attesa.
+
+**Validation `agent_slug`**: usa la mappa `slugToCode` già in memoria (D-007) — no query aggiuntive per validare lo slug.
+
+**Delete nel pg-shim**: `delete()` già presente in `src/pg-shim.ts` (D-015). Nessuna modifica allo shim necessaria.

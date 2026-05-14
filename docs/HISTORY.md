@@ -4,6 +4,31 @@
 
 ---
 
+## Sessione #16 — 2026-05-14
+
+**Obiettivo:** Due task GTD pending autonomi: env var INTERVIEW_MCP_DISABLE_ACK su loomx-interview-mcp + tool co-engagement GTD sul board-mcp.
+**Completato:**
+
+**Task 1 — loomx-interview-mcp: INTERVIEW_MCP_DISABLE_ACK**
+- `src/config.ts`: aggiunto `disableAck: boolean` all'interfaccia `InterviewConfig`; letto da `INTERVIEW_MCP_DISABLE_ACK=true|1`.
+- `src/bot.ts`: accetta `disableAck=false` come parametro; il `ctx.reply("✓ Ricevuto")` viene saltato se attivo.
+- `src/index.ts`: passa `config.disableAck` a `createBot`.
+- Build passata, pushato su `origin/main` (repo single-branch, nessuna PR necessaria).
+
+**Task 2 — board-mcp: tool co-engagement GTD (v0.4.0)**
+- Aggiunti 3 tool in `src/tools.ts` dopo `gtd_get`: `gtd_link_agent`, `gtd_unlink_agent`, `gtd_list_agents`.
+- Tabella target: `loomx_item_agents` (migration DBA 20260407130000). Schema: `(item_id, agent_slug, role, added_by, added_at)`.
+- Ownership rules (D-022): link/unlink riservato a owner o loomy; list accessibile a owner, co-engaged, o loomy.
+- Validation `agent_slug` via mappa `slugToCode` in memoria (D-007).
+- `delete()` già nel pg-shim (D-015) — nessuna modifica allo shim.
+- Build pulita. 27/27 test passati.
+- Version bump 0.3.0 → 0.4.0. DECISIONS.md D-022 aggiunto. CLAUDE.md tool count 16→19.
+
+**Decisioni prese:** D-022 (co-engagement tools ownership + implementation choices).
+**Blocchi / note:** Board MCP non connesso in questa sessione — WI/GTD non aggiornati via tool MCP.
+
+---
+
 ## Sessione #15 — 2026-05-13
 
 **Obiettivo:** Registrare agenti `loomx-controlling` e `pieroni` nella mesh MCP.

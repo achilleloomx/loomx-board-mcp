@@ -98,7 +98,7 @@ loomx-board-mcp/
 
 ## MCP Tools
 
-16 tool base esposti a ogni agente + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
+19 tool base esposti a ogni agente + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
 
 ### Board Tools (board_messages)
 
@@ -128,6 +128,9 @@ loomx-board-mcp/
 | `gtd_update` | Aggiorna item esistente (owner-only, loomy puo' tutto) | UPDATE |
 | `gtd_query` | Query flessibile — **`preview_only=true` default**, limit 20 | SELECT + JOIN |
 | `gtd_complete` | Shortcut per segnare item come done | UPDATE (gtd_status = done) |
+| `gtd_link_agent` | Aggancia un agente come co-engaged su un item (owner o loomy only) | INSERT loomx_item_agents |
+| `gtd_unlink_agent` | Rimuove un agente co-engaged da un item (owner o loomy only) | DELETE loomx_item_agents |
+| `gtd_list_agents` | Lista agenti co-engaged su un item (owner, co-engaged, o loomy) | SELECT loomx_item_agents |
 
 > **Regola ownership GTD:** ogni agente puo' modificare solo i propri item (owner = self). Loomy puo' leggere e modificare item di qualsiasi agente.
 
