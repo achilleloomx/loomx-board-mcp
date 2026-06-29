@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "board": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["dist/index.js", "--agent", "board-mcp"],
+      "env": {
+        "SUPABASE_URL": "https://xxxxx.supabase.co",
+        "SUPABASE_SERVICE_ROLE_KEY": "eyJ..."
+      }
+    }
+  }
+}

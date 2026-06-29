@@ -1,0 +1,26 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+
+# Environment
+.env
+
+# MCP config (contains secrets)
+.mcp.json
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+
+# Claude Code local state (runtime, machine-specific)
+.claude/cache/
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+.claude/*.bak*
+stderr.log

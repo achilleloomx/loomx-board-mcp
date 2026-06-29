@@ -1,0 +1,7 @@
+{
+  "$schema": "https://loomx.it/schemas/governance-manifest/v1.json",
+  "repo": "achilleloomx/loomx-board-mcp",
+  "paths": {
+    ".": "596cd5fc-d385-4763-9c52-6fb48738d7dc"
+  }
+}
