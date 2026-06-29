@@ -161,7 +161,7 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 | Tool | Descrizione | Operazione DB |
 |---|---|---|
 | `wi_start` | Apre nuovo WI (auto-crea GTD se non dato); enforce 1 active/agent | INSERT loomx_work_items + UPDATE/INSERT loomx_items |
-| `wi_end` | Chiude WI (status=done/failed/waiting); cascada GTD | UPDATE loomx_work_items + loomx_items |
+| `wi_end` | Chiude WI (status=done/failed/waiting); cascada GTD; gate durable (D-074) | UPDATE loomx_work_items + loomx_items |
 | `wi_status` | Ritorna WI active per un agente | SELECT (agent_slug, status=active) |
 | `wi_query` | Query WI con filtri (owner auto-scoped per non-loomy) | SELECT con filtri |
 | `wi_checkpoint` | Merge files_touched, increment tool_uses, append notes | UPDATE in_flight_state JSONB |
@@ -179,6 +179,18 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 4. `wi_end --failed` APPENDE `[BLOCKER] <reason>` al body GTD esistente (non sovrascrive); non manipola `loomx_item_tags` (richiederebbe lookup/insert su tabella separata — fuori scope).
 5. **Broker WI (intenzionale):** `loomy-assistant` NON ha poteri loomy sui WI (`isLoomy=false` in `WiContext`). WI = dichiarazione governance formale (D-024); solo `loomy` può aprire/chiudere WI per altri agenti. Il broker ha poteri GTD cross-agente ma non WI.
 6. **`recurrence_days` re-arm (esterno):** `gtd_complete` porta solo a done+completed_at. Il re-arm (creazione GTD successivo dopo N giorni) è responsabilità del reconciler (dev-hq), non del board-mcp.
+
+**`wi_end` params Phase 1 D-074/D-075 (v0.9.0):**
+| Param | Tipo | Effetto |
+|---|---|---|
+| `force_ephemeral` | `boolean?` | Bypassa gate durable (gate_bypassed=true in risposta) |
+| `force_reason` | `string?` | Motivazione del bypass (log) |
+| `arm_gtd_ids` | `string[]?` | UUID GTD da armare (autopilot=true) dopo close; soft-warn su missing/unowned |
+| `post_runtime_request` | `enum?` | Scrive runtime request atomicamente dopo close (continue/clear/kill/model/none) |
+| `platform_contribution` | `string?` | Testo contributo piattaforma: dev-* → forge, analyst-* → atlas via board_message info |
+
+**Gate durable (D-074):** `wi_end(status='done')` su WI con `template_name` NON in `EPHEMERAL_TEMPLATES` e layer ≠ `on-the-fly` richiede ≥1 link `doc_item_wi_links` verso un `requirement` o `sdes_entry`. Fallisce con errore se il gate non passa.
+`EPHEMERAL_TEMPLATES = ['session-meta', 'triage', 'conversation']` — questi WI e quelli on-the-fly bypassano automaticamente il gate.
 
 **Derivazione `template_layer`:** se non fornito esplicitamente (`wi_start` / `wi_link_template`), viene derivato da `template_name`:
 - ≤2 segmenti (`fix-bug`, `menu-plan`) → `L1`
