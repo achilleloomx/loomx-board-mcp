@@ -715,6 +715,26 @@ export function registerTools(
       }
 
       const db = getSupabaseClient();
+
+      // D-066 dedup: if source_ref given, return existing GTD (owner+source_ref) instead of inserting
+      if (source_ref) {
+        const { data: existing } = await db
+          .from(GTD_TABLE)
+          .select("id, title, gtd_status, owner, created_at")
+          .eq("owner", targetOwner)
+          .eq("source_ref", source_ref)
+          .not("gtd_status", "eq", "trash")
+          .maybeSingle();
+        if (existing) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ ok: true, duplicate: true, ...existing }, null, 2),
+            }],
+          };
+        }
+      }
+
       const insertPayload: Record<string, unknown> = {
         title,
         body: body ?? null,
@@ -849,11 +869,12 @@ export function registerTools(
   // --- gtd_query ---
   server.tool(
     "gtd_query",
-    `Flexible query for GTD items. ${isLoomy ? "As loomy, you can see all agents' items." : "Filters to your own items unless loomy."} By default omits body and adds body_preview (200 chars) — use gtd_get(id) for full content.`,
+    `Flexible query for GTD items. ${isLoomy || isBroker ? "Cross-agent read enabled (loomy/broker)." : "Filters to your own items."} By default omits body and adds body_preview (200 chars) — use gtd_get(id) for full content.`,
     {
       owner: z.string().optional().describe("Filter by owner agent slug"),
       gtd_status: GtdStatusSchema.optional().describe("Filter by GTD status"),
       priority: GtdPrioritySchema.optional().describe("Filter by priority"),
+      source_ref: z.string().optional().describe("Filter by source reference ID (D-066 dedup check — loomy/broker can query cross-owner)"),
       project_id: z.string().uuid().optional().describe("Filter by project ID (via loomx_item_projects)"),
       limit: z
         .number()
@@ -867,7 +888,7 @@ export function registerTools(
         .optional()
         .describe("Omit body, include body_preview 200 chars (default: true). Set false for full body."),
     },
-    async ({ owner, gtd_status, priority, project_id, limit, preview_only }) => {
+    async ({ owner, gtd_status, priority, source_ref, project_id, limit, preview_only }) => {
       const db = getSupabaseClient();
 
       // If project_id is specified, we need to join through loomx_item_projects
@@ -902,15 +923,16 @@ export function registerTools(
           .order("deadline", { ascending: true, nullsFirst: false })
           .limit(limit ?? 20);
 
-        // Ownership filter
-        if (!isLoomy) {
+        // Ownership filter: loomy/broker get cross-agent read; others scoped to self
+        if (isLoomy || isBroker) {
+          if (owner) query = query.eq("owner", owner);
+        } else {
           query = query.eq("owner", selfSlug);
-        } else if (owner) {
-          query = query.eq("owner", owner);
         }
 
         if (gtd_status) query = query.eq("gtd_status", gtd_status);
         if (priority) query = query.eq("priority", priority);
+        if (source_ref) query = query.eq("source_ref", source_ref);
 
         const { data, error } = await query;
 
@@ -949,15 +971,16 @@ export function registerTools(
         .order("deadline", { ascending: true, nullsFirst: false })
         .limit(limit ?? 20);
 
-      // Ownership filter
-      if (!isLoomy) {
+      // Ownership filter: loomy/broker get cross-agent read; others scoped to self
+      if (isLoomy || isBroker) {
+        if (owner) query = query.eq("owner", owner);
+      } else {
         query = query.eq("owner", selfSlug);
-      } else if (owner) {
-        query = query.eq("owner", owner);
       }
 
       if (gtd_status) query = query.eq("gtd_status", gtd_status);
       if (priority) query = query.eq("priority", priority);
+      if (source_ref) query = query.eq("source_ref", source_ref);
 
       const { data, error } = await query;
 
@@ -2206,10 +2229,13 @@ export function registerTools(
   server.tool(
     "doc_link",
     `Create a link. UUID-ONLY (no code param — resolve first, or use doc_link_by_code). target_kind routes the link: ` +
-      `'doc' → doc_item↔doc_item traceability (relation_type required: ${DOC_LINK_TYPES_LIST}; same-project enforced by FK); ` +
+      `'doc' → doc_item↔doc_item traceability (relation_type required: ${DOC_LINK_TYPES_LIST}). ` +
+      `  'references' = CROSS-PROJECT (D-074): routes to doc_item_xproject_links; UUIDs are globally unique, no project_id constraint. ` +
+      `  All other types = intra-project only: same-project FK enforced (translateLinkError on cross-project attempt). ` +
       `'gtd' → doc_item↔GTD actionability (doc_item_gtd_links, no relation_type — D-070); ` +
       `'wi'  → doc_item↔WI execution link (doc_item_wi_links, no relation_type — D-070). ` +
-      `Example (doc): doc_link({target_kind:"doc", from_id:"<sdes-uuid>", to_id:"<req-uuid>", relation_type:"satisfies"}). ` +
+      `Example (doc, intra): doc_link({target_kind:"doc", from_id:"<sdes-uuid>", to_id:"<req-uuid>", relation_type:"satisfies"}). ` +
+      `Example (doc, cross-project): doc_link({target_kind:"doc", from_id:"<req-uuid>", to_id:"<hub-decision-uuid>", relation_type:"references"}). ` +
       `Example (gtd): doc_link({target_kind:"gtd", from_id:"<doc_item-uuid>", to_id:"<gtd-uuid>"}). ` +
       `Example (wi): doc_link({target_kind:"wi", from_id:"<doc_item-uuid>", to_id:"<wi-uuid>"}).`,
     {
