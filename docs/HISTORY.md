@@ -4,6 +4,73 @@
 
 ---
 
+## Sessione #43 — 2026-07-02 (P7 remediation governance: enforcement by-construction)
+
+**GTD:** `[autopilot board-mcp] P7 remediation governance — enforcement by-construction lato board-mcp` (`e308cec4`). **WI** `e94fc07d`. Template `fix-bug-backend` (on-the-fly). Modello: sonnet (autopilot). Da review governance AI (Loomy, 2026-07-02, approvata da Achille). Rif. WI Loomy `afd24663`.
+
+**Status:** ✅ **DONE — 3/3 punti indirizzati, build verde, 60/60 test invariati.**
+
+**1. Guard D-069 two-phase arm come vincolo (src/tools.ts, `gtd_update`):** prima era solo convenzione documentata in CLAUDE.md ("NON armare GTD prima di wi_end"). Ora `gtd_update(autopilot=true)` verifica se l'owner risultante (target owner, dopo eventuale reassign) ha un WI `status='active'` su `loomx_work_items` e rifiuta con errore actionable se sì — enforcement by-construction invece di disciplina. Risolve owner: usa `owner` se fornito nella call, altrimenti fa una SELECT sull'item esistente.
+
+**2. `item_project_link` (nuovo tool, src/tools.ts):** UPSERT `(item_id, project_id)` su `loomx_item_projects` (PK composita, schema confermato in `loomx-home-DBA/supabase/migrations/20260405100000_...sql`). Prima l'unico modo era passare dalla Management API. Ownership: owner dell'item o loomy (stesso pattern di `gtd_link_agent`). Idempotente via `onConflict`.
+
+**3. Valutato footgun `gtd_update` body-only → flip a done:** **non riprodotto nel codice attuale.** `gtd_update` include `gtd_status` nel payload di UPDATE solo se il param è esplicitamente passato (`if (gtd_status !== undefined) updates.gtd_status = gtd_status`) — chiamare con solo `body` preserva lo status corrente già oggi. Nessuna modifica necessaria lato board-mcp; il rischio residuo è comportamento del *caller* (agente/LLM che passa `gtd_status="done"` insieme a `body` pensando a un semplice append di note) — fuori dal controllo del server. Segnalato a Loomy per chiudere il punto nella review.
+
+**Cosa (src/tools.ts):** guard D-069 in `gtd_update` (+ const `WI_TABLE`), nuovo tool `item_project_link`. CLAUDE.md aggiornato (tabella GTD Tools, count 28→29). `package.json` → v0.10.0.
+
+**Note operative:** live exposure richiede rebuild+restart del processo MCP (pattern noto, vedi #40/#41). Nessuna migrazione DB richiesta — `loomx_item_projects` e `loomx_work_items` esistono già.
+
+**Bug scoperto in chiusura (WI separato `e1867f2b`, GTD `156b7b35`): `syncWiCache` cancellava la cache invece di preservarla.** Provato a chiudere il WI di cui sopra ed eseguire `runtime_request` (step obbligatorio D-052) → gate bloccato con "Nessun Work Item attivo" nonostante `wi_end` appena riuscito. Causa: `wiCache.ts::syncWiCache` filtrava `status='active'` e faceva `unlink()` della cache se non trovava righe — quindi dopo ogni `wi_end`/`wi_pause` la cache spariva del tutto, rendendo dead code il whitelist post-chiusura di `governance-gate.sh` (righe 167-180, WIP non committato di un'altra sessione, v1.1) che si aspetta la cache ancora presente con `status=done|failed|paused` per lasciar passare `gtd_update`/`gtd_complete`/`board_send`/`runtime_request`/`wi_start`. **Fix:** `syncWiCache` ora fa query senza filtro di status (order by `started_at` desc, limit 1) e scrive sempre la riga più recente — la cache si svuota solo se l'agente non ha mai avuto un WI. Impatta ogni agente della flotta (blocco strutturale sul closing-sequence D-052, non solo board-mcp). Richiede rebuild+restart per essere live; segnalato a Loomy.
+
+## Sessione #42 — 2026-06-30 (verifica dedup D-066: anomalia Atlas source_ref f7f797ad)
+
+**GTD:** `[msg] loomy→board-mcp: verifica dedup D-066 — stesso source_ref f7f797ad → 3 GTD distinti (anomalia Atlas)` (`237a4139`). **WI** `ee9149b8-e71f-463f-b39c-4f1db2deec44`. Template `verify-dedup` (on-the-fly). Modello: opus (autopilot). Lega a anomalia loomy `001587bd`.
+
+**Status:** ✅ **DONE — verdetto duplice + hardening in-lane; build verde 66/66.**
+
+**Verdetto 1 — il caso f7f797ad è un FALSO POSITIVO (misdiagnosi).** I 3 GTD citati hanno **3 source_ref DIVERSI**, non lo stesso:
+- `84e6b6cc` (atlas, 04:16:44) src_ref=`e63aa145` — analyst-quadro→atlas: ACK METH-001
+- `5ae3a1b6` (atlas, 04:27:38) src_ref=`ec78e96e` — analyst-quadro→atlas: platform contribution
+- `bd4946dd` (atlas, 04:27:48) src_ref=`f7f797ad` — analyst-quadro→atlas: METH-002+003 bozze
+
+Sono **3 messaggi board distinti** di analyst-quadro→atlas (topicamente simili → METH playbook). Il dedup `(owner, source_ref)` ha fatto la cosa giusta: 1 GTD per messaggio distinto. Nessun danno da esecuzione doppia (tutti `done`, ma erano task diversi). Atlas li ha raggruppati come "stesso msg" perché semanticamente affini.
+
+**Verdetto 2 — esiste comunque un gap di dedup reale (contesto 001587bd), ma ~97% è residuo PRE-fix.** Scan completo `loomx_items` non-trash con source_ref dal 23/06 (1008 righe): **148 gruppi (owner, source_ref) duplicati**. Distribuzione per giorno del 2° membro: 26/06=5, 27/06=7, **28/06=57, 29/06=75**, 30/06=4. Il dedup server-side board-mcp è del commit `9d296c8` (30/06 01:17 UTC) → i duplicati 28-29/06 sono **antecedenti al fix** (non esisteva). Solo **2 gruppi post-fix** (≥2 membri dopo 01:17): `loomy||0680f4b1` (x2, 9.5 min di distanza → non race, probabile MCP child su dist vecchio) e `researcher||ea7ad420` (x7, burst in 24s → race o path che bypassa il dedup).
+
+**Root cause del gap residuo (2 cause):**
+1. **TOCTOU**: il dedup in `gtd_add` è un check-then-insert NON atomico, senza UNIQUE a DB su `(owner, source_ref)`. Burst concorrenti (researcher x7) superano tutti la SELECT e poi inseriscono.
+2. **Deploy-lag**: `dist/tools.js` ricostruito alle 09:03 UTC, ma i processi MCP child degli agenti partiti prima girano sul dist vecchio → niente dedup finché non riavviano (stesso fenomeno notato in #41).
+
+**Fix corretto:** la dedup NON è correggibile in app-code da sola →
+- **DBA (D-005):** partial UNIQUE index `loomx_items (owner, source_ref) WHERE source_ref IS NOT NULL AND gtd_status <> 'trash'`. È l'unico modo atomico sotto concorrenza.
+- **board-mcp (fatto questa sessione):** `gtd_add` ora cattura `23505` (unique_violation) → re-SELECT del winner e ritorna `duplicate:true` (stessa UX del fast-path). Inerte finché l'indice non esiste, correct-by-construction dopo.
+- **Cleanup residui:** trashare i 146 gruppi pre-fix tenendo il più vecchio non-trash per chiave = task broker/loomy (ownership cross-agente, molti già `done`/agiti) — NON mass-trash dalla mia lane.
+
+**Cosa (src/tools.ts):** aggiunto backstop `error.code === '23505'` in `gtd_add` dopo l'insert. Build verde, 66/66 test invariati. Esposizione live richiede rebuild+restart (come #41).
+
+**Note:** indagine via service-role read-only (script throwaway, rimossi). Nessuna modifica dati. `runtime_request` posato a fine-WI.
+
+## Sessione #41 — 2026-06-30 (doc_query lean output: summary= / fields=)
+
+**GTD:** `[infra] board-mcp — doc_query summary/fields param (prereq scala review consistenza)` (`f7b1bd70`). **WI** `55e2c96b-f1d4-41dc-8f3e-704c2437ab66`. Template `add-tool-param` (L1, durable).
+
+**Status:** ✅ **DONE — 66/66 test pass (2 nuovi), build verde.**
+
+**Contesto:** la review di consistenza pilota (Kinesis) ha trovato che i dump `doc_query` sfondano il budget token (REQ 75k char, SDES 97k char) → obbligano salvataggio su file + jq, impraticabile a scala. Prerequisito per scalare le review agli altri progetti.
+
+**Cosa (src/docs.ts + src/tools.ts):**
+1. **`summary=true`** — per ogni item ritorna `{id, code, item_type, status, body_chars, headline(≤120, whitespace collassato), links:{doc_out, doc_in, gtd, wi}}`. Nessun body completo. `docSummarize()` calcola i conteggi con 1 query `doc_item_links` project-scoped + 2 query `.in('doc_item_id', ids)` su gtd/wi link tables. Permette di contare orfani/copertura senza dumpare body.
+2. **`fields="code,status,..."`** — proiezione sulle sole colonne richieste (whitelist `QUERYABLE_FIELDS`, `id` sempre incluso, salta `body` se non elencato). Campo non valido → errore actionable con la whitelist. Ignorato se `summary=true`.
+3. **`traceability`** (req_without_sdes / sdes_without_uat) invariato — confermato come modalità 0-token autoritativa. Precedenza: traceability > summary > fields > full.
+4. **Schema MCP** doc_query aggiornato con `summary`/`fields` + description ed esempio lean.
+5. **Test** (tests/docs.test.ts): summary shape + link counts; fields rigetto campo ignoto + proiezione valida.
+
+**Governance (dogfood D-074):** REQ-037 + SDES-026 creati in DB; SDES-026 —satisfies→ REQ-037; WI linkato a SDES-026 (`doc_item_wi_links`) → gate durable D-074 soddisfatto.
+
+**Note operative:**
+- Live exposure richiede **rebuild + restart** del server MCP (il processo in esecuzione gira sul vecchio dist; verificato: `summary:true` live oggi ritorna ancora `mode:items`).
+- Nel working tree resta WIP **pre-esistente non mio** (D-074 cross-project `references` / `doc_item_xproject_links`) in `src/docs.ts` + `src/docTypes.ts`: il commit di doc_query è quindi intrecciato a quel WIP nello stesso file → lasciato non committato, segnalato a loomy.
+
 ## Sessione #40 — 2026-06-29 (D-070 cleanup: rimozione riferimento legacy doc_gtd_links)
 
 **GTD:** `[msg] D-070 done — rimuovi riferimento legacy doc_gtd_links dal board-mcp`. **WI** `9dafe63c-fcad-45b2-8f54-ffcbe238f123`.

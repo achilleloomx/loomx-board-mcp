@@ -14,6 +14,7 @@ const OVERVIEW_VIEW = "board_overview";
 const GTD_TABLE = "loomx_items";
 const GTD_ITEM_PROJECTS_TABLE = "loomx_item_projects";
 const RUNTIME_TABLE = "loomx_agent_runtime";
+const WI_TABLE = "loomx_work_items";
 
 const MessageTypeSchema = z.enum(MESSAGE_TYPES);
 const StatusFilterSchema = z.enum(MESSAGE_STATUSES);
@@ -757,6 +758,29 @@ export function registerTools(
         .select("id, title, gtd_status, owner, created_at")
         .maybeSingle();
 
+      // D-066 race backstop: the pre-INSERT SELECT above is not atomic, so concurrent
+      // gtd_add calls with the same (owner, source_ref) can both pass the check and insert.
+      // Once the DBA adds a partial UNIQUE (owner, source_ref) WHERE gtd_status <> 'trash',
+      // the losing insert returns 23505 — re-select the winner and report it as a duplicate
+      // instead of erroring. Harmless (never fires) until that index exists.
+      if (error?.code === "23505" && source_ref) {
+        const { data: winner } = await db
+          .from(GTD_TABLE)
+          .select("id, title, gtd_status, owner, created_at")
+          .eq("owner", targetOwner)
+          .eq("source_ref", source_ref)
+          .not("gtd_status", "eq", "trash")
+          .maybeSingle();
+        if (winner) {
+          return {
+            content: [{
+              type: "text",
+              text: JSON.stringify({ ok: true, duplicate: true, ...winner }, null, 2),
+            }],
+          };
+        }
+      }
+
       if (error || !data) {
         return {
           content: [
@@ -807,6 +831,40 @@ export function registerTools(
           ],
           isError: true,
         };
+      }
+
+      // D-069 two-phase arm enforcement: arming autopilot=true while the owner
+      // still has an active WI races the reconciler (it may evoke before wi_end
+      // closes). Reject — arm AFTER wi_end, per CLAUDE.md "Autopilot closure".
+      if (autopilot === true) {
+        let targetOwner = owner;
+        if (targetOwner === undefined) {
+          const { data: existing } = await db
+            .from(GTD_TABLE)
+            .select("owner")
+            .eq("id", id)
+            .maybeSingle();
+          targetOwner = (existing as { owner?: string } | null)?.owner;
+        }
+        if (targetOwner) {
+          const { data: activeWi } = await db
+            .from(WI_TABLE)
+            .select("id")
+            .eq("agent_slug", targetOwner)
+            .eq("status", "active")
+            .limit(1);
+          if (Array.isArray(activeWi) && activeWi.length > 0) {
+            return {
+              content: [
+                {
+                  type: "text",
+                  text: `Error: cannot arm autopilot=true — '${targetOwner}' has an active WI ('${(activeWi[0] as { id: string }).id}'). Two-phase arm (D-069): call wi_end first, then gtd_update(autopilot=true).`,
+                },
+              ],
+              isError: true,
+            };
+          }
+        }
       }
 
       // Build update payload — only include provided fields
@@ -1288,6 +1346,56 @@ export function registerTools(
 
       return {
         content: [{ type: "text", text: JSON.stringify({ item_id, agents: data ?? [] }, null, 2) }],
+      };
+    }
+  );
+
+  // --- item_project_link ---
+  server.tool(
+    "item_project_link",
+    "Link a GTD item to a project (loomx_item_projects). Only the item owner or loomy can link. Idempotent — re-linking an existing pair is a no-op.",
+    {
+      item_id: z.string().uuid().describe("GTD item ID"),
+      project_id: z.string().uuid().describe("Project ID (loomx_projects)"),
+    },
+    async ({ item_id, project_id }) => {
+      const db = getSupabaseClient();
+
+      if (!isLoomy) {
+        const { data: item, error: itemErr } = await db
+          .from(GTD_TABLE)
+          .select("owner")
+          .eq("id", item_id)
+          .maybeSingle();
+        if (itemErr || !item) {
+          return {
+            content: [{ type: "text", text: `Error: GTD item id='${item_id}' not found or access denied. Use gtd_inbox to verify the item exists.` }],
+            isError: true,
+          };
+        }
+        if (item.owner !== selfSlug) {
+          return {
+            content: [{ type: "text", text: `Error: only the item owner (${item.owner}) or loomy can link projects` }],
+            isError: true,
+          };
+        }
+      }
+
+      const { data, error } = await db
+        .from(GTD_ITEM_PROJECTS_TABLE)
+        .upsert({ item_id, project_id }, { onConflict: "item_id,project_id" })
+        .select("item_id, project_id")
+        .maybeSingle();
+
+      if (error || !data) {
+        return {
+          content: [{ type: "text", text: `Error linking project: ${error?.message ?? "no row returned. Check item_id and project_id are valid UUIDs referencing existing rows, then retry item_project_link."}` }],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [{ type: "text", text: JSON.stringify({ ok: true, ...data }, null, 2) }],
       };
     }
   );
@@ -2292,8 +2400,10 @@ export function registerTools(
     "doc_query",
     `Query doc_items in a project, or run a traceability check. ` +
       `Filter mode: by document_type / item_type / status / code. ` +
+      `Lean modes (avoid dumping bodies on large docs): summary=true → per item {code,status,body_chars,headline,links:{doc_out,doc_in,gtd,wi}}; or fields="code,status,..." → projection over chosen columns only. ` +
       `Traceability mode: traceability='req_without_sdes' (REQ rows with no linked SDES) or 'sdes_without_uat'. ` +
       `Example (filter): doc_query({project_id:"<uuid>", item_type:"requirement"}). ` +
+      `Example (lean): doc_query({project_id:"<uuid>", document_type:"req", summary:true}). ` +
       `Example (gap): doc_query({project_id:"<uuid>", traceability:"req_without_sdes"}).`,
     {
       project_id: z.string().uuid().describe("Project scope — mandatory"),
@@ -2302,6 +2412,8 @@ export function registerTools(
       status: z.string().optional().describe("Filter by item status"),
       code: z.string().optional().describe("Filter by exact code"),
       traceability: z.enum(["req_without_sdes", "sdes_without_uat"]).optional().describe("Run a traceability gap check instead of a plain filter"),
+      summary: z.boolean().optional().describe("Lean output: code+status+body_chars+headline(120c)+link counts (doc_out/doc_in/gtd/wi), no full body. For review-at-scale."),
+      fields: z.string().optional().describe("Comma-separated projection, e.g. 'code,status'. Returns only those columns (id always included). Skips body when not listed. Ignored if summary=true."),
       limit: z.number().int().min(1).max(500).optional().describe("Max rows (default: 50)"),
     },
     async (args) => {

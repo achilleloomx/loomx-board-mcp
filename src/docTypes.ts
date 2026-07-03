@@ -48,6 +48,7 @@ export const DB_DOC_ITEM_STATUSES = [
 
 export const DB_DOC_ITEM_LINK_TYPES = [
   "refines", "satisfies", "verifies", "relates_to", "supersedes",
+  "references", // D-074: cross-project; routes to doc_item_xproject_links (no same-project FK)
 ] as const;
 
 // D-070: doc_item_gtd_links and doc_item_wi_links have NO relation_type column —
@@ -436,7 +437,10 @@ export const LINK_TYPE_REGISTRY: Record<"doc" | "gtd" | "wi", LinkTypeSpec> = {
     target_kind: "doc",
     table: "doc_item_links",
     relation_types: [...DB_DOC_ITEM_LINK_TYPES],
-    description: "doc_item ↔ doc_item traceability (REQ→SDES→UAT, supersede). Same-project enforced by FK.",
+    description:
+      "doc_item ↔ doc_item traceability (REQ→SDES→UAT, supersede). " +
+      "'references' → doc_item_xproject_links (cross-project, D-074, no same-project FK). " +
+      "All other types → doc_item_links (same-project FK enforced).",
   },
   gtd: {
     target_kind: "gtd",

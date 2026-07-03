@@ -9,6 +9,7 @@ dist/
 
 # MCP config (contains secrets)
 .mcp.json
+*.bak*
 
 # OS
 .DS_Store

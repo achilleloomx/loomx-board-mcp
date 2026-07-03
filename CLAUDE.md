@@ -98,7 +98,7 @@ loomx-board-mcp/
 
 ## MCP Tools
 
-28 tool base esposti a ogni agente (20 board/gtd/wi/runtime + 8 doc_* document model) + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
+29 tool base esposti a ogni agente (21 board/gtd/wi/runtime + 8 doc_* document model) + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
 
 ### Board Tools (board_messages)
 
@@ -125,12 +125,13 @@ loomx-board-mcp/
 | `gtd_inbox` | Leggi item GTD dell'agente — **`preview_only=true` default** (body_preview 200 chars) | SELECT (owner = self) |
 | `gtd_get` | Body completo di un singolo GTD item (detail on-demand) | SELECT by id |
 | `gtd_add` | Crea nuovo item GTD | INSERT |
-| `gtd_update` | Aggiorna item esistente (owner-only, loomy puo' tutto) | UPDATE |
+| `gtd_update` | Aggiorna item esistente (owner-only, loomy puo' tutto). **D-069 guard:** rifiuta `autopilot=true` se l'owner ha un WI active (two-phase arm) | UPDATE |
 | `gtd_query` | Query flessibile — **`preview_only=true` default**, limit 20 | SELECT + JOIN |
 | `gtd_complete` | Shortcut per segnare item come done | UPDATE (gtd_status = done) |
 | `gtd_link_agent` | Aggancia un agente come co-engaged su un item (owner o loomy only) | INSERT loomx_item_agents |
 | `gtd_unlink_agent` | Rimuove un agente co-engaged da un item (owner o loomy only) | DELETE loomx_item_agents |
 | `gtd_list_agents` | Lista agenti co-engaged su un item (owner, co-engaged, o loomy) | SELECT loomx_item_agents |
+| `item_project_link` | Aggancia un item GTD a un progetto (owner o loomy only, idempotente) | UPSERT loomx_item_projects |
 
 > **Regola ownership GTD:** ogni agente puo' modificare solo i propri item (owner = self). Loomy puo' leggere e modificare item di qualsiasi agente.
 
@@ -407,4 +408,4 @@ Quando una situazione matcha il trigger di una skill:
 
 ---
 
-*Creato: 2026-03-30 | Allineato: 2026-06-28 (D-065 cross-decisions, D-069 two-phase arm)*
+*Creato: 2026-03-30 | Allineato: 2026-07-02 (P7 remediation: gtd_update D-069 arm guard, item_project_link)*

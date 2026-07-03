@@ -388,6 +388,49 @@ test("doc_query traceability: req_without_sdes flags uncovered REQ then clears a
   assert.equal((after as any).data.count, 0, "REQ-001 now covered by SDES-001");
 });
 
+test("doc_query summary: compact rows with body_chars, headline, link counts (no full body)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const reqDoc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const sdesDoc = await docCreate(db, { project_id: PROJ_A, document_type: "sdes", title: "Sdes" }, ctx);
+  const longBody = "Line one with detail.\n\nLine two padding. " + "x".repeat(300);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-001", body: longBody }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: (sdesDoc as any).data.document_id, item_type: "sdes_entry", code: "SDES-001" }, ctx);
+  await docLinkByCode(db, { project_id: PROJ_A, from_code: "SDES-001", to_code: "REQ-001", link_type: "satisfies" }, ctx);
+
+  const res = await docQuery(db, { project_id: PROJ_A, item_type: "requirement", summary: true }, ctx);
+  assert.ok(res.ok);
+  assert.equal((res as any).data.mode, "summary");
+  const row = (res as any).data.items[0];
+  assert.equal(row.code, "REQ-001");
+  assert.equal(row.body_chars, longBody.length, "reports full body length");
+  assert.equal(row.headline.length <= 120, true, "headline capped at 120");
+  assert.equal(row.headline.includes("\n"), false, "headline whitespace-collapsed");
+  assert.equal(row.body, undefined, "summary never returns full body");
+  assert.equal(row.links.doc_in, 1, "REQ is the target of the satisfies link");
+  assert.equal(row.links.doc_out, 0);
+  assert.equal(row.links.gtd, 0);
+  assert.equal(row.links.wi, 0);
+});
+
+test("doc_query fields: rejects unknown column, accepts a valid projection", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const reqDoc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-001", body: "b" }, ctx);
+
+  const bad = await docQuery(db, { project_id: PROJ_A, fields: "code,bogus" }, ctx);
+  assert.equal(bad.ok, false, "unknown field rejected");
+  assert.match((bad as any).error, /bogus/);
+
+  const good = await docQuery(db, { project_id: PROJ_A, fields: "code,status" }, ctx);
+  assert.ok(good.ok);
+  assert.equal((good as any).data.mode, "items");
+  assert.equal((good as any).data.count, 1);
+});
+
 test("doc_item_types returns schema + example for a type, and parity in full mode", () => {
   const one = docItemTypes({ item_type: "requirement" });
   assert.ok(one.ok);

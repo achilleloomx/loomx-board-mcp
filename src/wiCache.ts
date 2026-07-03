@@ -42,8 +42,17 @@ async function writeAtomic(absPath: string, content: string): Promise<void> {
   await fs.rename(tmp, absPath);
 }
 
-// Fetch the agent's active WI (if any) and mirror it to the cache file.
-// If no active WI exists, the cache is removed so the gate blocks again.
+// Mirror the agent's most recent WI (any status) to the cache file.
+//
+// governance-gate.sh branches on cache status (active/paused/done/failed) to
+// pick its message — including a post-close whitelist (D-069 two-phase close:
+// gtd_update/gtd_complete/board_send/runtime_request/wi_start remain legal
+// right after wi_end). That whitelist only works if the cache still holds the
+// closed row; previously this function deleted the cache whenever the query
+// was scoped to status=active, so the done/failed/paused branches were dead
+// code and even the mandated post-wi_end runtime_request got blocked. We only
+// remove the cache when the agent has genuinely never had a WI (forces the
+// initial wi-start).
 export async function syncWiCache(
   db: SupabaseClient,
   agentSlug: string
@@ -60,7 +69,7 @@ export async function syncWiCache(
       .from(WI_TABLE)
       .select("*")
       .eq("agent_slug", agentSlug)
-      .eq("status", "active")
+      .order("started_at", { ascending: false })
       .limit(1);
 
     if (error) {

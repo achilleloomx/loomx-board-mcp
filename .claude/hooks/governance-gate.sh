@@ -2,14 +2,21 @@
 # governance-gate.sh — PreToolUse hook per enforcement Work Items (D-024)
 #
 # Uso:
-#   bash governance-gate.sh --agent <slug> [--mcp-mode] [--external]
+#   bash governance-gate.sh --agent <slug> [--mcp-mode] [--external] [--bash]
 #
 # Letto da .claude/settings.json PreToolUse. Viene invocato prima di ogni
-# Edit/Write/MultiEdit/NotebookEdit, di ogni MCP write, e di ogni Bash external.
+# Edit/Write/MultiEdit/NotebookEdit, di ogni MCP write, e di ogni Bash (--bash:
+# il gate ispeziona il comando e applica il WI check solo a write/external).
 #
-# Exit codes:
+# Exit codes (spec hook Claude Code — SOLO exit 2 blocca il tool):
 #   0 = OK, tool puo procedere
-#   1 = block, tool non deve procedere (stdout mostra messaggio all'agente)
+#   2 = BLOCK, tool non procede (stderr mostrato all'agente)
+#   1 = errore non-bloccante (mai usato per enforcement)
+#
+# v1.1 (2026-07-02, remediation governance WI afd24663):
+#   - exit 1 -> exit 2 su tutti i branch di blocco (prima il gate era fail-open)
+#   - modalita --bash: enforcement bash_commands external + scritture via shell
+#   - tool_uses counter best-effort (non aborta il gate sotto set -e)
 #
 # Spec: hub/initiatives/governance-compliance/design.md sezione 6
 #
@@ -22,11 +29,22 @@
 set -euo pipefail
 
 # ------------------------------------------------------------------------------
+# Hook payload (Claude Code passes tool_name + tool_input as JSON via stdin)
+# Read once here; used later for GENERATED .md guard (section 5.5).
+# Non-blocking: if stdin is a TTY (manual call) or empty, HOOK_INPUT stays "".
+# ------------------------------------------------------------------------------
+HOOK_INPUT=""
+if [[ ! -t 0 ]]; then
+  HOOK_INPUT=$(timeout 1 cat 2>/dev/null) || HOOK_INPUT=""
+fi
+
+# ------------------------------------------------------------------------------
 # Args parsing
 # ------------------------------------------------------------------------------
 AGENT_SLUG=""
 MCP_MODE=false
 EXTERNAL=false
+BASH_MODE=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -42,6 +60,10 @@ while [[ $# -gt 0 ]]; do
       EXTERNAL=true
       shift
       ;;
+    --bash)
+      BASH_MODE=true
+      shift
+      ;;
     *)
       echo "governance-gate: arg sconosciuto: $1" >&2
       shift
@@ -50,8 +72,35 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$AGENT_SLUG" ]]; then
-  echo "governance-gate: --agent <slug> obbligatorio" >&2
-  exit 1
+  echo "governance-gate: --agent <slug> obbligatorio (settings.json malconfigurato)" >&2
+  exit 2
+fi
+
+# ------------------------------------------------------------------------------
+# 0. Bash mode: applica il gate solo a comandi write/external
+# ------------------------------------------------------------------------------
+# I comandi bash di sola lettura (ls, cat, grep, git status...) passano senza WI.
+# Il WI check scatta per: comandi external (deploy/push/publish, da
+# hub/governance-policy.yaml sezione external.bash_commands) e scritture shell
+# (redirect, sed -i, rm/mv/cp, tee, psql/curl mutanti).
+if [[ "$BASH_MODE" == "true" ]]; then
+  BASH_CMD=""
+  if command -v jq &>/dev/null && [[ -n "$HOOK_INPUT" ]]; then
+    BASH_CMD=$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
+  fi
+  # Senza comando ispezionabile: permissive (non possiamo giudicare)
+  [[ -z "$BASH_CMD" ]] && exit 0
+
+  EXTERNAL_RE='git push|git push --force|supabase (db push|functions deploy|secrets set)|vercel (--prod|deploy)|npm publish|gh release|systemctl (restart|stop|disable)|docker (push|rm)'
+  WRITE_RE='(^|[^>])>>?[[:space:]]*[^&[:space:]]|sed[[:space:]]+-i|\btee\b|\brm[[:space:]]|\bmv[[:space:]]|\bcp[[:space:]]|mkdir|chmod|chown|truncate|\bln[[:space:]]|psql .*(-c|-f)|curl .*-(X[[:space:]]*(POST|PUT|PATCH|DELETE)|d[[:space:]])|python[0-9.]*[[:space:]].*(setup|install)|pip[0-9.]*[[:space:]]+install|npm[[:space:]]+(install|ci)|git[[:space:]]+(commit|merge|rebase|reset|checkout[[:space:]]+-b|cherry-pick|tag)'
+
+  if echo "$BASH_CMD" | grep -qE "$EXTERNAL_RE"; then
+    EXTERNAL=true   # prosegue: richiede WI attivo + segnala external
+  elif echo "$BASH_CMD" | grep -qE "$WRITE_RE"; then
+    :               # scrittura via shell: prosegue col WI check standard
+  else
+    exit 0          # bash read-only: nessun gate
+  fi
 fi
 
 # ------------------------------------------------------------------------------
@@ -80,7 +129,7 @@ aprire un Work Item:
 Vedi: hub/initiatives/governance-compliance/design.md sezione 5.
 Spec governance: D-024.
 EOF
-  exit 1
+  exit 2
 fi
 
 # ------------------------------------------------------------------------------
@@ -113,9 +162,22 @@ Prima di scrivere, riprendi il WI con:
 
 Oppure aprine uno nuovo con wi-start.
 EOF
-    exit 1
+    exit 2
     ;;
   done|failed)
+    # Whitelist post-chiusura (D-069 two-phase close + summary D-014):
+    # dopo wi_end sono legittimi SOLO gli step di chiusura — arm GTD, summary
+    # a loomy, runtime_request. Tutto il resto resta bloccato.
+    POST_CLOSE_TOOL=""
+    if command -v jq &>/dev/null && [[ -n "$HOOK_INPUT" ]]; then
+      POST_CLOSE_TOOL=$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
+    fi
+    case "$POST_CLOSE_TOOL" in
+      mcp__board__gtd_update|mcp__board__gtd_complete|mcp__board__board_send|mcp__board__runtime_request|mcp__board__wi_start)
+        echo "[governance-gate] WI chiuso ($WI_STATUS) — consentito solo step di chiusura D-069/D-014: $POST_CLOSE_TOOL" >&2
+        exit 0
+        ;;
+    esac
     cat >&2 <<EOF
 [governance-gate BLOCK]
 
@@ -125,11 +187,11 @@ La cache non e stata aggiornata correttamente dalla skill session-manager v2.
 Apri un nuovo WI con:
   wi-start --new --intent "..."
 EOF
-    exit 1
+    exit 2
     ;;
   *)
     echo "[governance-gate BLOCK] WI cache ha status sconosciuto: $WI_STATUS" >&2
-    exit 1
+    exit 2
     ;;
 esac
 
@@ -148,7 +210,7 @@ Possibile causa: cache stale da altra sessione. Esegui:
   wi-end            # se il WI non e piu rilevante
   wi-start --new    # per aprirne uno nuovo
 EOF
-  exit 1
+  exit 2
 fi
 
 # ------------------------------------------------------------------------------
@@ -184,7 +246,7 @@ Compila le pre-conditions PRIMA di scrivere. Usa:
 Oppure, se l'urgenza lo giustifica:
   wi-start --emergency --reason "..."   # bypass con audit follow-up
 EOF
-    exit 1
+    exit 2
   fi
 fi
 
@@ -199,14 +261,41 @@ if [[ "$EXTERNAL" == "true" ]]; then
 fi
 
 # ------------------------------------------------------------------------------
+# 5.5. GENERATED .md guard (D-a5 — avvisa su scritture dirette a mirror DB)
+# Non blocca: è un avviso educational. Il lint CI (@loomx/doc-render) è il gate.
+# ------------------------------------------------------------------------------
+if command -v jq &>/dev/null && [[ -n "$HOOK_INPUT" ]]; then
+  HOOK_FILE=$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_input.file_path // empty' 2>/dev/null || echo "")
+  if [[ -n "$HOOK_FILE" && -f "$HOOK_FILE" ]]; then
+    FIRST_LINE=$(head -1 "$HOOK_FILE" 2>/dev/null || echo "")
+    if [[ "$FIRST_LINE" == "<!-- GENERATED"* ]]; then
+      cat >&2 <<'GENERATED_WARN'
+[governance-gate WARN] ⚠ File GENERATED rilevato (D-a5 — mirror DB).
+
+Questo file è generato da @loomx/doc-render. NON modificarlo direttamente:
+il lint CI rileverà il checksum mismatch e fallirà.
+
+Per aggiornare il contenuto:
+  1. Scrivi nel DB → doc_item_upsert(project_id, code, body, ...) via board-mcp
+  2. Rigenera il mirror → loomx-doc-dump --document-id <uuid> --output <file>
+
+Il lint puoi eseguirlo ora: npx tsx hub/forge/packages/doc-render/bin/lint.ts
+GENERATED_WARN
+    fi
+  fi
+fi
+
+# ------------------------------------------------------------------------------
 # 6. Append a in_flight_state.files_touched (best-effort)
 # ------------------------------------------------------------------------------
 # L'hook non conosce il path del file che sta per essere scritto (Claude Code
 # non lo passa in $* per ora). La skill session-manager v2 popola questo campo
 # in Mode 3 (Checkpoint) leggendo la conversazione. Qui incrementiamo solo
 # tool_uses counter come euristica per checkpoint periodico.
-TMP=$(mktemp)
-jq '.in_flight_state.tool_uses = ((.in_flight_state.tool_uses // 0) + 1)' "$WI_CACHE" > "$TMP" && mv "$TMP" "$WI_CACHE"
+TMP=$(mktemp) || true
+if [[ -n "${TMP:-}" ]]; then
+  { jq '.in_flight_state.tool_uses = ((.in_flight_state.tool_uses // 0) + 1)' "$WI_CACHE" > "$TMP" && mv "$TMP" "$WI_CACHE"; } 2>/dev/null || rm -f "$TMP" 2>/dev/null || true
+fi
 
 # ------------------------------------------------------------------------------
 # 7. OK

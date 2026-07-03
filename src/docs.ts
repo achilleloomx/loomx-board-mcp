@@ -27,6 +27,7 @@ import {
 const DOCUMENTS = "documents";
 const DOC_ITEMS = "doc_items";
 const DOC_ITEM_LINKS = "doc_item_links";
+const DOC_ITEM_XPROJECT_LINKS = "doc_item_xproject_links"; // D-074: cross-project references, no project_id FK
 const DOC_ITEM_GTD_LINKS = "doc_item_gtd_links"; // D-070: FK doc_items + loomx_items, no relation_type
 const DOC_ITEM_WI_LINKS = "doc_item_wi_links";   // D-070: FK doc_items + loomx_work_items, no relation_type
 
@@ -474,7 +475,24 @@ export async function docLink(
     return err(`relation_type '${args.relation_type}' invalid for 'doc'. Allowed: ${route.relation_types.join(", ")}.`);
   }
 
-  // Derive the common project_id from the FROM endpoint.
+  // D-074: 'references' is cross-project — routes to doc_item_xproject_links (no project_id column).
+  // from_item and to_item can belong to different projects; UUIDs are globally unique.
+  if (args.relation_type === "references") {
+    const { data, error } = await db
+      .from(DOC_ITEM_XPROJECT_LINKS)
+      .insert({ from_item: args.from_id, to_item: args.to_id, relation_type: "references" })
+      .select("id")
+      .maybeSingle();
+    if (error || !data) {
+      const m = error?.message ?? "no row";
+      if (/duplicate key|doc_item_xproject_links_unique/i.test(m)) return err(`This cross-project 'references' link already exists.`);
+      if (/foreign key/i.test(m)) return err(`doc_item not found (UUID wrong?). Original: ${m}`);
+      return err(`Failed to create cross-project reference link: ${m}`);
+    }
+    return { ok: true, data: { link_id: (data as any).id, target_kind: "doc", relation_type: "references" } };
+  }
+
+  // Derive the common project_id from the FROM endpoint (intra-project types only).
   const { data: fromRow, error: fromErr } = await db
     .from(DOC_ITEMS)
     .select("id, project_id")
@@ -649,6 +667,20 @@ export async function docSupersede(
     .eq("doc_item_id", old.id);
   if (wiLinkErr) return err(`Failed to transfer doc_item_wi_links to new version: ${wiLinkErr.message}`);
 
+  // Transfer doc_item_xproject_links: forward direction (from_item = old → new) — D-074.
+  const { error: xprojFwdErr } = await db
+    .from(DOC_ITEM_XPROJECT_LINKS)
+    .update({ from_item: created.id })
+    .eq("from_item", old.id);
+  if (xprojFwdErr) return err(`Failed to transfer forward doc_item_xproject_links: ${xprojFwdErr.message}`);
+
+  // Transfer doc_item_xproject_links: reverse direction (to_item = old → new) — D-074.
+  const { error: xprojBwdErr } = await db
+    .from(DOC_ITEM_XPROJECT_LINKS)
+    .update({ to_item: created.id })
+    .eq("to_item", old.id);
+  if (xprojBwdErr) return err(`Failed to transfer reverse doc_item_xproject_links: ${xprojBwdErr.message}`);
+
   // Edge: new --supersedes--> old (same project → FK satisfied).
   const { data: linkRow, error: linkErr } = await db
     .from(DOC_ITEM_LINKS)
@@ -664,6 +696,13 @@ export async function docSupersede(
 // doc_query — filter items + traceability checks (e.g. REQ without SDES).
 // ---------------------------------------------------------------------------
 
+// Columns a caller may project via `fields`. `id` is always included so every
+// row stays referenceable for a follow-up doc_item_resolve / doc_link.
+const QUERYABLE_FIELDS = [
+  "id", "document_id", "project_id", "item_type", "code", "status",
+  "sort_order", "priority", "body", "attrs", "updated_at",
+] as const;
+
 export interface DocQueryArgs {
   project_id: string;
   document_type?: string;
@@ -671,6 +710,8 @@ export interface DocQueryArgs {
   status?: string;
   code?: string;
   traceability?: "req_without_sdes" | "sdes_without_uat";
+  summary?: boolean;
+  fields?: string;
   limit?: number;
 }
 
@@ -683,9 +724,28 @@ export async function docQuery(
     return docTraceability(db, args);
   }
 
+  // Decide which columns to pull. summary needs body (for headline + char
+  // count) but never returns it. `fields` builds a lean projection that can
+  // skip body entirely. Default keeps the historical full row.
+  let parsedFields: string[] | null = null;
+  if (args.fields && !args.summary) {
+    const requested = args.fields.split(",").map((f) => f.trim()).filter(Boolean);
+    const invalid = requested.filter((f) => !(QUERYABLE_FIELDS as readonly string[]).includes(f));
+    if (invalid.length > 0) {
+      return err(`Unknown field(s) in fields=: ${invalid.join(", ")}. Allowed: ${QUERYABLE_FIELDS.join(", ")}.`);
+    }
+    parsedFields = Array.from(new Set(["id", ...requested]));
+  }
+
+  const selectCols = args.summary
+    ? "id, document_id, item_type, code, status, body"
+    : parsedFields
+      ? parsedFields.join(", ")
+      : "id, document_id, project_id, item_type, code, status, sort_order, priority, body, attrs, updated_at";
+
   let q = db
     .from(DOC_ITEMS)
-    .select("id, document_id, project_id, item_type, code, status, sort_order, priority, body, attrs, updated_at")
+    .select(selectCols)
     .eq("project_id", args.project_id)
     .order("sort_order", { ascending: true })
     .limit(args.limit ?? 50);
@@ -703,14 +763,79 @@ export async function docQuery(
       .eq("document_type", args.document_type);
     if (de) return err(`Failed to filter by document_type: ${de.message}`);
     const ids = (Array.isArray(docs) ? docs : []).map((d) => (d as any).id);
-    if (ids.length === 0) return { ok: true, data: { mode: "items", count: 0, items: [] } };
+    if (ids.length === 0) {
+      return { ok: true, data: { mode: args.summary ? "summary" : "items", count: 0, items: [] } };
+    }
     q = q.in("document_id", ids);
   }
 
   const { data, error } = await q;
   if (error) return err(`Query failed: ${error.message}`);
-  const items = Array.isArray(data) ? data : [];
-  return { ok: true, data: { mode: "items", count: items.length, items } };
+  const rows = Array.isArray(data) ? (data as any[]) : [];
+
+  if (args.summary) {
+    const summarized = await docSummarize(db, args.project_id, rows);
+    return { ok: true, data: { mode: "summary", count: summarized.length, items: summarized } };
+  }
+
+  return { ok: true, data: { mode: "items", count: rows.length, items: rows } };
+}
+
+// summary mode — compact, token-lean rows for review-at-scale. Returns code,
+// status, body size + headline, and link counts (doc↔doc out/in, gtd, wi) so a
+// reviewer can count orphans / coverage / quality WITHOUT dumping any body.
+async function docSummarize(
+  db: SupabaseClient,
+  projectId: string,
+  rows: any[]
+): Promise<unknown[]> {
+  const ids = rows.map((r) => r.id);
+  const docOut = new Map<string, number>();
+  const docIn = new Map<string, number>();
+  const gtdCnt = new Map<string, number>();
+  const wiCnt = new Map<string, number>();
+  const bump = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
+
+  if (ids.length > 0) {
+    // doc↔doc links are project-scoped (project_id column present, D-a5).
+    const { data: dl } = await db
+      .from(DOC_ITEM_LINKS)
+      .select("from_item, to_item")
+      .eq("project_id", projectId);
+    for (const l of (Array.isArray(dl) ? (dl as any[]) : [])) {
+      bump(docOut, l.from_item);
+      bump(docIn, l.to_item);
+    }
+    // gtd / wi links keyed by doc_item_id (D-070, no project_id column).
+    const { data: gl } = await db
+      .from(DOC_ITEM_GTD_LINKS)
+      .select("doc_item_id")
+      .in("doc_item_id", ids);
+    for (const l of (Array.isArray(gl) ? (gl as any[]) : [])) bump(gtdCnt, l.doc_item_id);
+    const { data: wl } = await db
+      .from(DOC_ITEM_WI_LINKS)
+      .select("doc_item_id")
+      .in("doc_item_id", ids);
+    for (const l of (Array.isArray(wl) ? (wl as any[]) : [])) bump(wiCnt, l.doc_item_id);
+  }
+
+  return rows.map((r) => {
+    const body = typeof r.body === "string" ? r.body : "";
+    return {
+      id: r.id,
+      code: r.code,
+      item_type: r.item_type,
+      status: r.status,
+      body_chars: body.length,
+      headline: body.replace(/\s+/g, " ").trim().slice(0, 120),
+      links: {
+        doc_out: docOut.get(r.id) ?? 0,
+        doc_in: docIn.get(r.id) ?? 0,
+        gtd: gtdCnt.get(r.id) ?? 0,
+        wi: wiCnt.get(r.id) ?? 0,
+      },
+    };
+  });
 }
 
 // Traceability: items of a "source" type in the project with no link to a

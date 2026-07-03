@@ -1,12 +1,40 @@
 {
   "_comment": "Template .claude/settings.json agenti LoomX (D-024 governance-compliance). Sostituisci board-mcp. Schema Claude Code hooks: https://code.claude.com/docs/en/hooks. Spec LoomX: hub/initiatives/governance-compliance/design.md sezione 6.",
   "hooks": {
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/session-end-gate.sh"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[governance D-024] Chiusura sessione: wi_end --status done|waiting|failed + summary D-014 a loomy (insight, persone citate, rischi, connessioni).'"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/loomy/workspace/hub/scripts/track_interactive_session.py"
+          }
+        ]
+      }
+    ],
     "SessionStart": [
       {
         "hooks": [
           {
             "type": "command",
-            "command": "echo '[governance D-024] Pre-flight: leggi CLAUDE.md + AGENT-STANDARD \u00a70/\u00a70bis, verifica wi_status, apri wi_start prima di scritture persistenti. Template WI in hub/templates/work-items/.'"
+            "command": "echo '[governance D-024] Pre-flight: leggi CLAUDE.md + AGENT-STANDARD §0/§0bis, verifica wi_status, apri wi_start prima di scritture persistenti. Template WI in hub/templates/work-items/.'"
           }
         ]
       }
@@ -22,21 +50,29 @@
         ]
       },
       {
-        "matcher": "mcp__board__board_send|mcp__board__board_broadcast|mcp__board__gtd_add|mcp__board__gtd_update|mcp__board__gtd_complete|mcp__board__wi_end|mcp__board__wi_checkpoint",
+        "matcher": "mcp__board__board_send|mcp__board__board_broadcast|mcp__board__board_update_status|mcp__board__board_archive|mcp__board__gtd_add|mcp__board__gtd_update|mcp__board__gtd_complete|mcp__board__gtd_link_agent|mcp__board__gtd_unlink_agent|mcp__board__wi_end|mcp__board__wi_checkpoint|mcp__board__wi_pause|mcp__board__wi_link_template|mcp__board__doc_create|mcp__board__doc_item_upsert|mcp__board__doc_link|mcp__board__doc_link_by_code|mcp__board__doc_supersede|mcp__board__runtime_request",
         "hooks": [
           {
             "type": "command",
             "command": "bash .claude/hooks/governance-gate.sh --agent board-mcp --mcp-mode"
           }
         ]
-      }
-    ],
-    "Stop": [
+      },
       {
+        "matcher": "Bash",
         "hooks": [
           {
             "type": "command",
-            "command": "echo '[governance D-024] Chiusura sessione: wi_end --status done|waiting|failed + summary D-014 a loomy (insight, persone citate, rischi, connessioni).'"
+            "command": "bash .claude/hooks/governance-gate.sh --agent board-mcp --bash"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__board__wi_end",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/doc-lint.sh 2>&1 || true"
           }
         ]
       }
