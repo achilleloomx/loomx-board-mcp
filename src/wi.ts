@@ -20,6 +20,7 @@ export const EPHEMERAL_TEMPLATES: readonly string[] = [
   "session-meta",
   "triage",
   "conversation",
+  "audit-agent-alignment", // internal report, no REQ/SDES (loomy-approved, msg f7447db6)
 ];
 
 function isEphemeralWi(
