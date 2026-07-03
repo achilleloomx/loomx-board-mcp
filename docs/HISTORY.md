@@ -22,6 +22,26 @@
 
 **Bug scoperto in chiusura (WI separato `e1867f2b`, GTD `156b7b35`): `syncWiCache` cancellava la cache invece di preservarla.** Provato a chiudere il WI di cui sopra ed eseguire `runtime_request` (step obbligatorio D-052) → gate bloccato con "Nessun Work Item attivo" nonostante `wi_end` appena riuscito. Causa: `wiCache.ts::syncWiCache` filtrava `status='active'` e faceva `unlink()` della cache se non trovava righe — quindi dopo ogni `wi_end`/`wi_pause` la cache spariva del tutto, rendendo dead code il whitelist post-chiusura di `governance-gate.sh` (righe 167-180, WIP non committato di un'altra sessione, v1.1) che si aspetta la cache ancora presente con `status=done|failed|paused` per lasciar passare `gtd_update`/`gtd_complete`/`board_send`/`runtime_request`/`wi_start`. **Fix:** `syncWiCache` ora fa query senza filtro di status (order by `started_at` desc, limit 1) e scrive sempre la riga più recente — la cache si svuota solo se l'agente non ha mai avuto un WI. Impatta ogni agente della flotta (blocco strutturale sul closing-sequence D-052, non solo board-mcp). Richiede rebuild+restart per essere live; segnalato a Loomy.
 
+## Sessione #44 — 2026-07-03 (P7 remediation governance: items 1-5 chiusi, 6-8 pianificati)
+
+**GTD:** `e308cec4` (stesso GTD di Sessione #43, riaperto — il lavoro descritto in #43 era rimasto non committato: 519 righe pendenti, working tree only). **WI** `8acc4201`. Modello: sonnet (autopilot). Rif. WI Loomy `635ac874`.
+
+**Status:** ✅ **DONE — items 1-5 chiusi, 70/70 test, build pulita. Items 6-7 pianificati come GTD follow-on, item 8 girato a DBA.**
+
+**1. Commit del lavoro pendente (b6b3c08):** guard D-069 su `gtd_update`, `item_project_link`, backstop 23505 su `gtd_add` (D-066), `doc_link`/`docTypes` relation `references`→`doc_item_xproject_links` (D-074), fix `wiCache.ts` (descritto in #43). Incluso fix sicurezza fuori scope originale: `.mcp.json.servicerole.bak` in root conteneva `service_role` key in chiaro — mai committato ma non coperto da `.gitignore` (solo `.claude/*.bak*`, non il root). Eliminato + `*.bak*` aggiunto a `.gitignore`.
+
+**2. Guard D-069 esteso a `gtd_add` (a2c010e):** prima si poteva creare un GTD con `autopilot=true` mentre l'owner aveva un WI active, bypassando il guard che c'era solo su `gtd_update`. Estratto helper condiviso `checkAutopilotArmGuard(db, owner)` in `src/tools.ts`, usato da entrambi i tool.
+
+**3. Versione unificata (a2c010e):** `server.ts` (hardcoded `0.2.0`) e `remote.ts` (hardcoded `0.6.0`) leggono ora `PACKAGE_VERSION` da `package.json` via nuovo `src/version.ts` (`fs.readFileSync` + `import.meta.url`, non import JSON diretto perché `package.json` è fuori da `rootDir=src`).
+
+**4.** Vedi punto 1.
+
+**5. Test di regressione (a2c010e):** estratta `buildGtdUpdatePayload()` come funzione pura esportata da `src/tools.ts` (prima logica inline in `gtd_update`); nuovo `tests/gtd.test.ts` verifica che un update con solo `body` non tocchi `gtd_status` né altri campi. Chiude il punto aperto in #43 punto 3 ("non riprodotto, ma senza test").
+
+**Items 6-8 (project_list tool, refresh registry board_agents, cron pg + trigger DB D-069):** fuori dal budget di questa sessione. Pianificati come 2 GTD follow-on (`4a709dc7` project_list, `d655e2a5` refresh registry), `autopilot=false` fino a `wi_end` (D-069 two-phase). Item 8 (cron `board_archive_old` + valutazione trigger DB) richiede DBA — girato con `board_send` task diretto, non GTD board-mcp.
+
+**Risposto in board_inbox:** ETA gate D-074 (implementato, ora anche su `gtd_add`), bug atlas su `doc_item_wi_links` non risolti dal gate `wi_end` (fuori scope, gate vive in `src/wi.ts` non toccato — resta aperto), anomalia dedup 30/06 (backstop 23505 committato ma l'anomalia storica specifica non investigata, fuori scope).
+
 ## Sessione #42 — 2026-06-30 (verifica dedup D-066: anomalia Atlas source_ref f7f797ad)
 
 **GTD:** `[msg] loomy→board-mcp: verifica dedup D-066 — stesso source_ref f7f797ad → 3 GTD distinti (anomalia Atlas)` (`237a4139`). **WI** `ee9149b8-e71f-463f-b39c-4f1db2deec44`. Template `verify-dedup` (on-the-fly). Modello: opus (autopilot). Lega a anomalia loomy `001587bd`.
