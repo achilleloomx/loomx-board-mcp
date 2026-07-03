@@ -42,6 +42,16 @@
 
 **Risposto in board_inbox:** ETA gate D-074 (implementato, ora anche su `gtd_add`), bug atlas su `doc_item_wi_links` non risolti dal gate `wi_end` (fuori scope, gate vive in `src/wi.ts` non toccato — resta aperto), anomalia dedup 30/06 (backstop 23505 committato ma l'anomalia storica specifica non investigata, fuori scope).
 
+## Sessione #45 — 2026-07-03 (P7 scope item 6: project_list read-only tool)
+
+**GTD:** `[board-mcp] project_list read-only tool` (`4a709dc7`, follow-on da #44 item 6). **WI** `d91ba6c7`. Modello: sonnet (autopilot, D-053 gate costi — task read-only, non design/DDL).
+
+**Status:** ✅ **DONE — tool aggiunto, 70/70 test invariati, build pulita.**
+
+**`project_list` (nuovo tool, src/tools.ts):** SELECT read-only su `loomx_projects` (`id, name, short_name, status, agent_id`), filtri opzionali `status`/`agent_id`, limit default 50. Nessun path di scrittura, nessun cambio ruolo RLS — risolve il problema di discovery del `project_id` oggi possibile solo via Management API. Schema confermato in `loomx-home-DBA/supabase/migrations/20260405100000_...sql` (colonne: `id, name, short_name, client_id, type, agent_id, repo, local_path, status, notes`; niente colonna `slug` — usato `short_name`). CLAUDE.md aggiornato (tabella GTD Tools, count 29→30).
+
+**Note operative:** live exposure richiede rebuild+restart del processo MCP (pattern noto, vedi #40/#41/#44).
+
 ## Sessione #42 — 2026-06-30 (verifica dedup D-066: anomalia Atlas source_ref f7f797ad)
 
 **GTD:** `[msg] loomy→board-mcp: verifica dedup D-066 — stesso source_ref f7f797ad → 3 GTD distinti (anomalia Atlas)` (`237a4139`). **WI** `ee9149b8-e71f-463f-b39c-4f1db2deec44`. Template `verify-dedup` (on-the-fly). Modello: opus (autopilot). Lega a anomalia loomy `001587bd`.

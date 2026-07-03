@@ -13,6 +13,7 @@ const TABLE = "board_messages";
 const OVERVIEW_VIEW = "board_overview";
 const GTD_TABLE = "loomx_items";
 const GTD_ITEM_PROJECTS_TABLE = "loomx_item_projects";
+const PROJECTS_TABLE = "loomx_projects";
 const RUNTIME_TABLE = "loomx_agent_runtime";
 const WI_TABLE = "loomx_work_items";
 
@@ -1437,6 +1438,39 @@ export function registerTools(
 
       return {
         content: [{ type: "text", text: JSON.stringify({ ok: true, ...data }, null, 2) }],
+      };
+    }
+  );
+
+  // --- project_list ---
+  server.tool(
+    "project_list",
+    "Read-only list of projects (loomx_projects) — id, name, short_name, status, agent_id. Use to discover project_id without the Management API.",
+    {
+      status: z.string().optional().describe("Filter by status (default: all)"),
+      agent_id: z.string().optional().describe("Filter by responsible agent slug"),
+      limit: z.number().int().min(1).max(200).optional().describe("Max rows (default: 50)"),
+    },
+    async ({ status, agent_id, limit }) => {
+      const db = getSupabaseClient();
+      let query = db
+        .from(PROJECTS_TABLE)
+        .select("id, name, short_name, status, agent_id")
+        .order("name")
+        .limit(limit ?? 50);
+      if (status) query = query.eq("status", status);
+      if (agent_id) query = query.eq("agent_id", agent_id);
+
+      const { data, error } = await query;
+      if (error) {
+        return {
+          content: [{ type: "text", text: `Error listing projects: ${error.message}` }],
+          isError: true,
+        };
+      }
+
+      return {
+        content: [{ type: "text", text: JSON.stringify({ projects: data ?? [] }, null, 2) }],
       };
     }
   );
