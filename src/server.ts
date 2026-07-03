@@ -2,6 +2,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { resolveAgentRegistry } from "./supabase.js";
 import { registerTools } from "./tools.js";
+import { PACKAGE_VERSION } from "./version.js";
 export async function startServer(slug: string): Promise<void> {
   const registry = await resolveAgentRegistry(slug);
 
@@ -11,7 +12,7 @@ export async function startServer(slug: string): Promise<void> {
 
   const server = new McpServer({
     name: `board-mcp-${slug}`,
-    version: "0.2.0",
+    version: PACKAGE_VERSION,
   });
 
   registerTools(server, registry);

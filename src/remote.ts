@@ -16,6 +16,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import { resolveAgentRegistry } from "./supabase.js";
 import { registerHumanTools } from "./humanTools.js";
+import { PACKAGE_VERSION } from "./version.js";
 
 const SELF_SLUG = "board-mcp";
 const LOOMY_SLUG = "loomy";
@@ -92,7 +93,7 @@ export async function startRemoteServer(): Promise<void> {
   const transports: Record<string, StreamableHTTPServerTransport> = {};
 
   function newServer(): McpServer {
-    const server = new McpServer({ name: "loomx-chat", version: "0.6.0" });
+    const server = new McpServer({ name: "loomx-chat", version: PACKAGE_VERSION });
     registerHumanTools(server, ctx);
     return server;
   }

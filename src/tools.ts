@@ -16,6 +16,70 @@ const GTD_ITEM_PROJECTS_TABLE = "loomx_item_projects";
 const RUNTIME_TABLE = "loomx_agent_runtime";
 const WI_TABLE = "loomx_work_items";
 
+// D-069 two-phase arm enforcement: reject autopilot=true while `owner` has an
+// active WI — arming races the reconciler, which may evoke before wi_end closes
+// the WI (per CLAUDE.md "Autopilot closure"). Returns an MCP error result if
+// blocked, or null if the arm is allowed.
+async function checkAutopilotArmGuard(
+  db: ReturnType<typeof getSupabaseClient>,
+  owner: string
+): Promise<{ content: { type: "text"; text: string }[]; isError: true } | null> {
+  const { data: activeWi } = await db
+    .from(WI_TABLE)
+    .select("id")
+    .eq("agent_slug", owner)
+    .eq("status", "active")
+    .limit(1);
+  if (Array.isArray(activeWi) && activeWi.length > 0) {
+    return {
+      content: [
+        {
+          type: "text",
+          text: `Error: cannot arm autopilot=true — '${owner}' has an active WI ('${(activeWi[0] as { id: string }).id}'). Two-phase arm (D-069): call wi_end first, then arm autopilot.`,
+        },
+      ],
+      isError: true,
+    };
+  }
+  return null;
+}
+
+// Builds the `loomx_items` UPDATE payload for gtd_update — only fields the
+// caller explicitly passed are included (regression guard: calling with just
+// `body` must never flip `gtd_status` or other untouched fields; see
+// docs/HISTORY.md "footgun gtd_update body-only" review, D-a5-P7).
+export interface GtdUpdateFields {
+  title?: string;
+  body?: string;
+  gtd_status?: string;
+  priority?: string;
+  deadline?: string | null;
+  waiting_on?: string | null;
+  owner?: string;
+  autopilot?: boolean;
+  autopilot_model?: string | null;
+  recurrence_days?: number | null;
+  block_scope?: string | null;
+  resume_hint?: string | null;
+}
+
+export function buildGtdUpdatePayload(fields: GtdUpdateFields): Record<string, unknown> {
+  const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (fields.title !== undefined) updates.title = fields.title;
+  if (fields.body !== undefined) updates.body = fields.body;
+  if (fields.gtd_status !== undefined) updates.gtd_status = fields.gtd_status;
+  if (fields.priority !== undefined) updates.priority = fields.priority;
+  if (fields.deadline !== undefined) updates.deadline = fields.deadline;
+  if (fields.waiting_on !== undefined) updates.waiting_on = fields.waiting_on;
+  if (fields.owner !== undefined) updates.owner = fields.owner;
+  if (fields.autopilot !== undefined) updates.autopilot = fields.autopilot;
+  if (fields.autopilot_model !== undefined) updates.autopilot_model = fields.autopilot_model;
+  if (fields.recurrence_days !== undefined) updates.recurrence_days = fields.recurrence_days;
+  if (fields.block_scope !== undefined) updates.block_scope = fields.block_scope;
+  if (fields.resume_hint !== undefined) updates.resume_hint = fields.resume_hint;
+  return updates;
+}
+
 const MessageTypeSchema = z.enum(MESSAGE_TYPES);
 const StatusFilterSchema = z.enum(MESSAGE_STATUSES);
 
@@ -717,6 +781,11 @@ export function registerTools(
 
       const db = getSupabaseClient();
 
+      if (autopilot === true) {
+        const guardError = await checkAutopilotArmGuard(db, targetOwner);
+        if (guardError) return guardError;
+      }
+
       // D-066 dedup: if source_ref given, return existing GTD (owner+source_ref) instead of inserting
       if (source_ref) {
         const { data: existing } = await db
@@ -833,9 +902,6 @@ export function registerTools(
         };
       }
 
-      // D-069 two-phase arm enforcement: arming autopilot=true while the owner
-      // still has an active WI races the reconciler (it may evoke before wi_end
-      // closes). Reject — arm AFTER wi_end, per CLAUDE.md "Autopilot closure".
       if (autopilot === true) {
         let targetOwner = owner;
         if (targetOwner === undefined) {
@@ -847,40 +913,15 @@ export function registerTools(
           targetOwner = (existing as { owner?: string } | null)?.owner;
         }
         if (targetOwner) {
-          const { data: activeWi } = await db
-            .from(WI_TABLE)
-            .select("id")
-            .eq("agent_slug", targetOwner)
-            .eq("status", "active")
-            .limit(1);
-          if (Array.isArray(activeWi) && activeWi.length > 0) {
-            return {
-              content: [
-                {
-                  type: "text",
-                  text: `Error: cannot arm autopilot=true — '${targetOwner}' has an active WI ('${(activeWi[0] as { id: string }).id}'). Two-phase arm (D-069): call wi_end first, then gtd_update(autopilot=true).`,
-                },
-              ],
-              isError: true,
-            };
-          }
+          const guardError = await checkAutopilotArmGuard(db, targetOwner);
+          if (guardError) return guardError;
         }
       }
 
-      // Build update payload — only include provided fields
-      const updates: Record<string, unknown> = { updated_at: new Date().toISOString() };
-      if (title !== undefined) updates.title = title;
-      if (body !== undefined) updates.body = body;
-      if (gtd_status !== undefined) updates.gtd_status = gtd_status;
-      if (priority !== undefined) updates.priority = priority;
-      if (deadline !== undefined) updates.deadline = deadline;
-      if (waiting_on !== undefined) updates.waiting_on = waiting_on;
-      if (owner !== undefined) updates.owner = owner;
-      if (autopilot !== undefined) updates.autopilot = autopilot;
-      if (autopilot_model !== undefined) updates.autopilot_model = autopilot_model;
-      if (recurrence_days !== undefined) updates.recurrence_days = recurrence_days;
-      if (block_scope !== undefined) updates.block_scope = block_scope;
-      if (resume_hint !== undefined) updates.resume_hint = resume_hint;
+      const updates = buildGtdUpdatePayload({
+        title, body, gtd_status, priority, deadline, waiting_on, owner,
+        autopilot, autopilot_model, recurrence_days, block_scope, resume_hint,
+      });
 
       let query = db
         .from(GTD_TABLE)
