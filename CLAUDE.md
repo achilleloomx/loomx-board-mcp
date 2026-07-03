@@ -98,7 +98,7 @@ loomx-board-mcp/
 
 ## MCP Tools
 
-30 tool base esposti a ogni agente (22 board/gtd/wi/runtime + 8 doc_* document model) + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
+31 tool base esposti a ogni agente (23 board/gtd/wi/runtime + 8 doc_* document model) + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
 
 ### Board Tools (board_messages)
 
@@ -205,15 +205,18 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 
 ### Runtime Tools (loomx_agent_runtime — control-plane D-053)
 
-1 tool per scrivere richieste lifecycle sul control-plane. Il reconciler (dev-hq) è il consumatore.
+2 tool per il control-plane lifecycle. Il reconciler (dev-hq) è il consumatore principale della scrittura; il broker (loomy-assistant) è il consumatore principale della lettura (stall-triage D-058).
 
 | Tool | Descrizione | Operazione DB |
 |---|---|---|
 | `runtime_request` | Scrive request=clear\|kill\|model\|none sulla propria riga runtime (owner_slug=self) | UPDATE loomx_agent_runtime |
+| `runtime_status` | Read-only: riga singola (`agent_slug`) o intera flotta (solo loomy/broker); campi mode/request/model_current/context_pct/rate_5h_pct/rate_7d_pct/heartbeat_at/coordinator_active | SELECT loomx_agent_runtime |
 
 > **Uso tipico autopilot:** a `wi_end`, se l'agente vuole rientrare nella coda di dispatch, chiama `runtime_request(request="clear")` prima di chiudere il WI.
 >
-> **Regola ownership:** ogni agente scrive solo la propria riga. La riga deve esistere (agente già heartbeated), altrimenti ritorna errore esplicito.
+> **Uso tipico broker (D-058):** in stall-triage, `runtime_status(agent_slug=<agente in stallo>)` prima di decidere `continue/clear/kill` al posto suo via `runtime_request(agent_slug=...)`.
+>
+> **Regola ownership:** ogni agente scrive/legge la propria riga senza restrizioni; lettura di righe altrui o della flotta intera è riservata a loomy/loomy-assistant. La riga deve esistere (agente già heartbeated), altrimenti ritorna errore esplicito.
 
 **Enum `request`:**
 | Valore | Significato |
@@ -413,4 +416,4 @@ Quando una situazione matcha il trigger di una skill:
 
 ---
 
-*Creato: 2026-03-30 | Allineato: 2026-07-03 (P7 scope item 6: project_list read-only tool)*
+*Creato: 2026-03-30 | Allineato: 2026-07-03 (tool runtime_status per stall-triage broker)*

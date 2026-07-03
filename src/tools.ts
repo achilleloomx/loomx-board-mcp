@@ -2330,6 +2330,64 @@ export function registerTools(
     }
   );
 
+  // --- runtime_status ---
+  const RUNTIME_STATUS_COLUMNS =
+    "owner_slug, mode, request, requested_model, model_current, context_pct, rate_5h_pct, rate_7d_pct, heartbeat_at, coordinator_active";
+
+  server.tool(
+    "runtime_status",
+    "Read-only view of loomx_agent_runtime (D-058 stall-triage telemetry). Without agent_slug returns the whole fleet (ordered by heartbeat_at desc); with agent_slug returns a single row. Fields: mode, request, requested_model, model_current, context_pct, rate_5h_pct, rate_7d_pct, heartbeat_at, coordinator_active. Anyone can read their own row; loomy and loomy-assistant (broker) can read any row or the full fleet.",
+    {
+      agent_slug: z.string().optional().describe("Target agent slug. Omit for the full fleet (loomy/broker only) or to read your own row."),
+    },
+    async ({ agent_slug }) => {
+      const db = getSupabaseClient();
+
+      if (!agent_slug) {
+        if (isLoomy || isBroker) {
+          const { data, error } = await db
+            .from(RUNTIME_TABLE)
+            .select(RUNTIME_STATUS_COLUMNS)
+            .order("heartbeat_at", { ascending: false, nullsFirst: false });
+          if (error) {
+            return { content: [{ type: "text", text: `Error reading runtime status: ${error.message}` }], isError: true };
+          }
+          return { content: [{ type: "text", text: JSON.stringify({ ok: true, rows: data ?? [] }, null, 2) }] };
+        }
+        agent_slug = selfSlug;
+      }
+
+      if (agent_slug !== selfSlug && !(isLoomy || isBroker)) {
+        return {
+          content: [{ type: "text", text: `Error: only loomy or loomy-assistant can read another agent's runtime row. Omit agent_slug to read your own.` }],
+          isError: true,
+        };
+      }
+      if (!(await ensureAgentKnown(agent_slug))) {
+        return {
+          content: [{ type: "text", text: `Error: unknown agent slug "${agent_slug}". Valid: ${[...slugToCode.keys()].join(", ")}` }],
+          isError: true,
+        };
+      }
+
+      const { data, error } = await db
+        .from(RUNTIME_TABLE)
+        .select(RUNTIME_STATUS_COLUMNS)
+        .eq("owner_slug", agent_slug)
+        .maybeSingle();
+      if (error) {
+        return { content: [{ type: "text", text: `Error reading runtime status: ${error.message}` }], isError: true };
+      }
+      if (!data) {
+        return {
+          content: [{ type: "text", text: `No runtime row found for agent '${agent_slug}'. The agent must register a heartbeat first.` }],
+          isError: true,
+        };
+      }
+      return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...data }, null, 2) }] };
+    }
+  );
+
   // =========================================================================
   // Document model Tools (documents / doc_items / links — D-a5 §7 / §16)
   // Self-describing for Haiku: copy-pasteable examples, sensible defaults

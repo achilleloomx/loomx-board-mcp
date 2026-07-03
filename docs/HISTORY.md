@@ -58,6 +58,20 @@
 
 **Note operative:** live exposure richiede rebuild+restart del processo MCP (pattern noto, vedi #40/#41/#44/#45). Nessuna migrazione DB richiesta.
 
+## Sessione #47 — 2026-07-03 (tool `runtime_status`: stall-triage con telemetria per il broker)
+
+**GTD:** `[autopilot board-mcp] Tool lettura runtime per il broker (runtime_status) — stall-triage con telemetria` (`7759ee4c`). **WI** `3a2224f9`. Modello: sonnet (task read-only, non design/DDL — D-053 gate costi). Rif. WI Loomy `5bb0f843`.
+
+**Status:** ✅ **DONE — 73/73 test invariati, build pulita.**
+
+**Nuovo tool `runtime_status` (src/tools.ts, dopo `runtime_request`):** read-only su `loomx_agent_runtime`. Senza `agent_slug` → riga propria (chiunque) o intera flotta ordinata per `heartbeat_at` desc (solo loomy/broker); con `agent_slug` → riga singola (propria sempre, altrui solo loomy/broker). Colonne esposte: `mode, request, requested_model, model_current, context_pct, rate_5h_pct, rate_7d_pct, heartbeat_at, coordinator_active` (schema confermato in `loomx-home-DBA/supabase/migrations/20260621140000_loomx_agent_runtime.sql` + `20260628030000_..._coordinator_active.sql`). Stesso pattern ownership/lazy-reload di `runtime_request` (`ensureAgentKnown`, `isLoomy || isBroker`).
+
+**Motivazione (dal body GTD):** il broker `loomy-assistant` nello stall-triage D-058 deve decidere `continue/clear/kill` al posto di un agente in stallo ma prima non poteva leggere `loomx_agent_runtime` via MCP — decideva al buio (solo scrittura via `runtime_request`, nessuna read path).
+
+**Cosa (src/tools.ts):** nuovo tool `runtime_status` (~55 righe, nessuna modifica a tool esistenti). CLAUDE.md aggiornato (tabella Runtime Tools). Nessuna migrazione DB richiesta (colonne già esistenti).
+
+**Note operative:** live exposure richiede rebuild+restart del processo MCP (pattern noto, vedi #40/#41/#44/#45/#46). Notify a `loomy-assistant` inviata post-deploy (rif. GTD body).
+
 ## Sessione #45 — 2026-07-03 (P7 scope item 6: project_list read-only tool)
 
 **GTD:** `[board-mcp] project_list read-only tool` (`4a709dc7`, follow-on da #44 item 6). **WI** `d91ba6c7`. Modello: sonnet (autopilot, D-053 gate costi — task read-only, non design/DDL).
