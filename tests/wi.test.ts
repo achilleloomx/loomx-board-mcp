@@ -8,6 +8,9 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { mkdtempSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import {
   wiStart,
@@ -24,6 +27,7 @@ import {
   mapEndToGtdStatus,
   EPHEMERAL_TEMPLATES,
 } from "../src/wi.ts";
+import { refreshTemplateCatalog } from "../src/wiTemplates.ts";
 
 // ---- Fake DB client -----------------------------------------------------
 
@@ -245,6 +249,56 @@ test("wi_start (error): non-loomy cannot open WI for another agent", async () =>
   assert.equal(res.ok, false);
   if (res.ok) return;
   assert.match(res.error, /Only loomy/);
+});
+
+// ---- wi_start template catalog validation (GTD f67f9524) ----------------
+
+test("wi_start (template catalog): unset WI_TEMPLATES_PATH skips validation silently", async () => {
+  delete process.env.WI_TEMPLATES_PATH;
+  refreshTemplateCatalog();
+  const store: Store = { loomx_items: [], loomx_work_items: [] };
+  const db = makeDb(store);
+  const res = await wiStart(db, { intent: "x", template_name: "totally-made-up" }, ctxOwn);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.data.template_warning, undefined);
+});
+
+test("wi_start (template catalog): unknown name soft-warns, WI still opens", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wi-templates-"));
+  writeFileSync(join(dir, "fix-bug.yaml"), "template:\n  name: fix-bug\n");
+  process.env.WI_TEMPLATES_PATH = dir;
+  refreshTemplateCatalog();
+  try {
+    const store: Store = { loomx_items: [], loomx_work_items: [] };
+    const db = makeDb(store);
+    const res = await wiStart(db, { intent: "x", template_name: "made-up-name" }, ctxOwn);
+    assert.equal(res.ok, true);
+    if (!res.ok) return;
+    assert.ok(res.data.wi_id);
+    assert.match(res.data.template_warning ?? "", /not found in the WI templates catalog/);
+  } finally {
+    delete process.env.WI_TEMPLATES_PATH;
+    refreshTemplateCatalog();
+  }
+});
+
+test("wi_start (template catalog): known name has no warning", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wi-templates-"));
+  writeFileSync(join(dir, "fix-bug.yaml"), "template:\n  name: fix-bug\n");
+  process.env.WI_TEMPLATES_PATH = dir;
+  refreshTemplateCatalog();
+  try {
+    const store: Store = { loomx_items: [], loomx_work_items: [] };
+    const db = makeDb(store);
+    const res = await wiStart(db, { intent: "x", template_name: "fix-bug" }, ctxOwn);
+    assert.equal(res.ok, true);
+    if (!res.ok) return;
+    assert.equal(res.data.template_warning, undefined);
+  } finally {
+    delete process.env.WI_TEMPLATES_PATH;
+    refreshTemplateCatalog();
+  }
 });
 
 // ---- wi_end -------------------------------------------------------------

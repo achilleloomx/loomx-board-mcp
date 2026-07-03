@@ -162,7 +162,7 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 
 | Tool | Descrizione | Operazione DB |
 |---|---|---|
-| `wi_start` | Apre nuovo WI (auto-crea GTD se non dato); enforce 1 active/agent | INSERT loomx_work_items + UPDATE/INSERT loomx_items |
+| `wi_start` | Apre nuovo WI (auto-crea GTD se non dato); enforce 1 active/agent; `template_name` soft-warn vs catalogo (v0.10.2) | INSERT loomx_work_items + UPDATE/INSERT loomx_items |
 | `wi_end` | Chiude WI (status=done/failed/waiting); cascada GTD; gate durable (D-074) | UPDATE loomx_work_items + loomx_items |
 | `wi_status` | Ritorna WI active per un agente | SELECT (agent_slug, status=active) |
 | `wi_query` | Query WI con filtri (owner auto-scoped per non-loomy) | SELECT con filtri |
@@ -181,6 +181,10 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 4. `wi_end --failed` APPENDE `[BLOCKER] <reason>` al body GTD esistente (non sovrascrive); non manipola `loomx_item_tags` (richiederebbe lookup/insert su tabella separata — fuori scope).
 5. **Broker WI (intenzionale):** `loomy-assistant` NON ha poteri loomy sui WI (`isLoomy=false` in `WiContext`). WI = dichiarazione governance formale (D-024); solo `loomy` può aprire/chiudere WI per altri agenti. Il broker ha poteri GTD cross-agente ma non WI.
 6. **`recurrence_days` re-arm (esterno):** `gtd_complete` porta solo a done+completed_at. Il re-arm (creazione GTD successivo dopo N giorni) è responsabilità del reconciler (dev-hq), non del board-mcp.
+
+**Validazione `template_name` (v0.10.2, GTD f67f9524):** `wi_start` verifica `template_name` contro il catalogo YAML in `hub/templates/work-items/` — SOLO soft-warn (`template_warning` nella risposta), mai hard-fail (hard-fail rimandato a un periodo di grazia da concordare con Loomy). Opt-in via env `WI_TEMPLATES_PATH` (path al catalogo): se non settato, validazione skippata silenziosamente — nessun impatto sugli agenti che non l'hanno configurato. Lazy-reload on-miss (stesso pattern del registry agenti, vedi sotto).
+
+**Refresh registry `board_agents` (v0.10.2, GTD f67f9524):** prima gli slug agente erano risolti una volta al boot (`resolveAgentRegistry`) — un agente aggiunto a `board_agents` dopo il boot risultava "Unknown agent" sulle window già aperte, senza restart. Ora ogni validazione slug (`board_send`, `wi_start --agent_slug`, ecc.) fa lazy-reload (`refreshAgentRegistry`) quando lo slug non è nella mappa in-memory, prima di rispondere con errore.
 
 **`wi_end` params Phase 1 D-074/D-075 (v0.9.0):**
 | Param | Tipo | Effetto |

@@ -108,3 +108,26 @@ export async function resolveAgentRegistry(
     codeToSlug,
   };
 }
+
+// Re-queries board_agents and repopulates the registry's maps in place (same
+// Map instances — tool closures hold a reference, not a copy). Used as a
+// lazy-reload fallback when a slug misses validation: a newly added agent is
+// invisible until this runs once, since the registry is otherwise snapshotted
+// at boot (see startServer in server.ts).
+export async function refreshAgentRegistry(registry: AgentRegistry): Promise<void> {
+  const db = getSupabaseClient();
+
+  const { data, error } = await db
+    .from("board_agents")
+    .select("agent_code, slug, label, nickname, active")
+    .eq("active", true);
+
+  if (error || !data) return;
+
+  registry.slugToCode.clear();
+  registry.codeToSlug.clear();
+  for (const agent of data as BoardAgent[]) {
+    registry.slugToCode.set(agent.slug, agent.agent_code);
+    registry.codeToSlug.set(agent.agent_code, agent.slug);
+  }
+}

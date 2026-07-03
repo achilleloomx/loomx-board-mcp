@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { getSupabaseClient } from "./supabase.js";
+import { getSupabaseClient, refreshAgentRegistry } from "./supabase.js";
 import { MESSAGE_TYPES, MESSAGE_STATUSES, GTD_STATUSES, GTD_PRIORITIES, MEAL_TYPES, MENU_STATUSES, WI_END_STATUSES, WI_TEMPLATE_LAYERS, RUNTIME_REQUEST_TYPES } from "./types.js";
 import type { AgentRegistry, MessageStatus } from "./types.js";
 import {
@@ -92,8 +92,19 @@ export function registerTools(
 
   // Dynamic agent slug validation — no hardcoded enum
   const validSlugs = [...slugToCode.keys()];
-  const validateRecipientSlug = (slug: string): string | null => {
-    if (!slugToCode.has(slug)) return `Unknown agent "${slug}". Valid: ${validSlugs.join(", ")}`;
+
+  // Lazy-reload: the registry is snapshotted at boot (resolveAgentRegistry),
+  // so an agent added to board_agents afterwards misses validation until this
+  // re-queries once and retries. slugToCode/codeToSlug are mutated in place
+  // (refreshAgentRegistry), so this call site's slugToCode reference sees it.
+  const ensureAgentKnown = async (slug: string): Promise<boolean> => {
+    if (slugToCode.has(slug)) return true;
+    await refreshAgentRegistry(registry);
+    return slugToCode.has(slug);
+  };
+
+  const validateRecipientSlug = async (slug: string): Promise<string | null> => {
+    if (!(await ensureAgentKnown(slug))) return `Unknown agent "${slug}". Valid: ${[...slugToCode.keys()].join(", ")}`;
     if (slug === selfSlug) return "Cannot send a message to yourself";
     return null;
   };
@@ -116,7 +127,7 @@ export function registerTools(
         .describe("Reference message ID (for done/replies)"),
     },
     async ({ to_agent, type, subject, body, summary, tags, ref_id }) => {
-      const validationError = validateRecipientSlug(to_agent);
+      const validationError = await validateRecipientSlug(to_agent);
       if (validationError) {
         return {
           content: [{ type: "text", text: `Error: ${validationError}` }],
@@ -1246,9 +1257,9 @@ export function registerTools(
         }
       }
 
-      if (!slugToCode.has(agent_slug)) {
+      if (!(await ensureAgentKnown(agent_slug))) {
         return {
-          content: [{ type: "text", text: `Error: unknown agent slug "${agent_slug}". Valid: ${validSlugs.join(", ")}` }],
+          content: [{ type: "text", text: `Error: unknown agent slug "${agent_slug}". Valid: ${[...slugToCode.keys()].join(", ")}` }],
           isError: true,
         };
       }
@@ -2031,7 +2042,8 @@ export function registerTools(
   // --- wi_start ---
   server.tool(
     "wi_start",
-    "Open a new Work Item. If gtd_item_id is given, the linked GTD moves to in_progress; otherwise a GTD is auto-created with owner=agent_slug and title=intent.",
+    "Open a new Work Item. If gtd_item_id is given, the linked GTD moves to in_progress; otherwise a GTD is auto-created with owner=agent_slug and title=intent. " +
+      "template_name is soft-warn validated against the WI templates catalog when WI_TEMPLATES_PATH is configured (template_warning in response) — never blocks (grace period, GTD f67f9524).",
     {
       intent: z.string().min(1).describe("Human-readable intent (becomes GTD title if none provided)"),
       agent_slug: z.string().optional().describe(`Agent slug (default: ${selfSlug}). Only loomy can open for another agent.`),
@@ -2268,9 +2280,9 @@ export function registerTools(
             isError: true,
           };
         }
-        if (!slugToCode.has(agent_slug)) {
+        if (!(await ensureAgentKnown(agent_slug))) {
           return {
-            content: [{ type: "text", text: `Error: unknown agent slug "${agent_slug}". Valid: ${validSlugs.join(", ")}` }],
+            content: [{ type: "text", text: `Error: unknown agent slug "${agent_slug}". Valid: ${[...slugToCode.keys()].join(", ")}` }],
             isError: true,
           };
         }

@@ -42,6 +42,22 @@
 
 **Risposto in board_inbox:** ETA gate D-074 (implementato, ora anche su `gtd_add`), bug atlas su `doc_item_wi_links` non risolti dal gate `wi_end` (fuori scope, gate vive in `src/wi.ts` non toccato — resta aperto), anomalia dedup 30/06 (backstop 23505 committato ma l'anomalia storica specifica non investigata, fuori scope).
 
+## Sessione #46 — 2026-07-03 (review governance round 2: template_name soft-warn + registry reload)
+
+**GTD:** `[autopilot board-mcp] Validazione template_name in wi_start + registry reload` (`f67f9524`). **WI** `79288309`. Modello: sonnet (task manutentivo, non design/DDL — D-053 gate costi). Rif. WI Loomy `635ac874`.
+
+**Status:** ✅ **DONE — 73/73 test (+3 nuovi), build pulita.**
+
+**1. Refresh registry `board_agents` (già in working tree da sessione precedente, committato ora):** `refreshAgentRegistry` (`src/supabase.ts`) re-interroga `board_agents` e ripopola le `Map` del registry in place (stessa istanza — le closure dei tool ne tengono un riferimento, non una copia). `ensureAgentKnown` (`src/tools.ts`) fa lazy-reload quando uno slug manca dalla mappa in-memory, prima di rispondere "Unknown agent" — usato da `board_send`, `wi_start --agent_slug`, `runtime_request` cross-agent.
+
+**2. Validazione `template_name` in `wi_start` (nuovo `src/wiTemplates.ts`):** soft-warn (mai hard-fail) contro il catalogo YAML `hub/templates/work-items/`. Opt-in via env `WI_TEMPLATES_PATH` — non settato → validazione skippata silenziosamente (zero impatto sugli agenti senza configurazione). Se settato e `template_name` non nel catalogo → `template_warning` nella risposta di `wi_start`, il WI si apre comunque. Lazy-reload on-miss stesso pattern del registry agenti (punto 1). Hard-fail rimandato a periodo di grazia da concordare con Loomy (non ancora pianificato — motivo esplicito nel body del GTD).
+
+**Decisione presa (non hard-fail ora):** il GTD chiedeva esplicitamente "soft-warn prima, hard-fail dopo un periodo di grazia concordato con Loomy" — nessun accordo sul periodo di grazia risulta nei messaggi/DECISIONS finora, quindi implementato solo lo strato soft-warn. Hard-fail resta un follow-on da pianificare quando Loomy fissa la data.
+
+**Cosa (src/):** `wiTemplates.ts` (nuovo), `wi.ts` (+`checkTemplateName` in `wiStart`, ritorno `template_warning?`), `supabase.ts`/`tools.ts` (registry reload, già in working tree). `tests/wi.test.ts` +3 test (catalogo non configurato, nome sconosciuto, nome noto). `.env.example` documenta `WI_TEMPLATES_PATH`. `package.json` → v0.10.2. CLAUDE.md aggiornato (riga `wi_start`, 2 nuovi paragrafi in Deviations WI).
+
+**Note operative:** live exposure richiede rebuild+restart del processo MCP (pattern noto, vedi #40/#41/#44/#45). Nessuna migrazione DB richiesta.
+
 ## Sessione #45 — 2026-07-03 (P7 scope item 6: project_list read-only tool)
 
 **GTD:** `[board-mcp] project_list read-only tool` (`4a709dc7`, follow-on da #44 item 6). **WI** `d91ba6c7`. Modello: sonnet (autopilot, D-053 gate costi — task read-only, non design/DDL).

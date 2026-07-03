@@ -6,6 +6,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { WiStatus, WiEndStatus, WiTemplateLayer } from "./types.js";
+import { checkTemplateName } from "./wiTemplates.js";
 
 const WI_TABLE = "loomx_work_items";
 const GTD_TABLE = "loomx_items";
@@ -129,7 +130,7 @@ export async function wiStart(
   db: SupabaseClient,
   args: WiStartArgs,
   ctx: WiContext
-): Promise<WiResult<{ wi_id: string; gtd_item_id: string; gtd_created: boolean }>> {
+): Promise<WiResult<{ wi_id: string; gtd_item_id: string; gtd_created: boolean; template_warning?: string }>> {
   const agentSlug = args.agent_slug ?? ctx.selfSlug;
   if (agentSlug !== ctx.selfSlug && !ctx.isLoomy) {
     return { ok: false, error: `Only loomy can open a WI for another agent (requested ${agentSlug}).` };
@@ -173,6 +174,8 @@ export async function wiStart(
     gtdCreated = true;
   }
 
+  const templateWarning = checkTemplateName(args.template_name);
+
   const layer =
     args.template_layer ??
     (args.template_name ? deriveTemplateLayer(args.template_name) : "on-the-fly");
@@ -205,6 +208,7 @@ export async function wiStart(
       wi_id: (wiRow as { id: string }).id,
       gtd_item_id: gtdId!,
       gtd_created: gtdCreated,
+      ...(templateWarning ? { template_warning: templateWarning } : {}),
     },
   };
 }
