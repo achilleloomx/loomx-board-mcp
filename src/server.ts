@@ -1,9 +1,13 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { resolveAgentRegistry } from "./supabase.js";
+import { resolveAgentRegistry, resolveSelfSlug } from "./supabase.js";
 import { registerTools } from "./tools.js";
 import { PACKAGE_VERSION } from "./version.js";
-export async function startServer(slug: string): Promise<void> {
+
+// cliSlug: value of --agent, or null if omitted (D-084 Fase 1 — only valid
+// when DATABASE_URL is set; resolveSelfSlug enforces that).
+export async function startServer(cliSlug: string | null): Promise<void> {
+  const slug = await resolveSelfSlug(cliSlug);
   const registry = await resolveAgentRegistry(slug);
 
   process.stderr.write(

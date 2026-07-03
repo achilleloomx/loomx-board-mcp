@@ -20,15 +20,21 @@
 //            every query, so RLS is consistent per call.
 
 import pg from "pg";
-import { PgQuery, type PgExecutor } from "./pg-shim.js";
+import { PgQuery, type PgExecutor, getNativePool } from "./pg-shim.js";
 
 const DOC_RW_ROLE = "doc_rw";
 const VALID_SLUG = /^[a-z0-9][a-z0-9-]*$/;
 
-export type DocRwMode = "pg" | "mgmt" | null;
+export type DocRwMode = "pg" | "native" | "mgmt" | null;
 
+// D-084 Fase 1(c): with a native DATABASE_URL connection (GRANT doc_rw TO
+// <agent role> done by DBA) doc_* reuses that same connection/pool instead of
+// requiring a second DOC_RW_DATABASE_URL — one URL per agent. DOC_RW_DATABASE_URL
+// stays supported and takes priority (explicit opt-out of reuse, e.g. a
+// dedicated doc_rw credential); mgmt stays the smoke/dev fallback.
 export function docRwMode(): DocRwMode {
   if (process.env.DOC_RW_DATABASE_URL) return "pg";
+  if (process.env.DATABASE_URL) return "native";
   if (process.env.SUPABASE_MGMT_PAT && process.env.SUPABASE_PROJECT_REF) return "mgmt";
   return null;
 }
@@ -64,8 +70,12 @@ function getPool(): pg.Pool {
   return pgPool;
 }
 
-async function runPg<T>(slug: string, fn: (db: DocRwDb) => Promise<T>): Promise<T> {
-  const client = await getPool().connect();
+async function runWithPool<T>(
+  pool: pg.Pool,
+  slug: string,
+  fn: (db: DocRwDb) => Promise<T>
+): Promise<T> {
+  const client = await pool.connect();
   try {
     await client.query("BEGIN");
     await client.query(`SET LOCAL ROLE ${DOC_RW_ROLE}`); // role is a fixed literal
@@ -81,6 +91,24 @@ async function runPg<T>(slug: string, fn: (db: DocRwDb) => Promise<T>): Promise<
   } finally {
     client.release();
   }
+}
+
+async function runPg<T>(slug: string, fn: (db: DocRwDb) => Promise<T>): Promise<T> {
+  return runWithPool(getPool(), slug, fn);
+}
+
+// D-084 Fase 1(c): reuses the native DATABASE_URL pool (owned by pg-shim.ts /
+// initialized via supabase.ts's resolveSelfSlug at boot). If it's somehow not
+// initialized yet, fail loud rather than silently falling back to a bypass.
+async function runNative<T>(slug: string, fn: (db: DocRwDb) => Promise<T>): Promise<T> {
+  const pool = getNativePool();
+  if (!pool) {
+    throw new Error(
+      "doc_rw native mode: DATABASE_URL pool not initialized. This should not happen — " +
+        "the board client (supabase.ts) initializes it at startup whenever DATABASE_URL is set."
+    );
+  }
+  return runWithPool(pool, slug, fn);
 }
 
 // ---------------------------------------------------------------------------
@@ -191,6 +219,7 @@ export async function runDocRw<T>(slug: string, fn: (db: DocRwDb) => Promise<T>)
   assertSlug(slug);
   const mode = docRwMode();
   if (mode === "pg") return runPg(slug, fn);
+  if (mode === "native") return runNative(slug, fn);
   if (mode === "mgmt") return runMgmt(slug, fn);
   throw new Error(
     "doc_* tools require the doc_rw wiring (D-a5 F4.5): set DOC_RW_DATABASE_URL " +

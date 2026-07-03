@@ -399,3 +399,11 @@ export function createPgClient(databaseUrl: string): PgShimClient {
   return new PgShimClient(pool);
 }
 
+// D-084 Fase 1(c): exposes the pool backing the native DATABASE_URL connection
+// (if one was created) so docDb.ts can reuse it for doc_rw transactions
+// (SET LOCAL ROLE doc_rw) instead of opening a second connection/URL per agent.
+// Returns null if the pg backend was never initialized (e.g. DATABASE_URL unset).
+export function getNativePool(): pg.Pool | null {
+  return pool;
+}
+

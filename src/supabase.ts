@@ -66,6 +66,71 @@ export function getBackend(): "supabase" | "pg" | null {
   return backend;
 }
 
+// D-084 Fase 1(a) — identity resolution.
+//
+// Convention (coordinated with DBA, D-084): the native Postgres role name for
+// an agent equals its board_agents.slug (same convention as the vault secret
+// path `loomx/agents/<slug>`). When DATABASE_URL is set, we trust current_user
+// (the DB session's own identity) over the --agent CLI flag: --agent becomes a
+// cross-check only, and any mismatch is an explicit startup error rather than
+// silently trusting the flag. Without DATABASE_URL (service_role fallback) there
+// is no native identity to derive from, so behavior is unchanged: --agent is
+// required and trusted, exactly as before Fase 1 (rollout stays opt-in/gradual,
+// D-084 Fase 2).
+export async function resolveSelfSlug(cliSlug: string | null): Promise<string> {
+  initClient();
+
+  if (backend !== "pg") {
+    if (!cliSlug) {
+      throw new Error(
+        "Missing --agent: required when DATABASE_URL is not set (service_role backend has no native identity to derive a slug from)"
+      );
+    }
+    return cliSlug;
+  }
+
+  const pgClient = client as unknown as PgShimClient;
+  const identity = await pgClient.verifyIdentity();
+  const nativeRole = identity.current_user;
+
+  const db = getSupabaseClient();
+  const { data, error } = await db
+    .from("board_agents")
+    .select("slug")
+    .eq("slug", nativeRole)
+    .eq("active", true)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(
+      `board_agents lookup failed while resolving native DB role "${nativeRole}" to an agent slug: ${error.message}`
+    );
+  }
+  if (!data) {
+    throw new Error(
+      `Native DB role "${nativeRole}" has no matching active slug in board_agents (D-084 convention: role name === agent slug). ` +
+        `Refusing to fall back to --agent as identity — fix the role/slug mismatch (DBA) or unset DATABASE_URL.`
+    );
+  }
+
+  const resolvedSlug = (data as { slug: string }).slug;
+
+  if (cliSlug && cliSlug !== resolvedSlug) {
+    throw new Error(
+      `Identity mismatch: native DB role "${nativeRole}" resolves to slug "${resolvedSlug}", but --agent was "${cliSlug}". ` +
+        `Refusing to start with conflicting identity (D-084 Fase 1: --agent is cross-check only, never trusted over the native role).`
+    );
+  }
+
+  process.stderr.write(
+    `[board-mcp] Identity from native role: current_user="${nativeRole}" -> slug="${resolvedSlug}"` +
+      (cliSlug ? " (--agent cross-check OK)" : " (--agent not provided, using native identity)") +
+      "\n"
+  );
+
+  return resolvedSlug;
+}
+
 export async function resolveAgentRegistry(
   slug: string
 ): Promise<AgentRegistry> {
