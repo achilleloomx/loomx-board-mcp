@@ -25,6 +25,21 @@ if [[ -n "${LOOMX_AGENT_SLUG:-}" ]]; then
   exit 0
 fi
 
+# Fase 3 D-084: workdir "secretless"? (.mcp.json con placeholder ${LOOMX_DB_URL})
+if grep -q 'LOOMX_DB_URL' .mcp.json 2>/dev/null && [[ -z "${LOOMX_DB_URL:-}" ]]; then
+  cat <<EOF
+[LoomX D-084 — FAIL-CLOSED] Sessione avviata SENZA il wrapper in una workdir secretless.
+Il board MCP NON puo' connettersi: il .mcp.json contiene solo placeholder
+(\${LOOMX_DB_URL}) e le credenziali non sono in questo ambiente.
+RECOVERY — esci (/exit) e rilancia con il comando giusto per QUESTA workdir:
+  python3 /home/loomy/workspace/hub/agent_manager.py claude ${AGENT_SLUG:-<slug ignoto>}
+Oppure, per tenere questa shell: eval "\$(python3 /home/loomy/workspace/hub/agent_manager.py env ${AGENT_SLUG:-<slug>})" e riavvia claude.
+Da PC Windows: python hub\\agent_manager.py claude ${AGENT_SLUG:-<slug>}  (da "00. LoomX Consulting")
+Guida completa: LoomX HQ -> /howto (porta 4400).
+EOF
+  exit 0
+fi
+
 cat <<EOF
 [LoomX D-084] Sessione avviata SENZA il wrapper in una workdir-agente.
 Questa e' la workdir di: ${AGENT_SLUG:-<slug ignoto>}
@@ -32,7 +47,7 @@ Per la prossima volta (workdir + identita' + credenziali corrette in un comando)
   python3 /home/loomy/workspace/hub/agent_manager.py claude ${AGENT_SLUG:-<slug>}
 Da PC Windows: python hub\\agent_manager.py claude ${AGENT_SLUG:-<slug>}  (da "00. LoomX Consulting")
 Guida completa: LoomX HQ -> /howto (porta 4400).
-Per ORA la sessione funziona comunque (credenziali ancora nei .mcp.json, pre-Fase 2 D-084);
-dopo la Fase 3 il wrapper sara' NECESSARIO e questo messaggio ti dira' come recuperare.
+La sessione funziona comunque finche' questa workdir non e' secretless (Fase 3 D-084);
+da quel momento il wrapper sara' necessario e questo hint diventera' il recovery.
 EOF
 exit 0

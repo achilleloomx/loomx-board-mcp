@@ -4,6 +4,21 @@
 
 ---
 
+## Sessione #48 — 2026-07-05 (RCA: window dev-pieroni evocata senza board MCP, -32000)
+
+**GTD:** `[autopilot] RCA: window dev-pieroni evocata senza board MCP (-32000)` (`c454dbd5`). **WI** `0d14df17` (fix-bug, on-the-fly, force_ephemeral). Modello: sonnet (autopilot).
+
+**Root cause:** dal commit 213c816 (D-084 Fase 1, identity resolution nativa), `startServer()` (src/server.ts) esegue `resolveSelfSlug()` + `resolveAgentRegistry()` — due round-trip DB — PRIMA di `server.connect(transport)`. Il pg.Pool in src/pg-shim.ts non aveva `connectionTimeoutMillis` (default node-postgres = 0, attesa infinita). Un blip DB/rete transitorio al boot appende il processo indefinitamente, senza log — il client MCP alla fine si arrende lato suo con l'errore opaco "-32000 Failed to reconnect", coerente con l'incidente osservato sulla window dev-pieroni (2026-07-05 ~20:2x).
+
+**Fix:**
+- `src/pg-shim.ts`: `connectionTimeoutMillis: 8000` sul pool pg.
+- `src/server.ts`: wrapper `withBootTimeout` (15s) attorno a `resolveSelfSlug`/`resolveAgentRegistry` — boot fallisce fast con errore chiaro su stderr invece di restare appeso.
+- tsc --noEmit clean, 79/79 test verdi.
+
+**Fuori scope (segnalato a loomy):** pre-evocation health-check in agent_manager.py (competenza it-manager, D-089); recupero proposta parcheggiata di dev-pieroni + GTD e9a321d2 (owner ≠ board-mcp, illeggibile da qui).
+
+---
+
 ## Sessione #43 — 2026-07-02 (P7 remediation governance: enforcement by-construction)
 
 **GTD:** `[autopilot board-mcp] P7 remediation governance — enforcement by-construction lato board-mcp` (`e308cec4`). **WI** `e94fc07d`. Template `fix-bug-backend` (on-the-fly). Modello: sonnet (autopilot). Da review governance AI (Loomy, 2026-07-02, approvata da Achille). Rif. WI Loomy `afd24663`.

@@ -1,30 +1,6 @@
 {
   "_comment": "Template .claude/settings.json agenti LoomX (D-024 governance-compliance). Sostituisci board-mcp. Schema Claude Code hooks: https://code.claude.com/docs/en/hooks. Spec LoomX: hub/initiatives/governance-compliance/design.md sezione 6.",
   "hooks": {
-    "SessionStart": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "echo '[governance D-024] Pre-flight: leggi CLAUDE.md + AGENT-STANDARD §0/§0bis, verifica wi_status, apri wi_start prima di scritture persistenti. Template WI in hub/templates/work-items/.'"
-          },
-          {
-            "type": "command",
-            "command": "bash .claude/hooks/session-start-hint.sh --agent board-mcp"
-          }
-        ]
-      }
-    ],
-    "SessionEnd": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash .claude/hooks/session-end-gate.sh"
-          }
-        ]
-      }
-    ],
     "PreToolUse": [
       {
         "matcher": "Edit|Write|MultiEdit|NotebookEdit",
@@ -59,6 +35,30 @@
           {
             "type": "command",
             "command": "bash .claude/hooks/doc-lint.sh 2>&1 || true"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "echo '[governance D-024] Pre-flight: leggi CLAUDE.md + AGENT-STANDARD §0/§0bis, verifica wi_status, apri wi_start prima di scritture persistenti. Template WI in hub/templates/work-items/.'"
+          },
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/session-start-hint.sh --agent board-mcp"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash .claude/hooks/session-end-gate.sh"
           }
         ]
       }

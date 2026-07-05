@@ -442,7 +442,12 @@ let pool: pg.Pool | null = null;
 
 export function createPgClient(databaseUrl: string): PgShimClient {
   if (!pool) {
-    pool = new pg.Pool({ connectionString: databaseUrl, max: 5 });
+    // connectionTimeoutMillis: node-postgres defaults to 0 (wait forever) — a
+    // transient network/DB blip at boot would hang startServer() indefinitely
+    // instead of failing, since nothing upstream imposes its own timeout
+    // (RCA GTD c454dbd5: dev-pieroni window stuck with board MCP unreachable,
+    // -32000 on the client side with nothing logged on ours).
+    pool = new pg.Pool({ connectionString: databaseUrl, max: 5, connectionTimeoutMillis: 8000 });
   }
   return new PgShimClient(pool);
 }
