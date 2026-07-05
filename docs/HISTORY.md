@@ -927,3 +927,16 @@ Reconciler/LA fermi: nessun re-arm.
 **Decisioni prese:** nessuna
 **Blocchi / note:** nessuno
 **Prossima sessione:** Creare .mcp.json.example per i repo agenti, primo uso reale tra agenti
+
+## Sessione #fix — 2026-07-05
+
+**Obiettivo:** Fix bug urgente (GTD da91e356) — `item_project_link` falliva con "db.from(...).upsert is not a function"
+**Completato:**
+- Aggiunto `PgQuery.upsert()` a `src/pg-shim.ts` (INSERT .. ON CONFLICT DO UPDATE, mirror del comportamento merge-duplicates di PostgREST), con supporto no-RETURNING mode (doc_rw)
+- Root cause: pg-shim (backend direct-postgres, D-084) implementava solo select/insert/update/delete — `item_project_link` (src/tools.ts:1439) chiama `.upsert(...)`, mai supportato
+- Fix collaterale scoperto in corso d'opera: `checkDurableGate` (wi.ts, gate D-074) interrogava `doc_item_wi_links`/`doc_items` col client board plain — sotto RLS (D-015) questo ritorna silenziosamente 0 righe perché `request.agent_slug` è settato solo dentro la tx doc_rw. Ora passa per `runDocRw` keyed sullo slug dell'owner del WI.
+- Nuovi test: `tests/pgshim-upsert.test.ts` (3 test unit su PgQuery.upsert), + 1 test regressione in `tests/wi.test.ts` per il gate via runDoc
+- `npx tsc --noEmit` pulito, 79/79 test verdi
+**Decisioni prese:** nessuna nuova
+**Blocchi / note:** nessuno
+**Prossima sessione:** nessuna prevista — bug chiuso

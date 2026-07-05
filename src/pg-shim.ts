@@ -2,7 +2,7 @@
 // Implements only the subset of methods used by src/tools.ts so the backend
 // can be swapped via DATABASE_URL without rewriting tool code.
 //
-// Supported: from().select/insert/update/eq/is/in/not/contains/or/order/limit/single/maybeSingle,
+// Supported: from().select/insert/update/upsert/eq/is/in/not/contains/or/order/limit/single/maybeSingle,
 // and rpc(). Awaiting any chain returns { data, error } like supabase-js.
 
 import pg from "pg";
@@ -40,13 +40,14 @@ function ident(name: string): string {
 }
 
 export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
-  private _op: "select" | "insert" | "update" | "delete" = "select";
+  private _op: "select" | "insert" | "update" | "delete" | "upsert" = "select";
   private _cols = "*";
   private _filters: Filter[] = [];
   private _orders: OrderSpec[] = [];
   private _limit: number | null = null;
   private _insertData: Row | Row[] | null = null;
   private _updateData: Row | null = null;
+  private _upsertOnConflict: string[] = [];
   private _returning: string | null = null;
   private _single = false;
   private _maybeSingle = false;
@@ -66,7 +67,7 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
   ) {}
 
   select(cols = "*"): this {
-    if (this._op === "insert" || this._op === "update" || this._op === "delete") {
+    if (this._op === "insert" || this._op === "update" || this._op === "delete" || this._op === "upsert") {
       this._returning = cols;
     } else {
       this._op = "select";
@@ -84,6 +85,16 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
   update(data: Row): this {
     this._op = "update";
     this._updateData = data;
+    return this;
+  }
+
+  upsert(data: Row | Row[], opts: { onConflict?: string } = {}): this {
+    this._op = "upsert";
+    this._insertData = data;
+    this._upsertOnConflict = (opts.onConflict ?? "")
+      .split(",")
+      .map((c) => c.trim())
+      .filter(Boolean);
     return this;
   }
 
@@ -291,6 +302,43 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
           .join(", ");
         sql = `INSERT INTO ${ident(this.table)} (${colsSql}) VALUES ${valuesSql}`;
         if (!this.opts.noReturning) sql += this._buildReturning();
+      } else if (this._op === "upsert") {
+        let rows = Array.isArray(this._insertData)
+          ? this._insertData
+          : [this._insertData!];
+        if (rows.length === 0) throw new Error("upsert: no rows");
+        if (this.opts.noReturning) {
+          rows = rows.map((r) =>
+            (r as Row).id === undefined ? { id: randomUUID(), ...(r as Row) } : r
+          );
+          synthesizedRows = rows as Row[];
+        }
+        const cols = Object.keys(rows[0]!);
+        const colsSql = cols.map(ident).join(", ");
+        const valuesSql = rows
+          .map((r) => {
+            const placeholders = cols.map((c) => {
+              params.push((r as Row)[c]);
+              return `$${params.length}`;
+            });
+            return `(${placeholders.join(", ")})`;
+          })
+          .join(", ");
+        sql = `INSERT INTO ${ident(this.table)} (${colsSql}) VALUES ${valuesSql}`;
+        if (this._upsertOnConflict.length === 0) {
+          throw new Error("upsert: onConflict is required");
+        }
+        const conflictCols = this._upsertOnConflict.map(ident).join(", ");
+        // Mirror PostgREST's merge-duplicates upsert: always DO UPDATE (never DO
+        // NOTHING) so RETURNING reliably yields the row even when the conflict
+        // columns are the only columns being written (e.g. a pure link table).
+        const updateCols = cols.filter((c) => !this._upsertOnConflict.includes(c));
+        const setCols = updateCols.length > 0 ? updateCols : this._upsertOnConflict;
+        const setSql = setCols
+          .map((c) => `${ident(c)} = EXCLUDED.${ident(c)}`)
+          .join(", ");
+        sql += ` ON CONFLICT (${conflictCols}) DO UPDATE SET ${setSql}`;
+        if (!this.opts.noReturning) sql += this._buildReturning();
       } else if (this._op === "update") {
         const cols = Object.keys(this._updateData!);
         const sets = cols.map((c) => {
@@ -308,8 +356,8 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
 
       // Execute, applying the doc_rw no-RETURNING strategy.
       let res: { rows: Row[] };
-      if (this.opts.noReturning && this._op === "insert") {
-        // Run the INSERT (no RETURNING); return the client-synthesized rows.
+      if (this.opts.noReturning && (this._op === "insert" || this._op === "upsert")) {
+        // Run the INSERT/UPSERT (no RETURNING); return the client-synthesized rows.
         await this.exec(sql, params);
         res = { rows: synthesizedRows ?? [] };
       } else if (this.opts.noReturning && this._op === "update" && this._returning) {

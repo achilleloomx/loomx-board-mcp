@@ -7,6 +7,7 @@
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { WiStatus, WiEndStatus, WiTemplateLayer } from "./types.js";
 import { checkTemplateName } from "./wiTemplates.js";
+import { runDocRw, type DocRwDb } from "./docDb.js";
 
 const WI_TABLE = "loomx_work_items";
 const GTD_TABLE = "loomx_items";
@@ -33,43 +34,59 @@ function isEphemeralWi(
   return (EPHEMERAL_TEMPLATES as readonly string[]).includes(templateName);
 }
 
+// Same shape as docDb.ts's runDocRw — injectable so tests can drive the gate
+// with a fake in-memory db instead of a real doc_rw backend.
+export type DocRunner = <T>(slug: string, fn: (db: DocRwDb) => Promise<T>) => Promise<T>;
+
 // Gate D-074 (REQ-033): durable WI must have at least one REQ or SDES linked
 // via doc_item_wi_links before it can be closed as done.
-async function checkDurableGate(db: SupabaseClient, wiId: string): Promise<string | null> {
-  const { data: wiLinks } = await db
-    .from(DOC_ITEM_WI_LINKS_TABLE)
-    .select("doc_item_id")
-    .eq("wi_id", wiId);
+//
+// Must run through runDocRw (not the plain board client): doc_item_wi_links /
+// doc_items are RLS-gated (D-015) on request.agent_slug, which is only set
+// inside the doc_rw transaction wrapper. Querying them with the plain client
+// silently returns 0 rows under RLS-enforcing backends (native DATABASE_URL,
+// D-084) — a false "no links found" even when doc_link already succeeded.
+async function checkDurableGate(
+  runDoc: DocRunner,
+  slug: string,
+  wiId: string
+): Promise<string | null> {
+  return runDoc(slug, async (db) => {
+    const { data: wiLinks } = await db
+      .from(DOC_ITEM_WI_LINKS_TABLE)
+      .select("doc_item_id")
+      .eq("wi_id", wiId);
 
-  if (!Array.isArray(wiLinks) || wiLinks.length === 0) {
-    return (
-      `Durable WI '${wiId}' must have ≥1 requirement or sdes_entry linked via doc_item_wi_links. ` +
-      `Use doc_link(target_kind="wi", from_id=<req_uuid>, to_id="${wiId}") or ` +
-      `doc_link_by_code(from_code="REQ-NNN", to_id="${wiId}", project_id=...). ` +
-      `Bypass with force_ephemeral=true + force_reason if this WI has no durable artifacts.`
-    );
-  }
+    if (!Array.isArray(wiLinks) || wiLinks.length === 0) {
+      return (
+        `Durable WI '${wiId}' must have ≥1 requirement or sdes_entry linked via doc_item_wi_links. ` +
+        `Use doc_link(target_kind="wi", from_id=<req_uuid>, to_id="${wiId}") or ` +
+        `doc_link_by_code(from_code="REQ-NNN", to_id="${wiId}", project_id=...). ` +
+        `Bypass with force_ephemeral=true + force_reason if this WI has no durable artifacts.`
+      );
+    }
 
-  const ids = (wiLinks as { doc_item_id: string }[]).map((l) => l.doc_item_id);
-  const { data: docItems } = await db
-    .from(DOC_ITEMS_TABLE)
-    .select("id, item_type")
-    .in("id", ids);
+    const ids = (wiLinks as { doc_item_id: string }[]).map((l) => l.doc_item_id);
+    const { data: docItems } = await db
+      .from(DOC_ITEMS_TABLE)
+      .select("id, item_type")
+      .in("id", ids);
 
-  const traced = Array.isArray(docItems)
-    ? (docItems as { item_type: string }[]).filter(
-        (d) => d.item_type === "requirement" || d.item_type === "sdes_entry"
-      )
-    : [];
+    const traced = Array.isArray(docItems)
+      ? (docItems as { item_type: string }[]).filter(
+          (d) => d.item_type === "requirement" || d.item_type === "sdes_entry"
+        )
+      : [];
 
-  if (traced.length === 0) {
-    return (
-      `Durable WI '${wiId}' has ${ids.length} linked doc item(s) but none are requirement or sdes_entry. ` +
-      `Ensure the linked items are typed correctly or link a proper REQ/SDES.`
-    );
-  }
+    if (traced.length === 0) {
+      return (
+        `Durable WI '${wiId}' has ${ids.length} linked doc item(s) but none are requirement or sdes_entry. ` +
+        `Ensure the linked items are typed correctly or link a proper REQ/SDES.`
+      );
+    }
 
-  return null; // gate passed
+    return null; // gate passed
+  });
 }
 
 export type WiResult<T> = { ok: true; data: T } | { ok: false; error: string };
@@ -260,7 +277,8 @@ export interface WiEndData {
 export async function wiEnd(
   db: SupabaseClient,
   args: WiEndArgs,
-  ctx: WiContext
+  ctx: WiContext,
+  runDoc: DocRunner = runDocRw
 ): Promise<WiResult<WiEndData>> {
   const { data: wi, error: findErr } = await db
     .from(WI_TABLE)
@@ -300,7 +318,10 @@ export async function wiEnd(
         gateBypassed = true;
       }
     } else {
-      const gateErr = await checkDurableGate(db, args.wi_id);
+      // Use the WI owner's slug (not the closer's) — doc_item_wi_links/doc_items
+      // are RLS-scoped to the project the WI owner belongs to (loomy closing on
+      // someone else's behalf must see that owner's links, not its own).
+      const gateErr = await checkDurableGate(runDoc, row.agent_slug, args.wi_id);
       if (gateErr) return { ok: false, error: gateErr };
     }
   }

@@ -683,7 +683,8 @@ test("wi_end (D-074 gate): durable WI with no links blocked on done", async () =
     doc_item_wi_links: [],
   };
   const db = makeDb(store);
-  const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxOwn);
+  const fakeRunDoc = async (_slug: string, fn: (db: SupabaseClient) => Promise<unknown>) => fn(db);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxOwn, fakeRunDoc as never);
   assert.equal(res.ok, false);
   if (res.ok) return;
   assert.match(res.error, /requirement|sdes/i);
@@ -708,8 +709,47 @@ test("wi_end (D-074 gate): durable WI with REQ link passes gate", async () => {
     doc_items: [{ id: reqId, item_type: "requirement" }],
   };
   const db = makeDb(store);
-  const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxOwn);
+  const fakeRunDoc = async (_slug: string, fn: (db: SupabaseClient) => Promise<unknown>) => fn(db);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxOwn, fakeRunDoc as never);
   assert.equal(res.ok, true, "durable WI with linked REQ must pass gate");
+});
+
+test("wi_end (D-074 gate): gate reads go through runDoc keyed on the WI owner's slug, not the plain db", async () => {
+  // Regression for the bug where checkDurableGate queried doc_item_wi_links/doc_items
+  // with the plain board client — under RLS (D-015) that silently returns 0 rows even
+  // when the links exist, because request.agent_slug is only set inside the doc_rw
+  // transaction wrapper. A plain db with NO doc tables at all proves the gate never
+  // falls back to it: it must only see links via the injected runDoc.
+  const reqId = "req-uuid-002";
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      {
+        id: "wi-1",
+        agent_slug: "app",
+        gtd_item_id: "gtd-1",
+        status: "active",
+        side_effects_log: [],
+        template_name: "fix-bug",
+        template_layer: "L1",
+      },
+    ],
+    // Intentionally NOT populated on the plain db — only reachable via runDoc.
+  };
+  const docStore: Store = {
+    doc_item_wi_links: [{ id: "link-1", wi_id: "wi-1", doc_item_id: reqId }],
+    doc_items: [{ id: reqId, item_type: "requirement" }],
+  };
+  const docDb = makeDb(docStore);
+  const db = makeDb(store);
+  const slugsSeen: string[] = [];
+  const runDoc = async (slug: string, fn: (db: SupabaseClient) => Promise<unknown>) => {
+    slugsSeen.push(slug);
+    return fn(docDb);
+  };
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxOwn, runDoc as never);
+  assert.equal(res.ok, true, "gate must resolve links via runDoc, not the plain db");
+  assert.deepEqual(slugsSeen, ["app"], "runDoc must be called with the WI owner's slug");
 });
 
 test("wi_end (D-074 gate): force_ephemeral bypasses gate (gate_bypassed=true)", async () => {
