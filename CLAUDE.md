@@ -98,7 +98,7 @@ loomx-board-mcp/
 
 ## MCP Tools
 
-31 tool base esposti a ogni agente (23 board/gtd/wi/runtime + 8 doc_* document model) + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
+32 tool base esposti a ogni agente (23 board/gtd/wi/runtime + 8 doc_* document model + 1 `org_lookup`) + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
 
 ### Board Tools (board_messages)
 
@@ -226,6 +226,22 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 | `kill` | Stop agente (il reconciler non ri-schedula) |
 | `model` | Cambia modello (richiede `requested_model` es. `sonnet`, `opus`) |
 | `none` | Annulla richiesta pendente |
+
+### Org Registry Tool (loomx_role_cards / loomx_org_edges / loomx_sow_raci — D-090/D-091)
+
+1 tool read-only sopra le 3 tabelle org-registry (migration DBA `20260706100000`, design `hub/initiatives/org-registry/design.md` §2/§3). Disponibile a **tutti** gli agenti (knowledge sharing, nessuna restrizione per slug) — vincolo read-only: le scritture su card/archi/RACI passano da Loomy.
+
+| Tool | Descrizione | Operazione DB |
+|---|---|---|
+| `org_lookup` | `agent?` → role-card + archi (reports_to/escalates_to/asks_help_from); `question` seleziona `card`\|`chain`\|`escalation`\|`help` (default `card`); `domain?` filtra escalation/help; `project?` (slug o UUID `loomx_projects`) → matrice RACI; `sow?` filtra per SoW (WIP); `raci?` filtra la matrice per ruolo | SELECT loomx_role_cards / loomx_org_edges / loomx_sow_raci |
+
+> **Fallback escalation:** se manca un arco `escalates_to` esplicito per il `domain` richiesto, `org_lookup` risale la catena `reports_to` di un hop (`source: "fallback_reports_to"` nella risposta).
+>
+> **Fallback RACI:** se il progetto non ha righe in `loomx_sow_raci`, la risposta ritorna `raci: null` + `fallback.owner = loomx_projects.agent_id` (comportamento attuale, D-091).
+>
+> **Nota persone in RACI:** `loomx_sow_raci.person_id` non ha ancora FK verso `loomx_people` (tabella non esiste, D-084 pending) — i soggetti persona vengono ritornati come `person:<uuid>` finché la tabella non atterra.
+>
+> **Gap noto (bloccante per `project=`):** il ruolo nativo `board-mcp` (backend `DATABASE_URL`, D-084) non ha GRANT SELECT su `loomx_projects` — stesso stesso gap di `loomx_item_projects` risolto ieri, ma esteso a `loomx_projects` stessa. `project_list` e `org_lookup(project=...)` falliscono con `permission denied for table loomx_projects` per qualunque agente diverso da loomy. Segnalato a DBA (GTD + board_send), non risolvibile lato board-mcp.
 
 ### Document Model Tools (documents / doc_items — D-a5 F1)
 
@@ -416,4 +432,4 @@ Quando una situazione matcha il trigger di una skill:
 
 ---
 
-*Creato: 2026-03-30 | Allineato: 2026-07-03 (tool runtime_status per stall-triage broker)*
+*Creato: 2026-03-30 | Allineato: 2026-07-06 (tool org_lookup, org-registry F3, D-091)*

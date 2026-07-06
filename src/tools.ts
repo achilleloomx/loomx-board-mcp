@@ -16,6 +16,12 @@ const GTD_ITEM_PROJECTS_TABLE = "loomx_item_projects";
 const PROJECTS_TABLE = "loomx_projects";
 const RUNTIME_TABLE = "loomx_agent_runtime";
 const WI_TABLE = "loomx_work_items";
+const ROLE_CARDS_TABLE = "loomx_role_cards";
+const ORG_EDGES_TABLE = "loomx_org_edges";
+const SOW_RACI_TABLE = "loomx_sow_raci";
+const BOARD_AGENTS_TABLE = "board_agents";
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // D-069 two-phase arm enforcement: reject autopilot=true while `owner` has an
 // active WI — arming races the reconciler, which may evoke before wi_end closes
@@ -1482,6 +1488,275 @@ export function registerTools(
 
       return {
         content: [{ type: "text", text: JSON.stringify({ projects: data ?? [] }, null, 2) }],
+      };
+    }
+  );
+
+  // --- org_lookup ---
+  server.tool(
+    "org_lookup",
+    "Read-only org chart / RACI lookup (org-registry, D-090/D-091). agent -> role-card + reporting/escalation/help edges; project -> RACI matrix. Available to all agents (knowledge sharing, no slug restriction).",
+    {
+      agent: z.string().optional().describe("Agent slug — returns its role-card and org edges"),
+      question: z.enum(["card", "chain", "escalation", "help"]).optional().describe("Query mode for `agent` (default: card)"),
+      domain: z.string().optional().describe("Filter escalation/help edges by domain (e.g. 'infra')"),
+      project: z.string().optional().describe("Project slug (short_name) or UUID — returns its RACI matrix"),
+      sow: z.string().optional().describe("SoW id filter within a project (SoW model is WIP — interim, most projects have none)"),
+      raci: z.enum(["R", "A", "C", "I"]).optional().describe("Filter the RACI matrix to one role (requires `project`)"),
+    },
+    async ({ agent, question, domain, project, sow, raci }) => {
+      const db = getSupabaseClient();
+
+      if (!agent && !project) {
+        return {
+          content: [{ type: "text", text: "Error: provide at least one of `agent` or `project`" }],
+          isError: true,
+        };
+      }
+
+      // --- project/SoW RACI mode ---
+      if (project) {
+        type ProjectRow = { id: string; name: string; short_name: string | null; agent_id: string | null };
+        const projectFilterCol = UUID_RE.test(project) ? "id" : "short_name";
+        const { data: projectData, error: projectErr } = await db
+          .from(PROJECTS_TABLE)
+          .select("id, name, short_name, agent_id")
+          .eq(projectFilterCol, project)
+          .maybeSingle();
+        if (projectErr) {
+          return { content: [{ type: "text", text: `Error resolving project: ${projectErr.message}` }], isError: true };
+        }
+        if (!projectData) {
+          return {
+            content: [{ type: "text", text: `Error: project "${project}" not found (looked up by ${projectFilterCol}). Use project_list to discover valid slugs/ids.` }],
+            isError: true,
+          };
+        }
+        const projectRow = projectData as ProjectRow;
+
+        let raciQuery = db
+          .from(SOW_RACI_TABLE)
+          .select("agent_slug, person_id, raci, scope_note, sow_id")
+          .eq("project_id", projectRow.id);
+        if (sow) raciQuery = raciQuery.eq("sow_id", sow);
+        if (raci) raciQuery = raciQuery.eq("raci", raci);
+
+        const { data: raciRows, error: raciErr } = await raciQuery;
+        if (raciErr) {
+          return { content: [{ type: "text", text: `Error reading RACI: ${raciErr.message}` }], isError: true };
+        }
+
+        const rows = raciRows ?? [];
+
+        if (rows.length === 0) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: JSON.stringify(
+                  {
+                    project: { id: projectRow.id, name: projectRow.name, short_name: projectRow.short_name },
+                    raci: null,
+                    fallback: {
+                      reason: "no RACI registered for this project (D-091 fallback)",
+                      owner: projectRow.agent_id,
+                    },
+                  },
+                  null,
+                  2
+                ),
+              },
+            ],
+          };
+        }
+
+        // Resolve agent labels for agent-subject rows.
+        const agentSlugs = [...new Set(rows.map((r) => r.agent_slug).filter((s): s is string => !!s))];
+        const labelBySlug = new Map<string, string>();
+        if (agentSlugs.length > 0) {
+          const { data: agentRows } = await db
+            .from(BOARD_AGENTS_TABLE)
+            .select("slug, label")
+            .in("slug", agentSlugs);
+          for (const a of (agentRows ?? []) as { slug: string; label: string }[]) {
+            labelBySlug.set(a.slug, a.label);
+          }
+        }
+
+        // loomx_people does not exist yet (D-084 pending) — person subjects
+        // surface as raw person_id until that table lands (per DBA migration
+        // 20260706100000 note).
+        const matrix: Record<string, { subject: string; type: "agent" | "person"; scope_note: string | null }[]> = {
+          A: [],
+          R: [],
+          C: [],
+          I: [],
+        };
+        for (const r of rows) {
+          const entry = r.agent_slug
+            ? { subject: labelBySlug.get(r.agent_slug) ?? r.agent_slug, type: "agent" as const, scope_note: r.scope_note }
+            : { subject: `person:${r.person_id}`, type: "person" as const, scope_note: r.scope_note };
+          matrix[r.raci].push(entry);
+        }
+
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(
+                {
+                  project: { id: projectRow.id, name: projectRow.name, short_name: projectRow.short_name },
+                  raci: matrix,
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
+      // --- agent card/chain/escalation/help mode ---
+      const agentSlug = agent as string;
+      const mode = question ?? "card";
+
+      if (mode === "chain") {
+        const chain: string[] = [agentSlug];
+        const visited = new Set<string>([agentSlug]);
+        let current = agentSlug;
+        for (let hop = 0; hop < 20; hop++) {
+          const { data, error } = await db
+            .from(ORG_EDGES_TABLE)
+            .select("to_agent")
+            .eq("from_agent", current)
+            .eq("edge_type", "reports_to")
+            .maybeSingle();
+          if (error) {
+            return { content: [{ type: "text", text: `Error walking reports_to chain: ${error.message}` }], isError: true };
+          }
+          if (!data) break;
+          const next = (data as { to_agent: string }).to_agent;
+          if (visited.has(next)) {
+            return {
+              content: [{ type: "text", text: `Error: cycle detected in reports_to chain at "${next}" (chain so far: ${chain.join(" -> ")})` }],
+              isError: true,
+            };
+          }
+          chain.push(next);
+          visited.add(next);
+          current = next;
+        }
+        return { content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, chain }, null, 2) }] };
+      }
+
+      if (mode === "escalation") {
+        let query = db
+          .from(ORG_EDGES_TABLE)
+          .select("to_agent, domain, note")
+          .eq("from_agent", agentSlug)
+          .eq("edge_type", "escalates_to");
+        if (domain) query = query.eq("domain", domain);
+        const { data: edges, error } = await query;
+        if (error) {
+          return { content: [{ type: "text", text: `Error reading escalation edges: ${error.message}` }], isError: true };
+        }
+
+        if (domain) {
+          const match = (edges ?? [])[0] as { to_agent: string; domain: string | null; note: string | null } | undefined;
+          if (match) {
+            return {
+              content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, domain, target: match.to_agent, source: "explicit", note: match.note }, null, 2) }],
+            };
+          }
+          // Fallback: immediate reports_to.
+          const { data: reportsTo, error: rtErr } = await db
+            .from(ORG_EDGES_TABLE)
+            .select("to_agent")
+            .eq("from_agent", agentSlug)
+            .eq("edge_type", "reports_to")
+            .maybeSingle();
+          if (rtErr) {
+            return { content: [{ type: "text", text: `Error resolving escalation fallback: ${rtErr.message}` }], isError: true };
+          }
+          if (!reportsTo) {
+            return {
+              content: [{ type: "text", text: `Error: no explicit escalates_to edge for domain "${domain}" and no reports_to fallback for "${agentSlug}" (missing org data?)` }],
+              isError: true,
+            };
+          }
+          return {
+            content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, domain, target: (reportsTo as { to_agent: string }).to_agent, source: "fallback_reports_to" }, null, 2) }],
+          };
+        }
+
+        return { content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, escalation_edges: edges ?? [] }, null, 2) }] };
+      }
+
+      if (mode === "help") {
+        let query = db
+          .from(ORG_EDGES_TABLE)
+          .select("to_agent, domain, note")
+          .eq("from_agent", agentSlug)
+          .eq("edge_type", "asks_help_from");
+        if (domain) query = query.eq("domain", domain);
+        const { data: edges, error } = await query;
+        if (error) {
+          return { content: [{ type: "text", text: `Error reading asks_help_from edges: ${error.message}` }], isError: true };
+        }
+        return { content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, domain: domain ?? null, help_edges: edges ?? [] }, null, 2) }] };
+      }
+
+      // mode === "card" (default)
+      const { data: card, error: cardErr } = await db
+        .from(ROLE_CARDS_TABLE)
+        .select("mission, does, does_not, scope_notes, updated_at")
+        .eq("agent_slug", agentSlug)
+        .maybeSingle();
+      if (cardErr) {
+        return { content: [{ type: "text", text: `Error reading role card: ${cardErr.message}` }], isError: true };
+      }
+
+      const { data: edges, error: edgesErr } = await db
+        .from(ORG_EDGES_TABLE)
+        .select("to_agent, edge_type, domain, note")
+        .eq("from_agent", agentSlug);
+      if (edgesErr) {
+        return { content: [{ type: "text", text: `Error reading org edges: ${edgesErr.message}` }], isError: true };
+      }
+
+      const edgeRows = (edges ?? []) as { to_agent: string; edge_type: string; domain: string | null; note: string | null }[];
+      const reportsTo = edgeRows.find((e) => e.edge_type === "reports_to")?.to_agent ?? null;
+      const escalatesTo = edgeRows.filter((e) => e.edge_type === "escalates_to");
+      const asksHelpFrom = edgeRows.filter((e) => e.edge_type === "asks_help_from");
+
+      if (!card && edgeRows.length === 0) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({ agent: agentSlug, role_card: null, reports_to: null, escalates_to: [], asks_help_from: [], note: "no org-registry data for this agent yet (F2 seed pending?)" }, null, 2),
+            },
+          ],
+        };
+      }
+
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(
+              {
+                agent: agentSlug,
+                role_card: card ?? null,
+                reports_to: reportsTo,
+                escalates_to: escalatesTo,
+                asks_help_from: asksHelpFrom,
+              },
+              null,
+              2
+            ),
+          },
+        ],
       };
     }
   );

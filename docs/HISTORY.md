@@ -4,6 +4,20 @@
 
 ---
 
+## Sessione #49 — 2026-07-06 (org-registry F3: tool org_lookup, D-090/D-091)
+
+**GTD:** `[org-registry F3] Tool MCP org_lookup read-only (D-091) — card/chain/escalation/help + RACI per progetto` (`7415a6a1`). **WI** `ac48242b` (feature-mcp-tool, on-the-fly). Modello: sonnet (autopilot).
+
+**Cosa:** implementato `org_lookup(agent?, question?, domain?, project?, sow?, raci?)` sopra le 3 tabelle org-registry (`loomx_role_cards`, `loomx_org_edges`, `loomx_sow_raci`, migration DBA `20260706100000`+fix). Pattern `project_list`/`gtd_query`: un tool, parametri componibili, read-only. `question`: `card` (default, mission+does/does_not+archi), `chain` (risalita `reports_to` fino a loomy, con guard su cicli/profondità), `escalation` (arco esplicito per `domain` o fallback lungo `reports_to`), `help` (`asks_help_from`). `project=<slug|uuid>` → matrice RACI A/R/C/I con `scope_note`; fallback esplicito a `raci: null` + `owner=loomx_projects.agent_id` se il progetto non ha RACI registrata (D-091).
+
+**Test live:** verificato end-to-end via client MCP stdio contro il DB reale (backend `DATABASE_URL`, ruolo nativo `board-mcp`) — `card`/`chain`/`escalation` (con fallback `reports_to`)/`help` tutti corretti sui 5 role-card + 5 archi seedati. tsc --noEmit clean, 79/79 test unit verdi (nessuna regressione).
+
+**Bug trovato (non risolvibile qui, segnalato a DBA):** `org_lookup(project=...)` e il preesistente `project_list` falliscono con `permission denied for table loomx_projects` per ogni ruolo nativo diverso da `loomy` — `loomx_projects` non ha mai ricevuto il GRANT SELECT per i ruoli direct-pg (stessa classe di gap risolta ieri per `loomx_item_projects`, msg `fd6210fe`). `loomx_sow_raci`/`loomx_org_edges`/`loomx_role_cards` hanno invece i GRANT corretti (verificato `\dp` live) — solo il ramo `project=` è bloccato.
+
+**Nota persone RACI:** `loomx_sow_raci.person_id` non ha FK verso `loomx_people` (tabella non esiste ancora, D-084 pending) — soggetti persona ritornano come `person:<uuid>` finché non atterra.
+
+---
+
 ## Sessione #48 — 2026-07-05 (RCA: window dev-pieroni evocata senza board MCP, -32000)
 
 **GTD:** `[autopilot] RCA: window dev-pieroni evocata senza board MCP (-32000)` (`c454dbd5`). **WI** `0d14df17` (fix-bug, on-the-fly, force_ephemeral). Modello: sonnet (autopilot).
