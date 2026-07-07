@@ -997,3 +997,9 @@ Reconciler/LA fermi: nessun re-arm.
 **Decisioni prese:** nessuna nuova lato board-mcp — design/ownership è di it-manager (D-089), `hub/it-manager/design/ping-cold-start.md`
 **Blocchi / note:** `board_messages.wake_priority` non esiste ancora (DDL pending, ordine concordato: colonna DBA prima che il pass-through sia utilizzabile in produzione) — `board_send(wake_priority=...)` e `ping` falliranno a runtime finché la migration non è live, stesso pattern pre-DDL già usato altrove. `loomx_agent_pings` resta da droppare lato DBA (proposta già nel design, mai popolata, zero impatto runtime) — non azionabile da board-mcp.
 **Prossima sessione:** a colonna DBA applicata, smoke test live di `ping`/`board_inbox(wake_only)`/`board_ack`; poi board_send done a it-manager per sbloccare L2 (reconciler cold-wake) e §0ter/hook (L3).
+
+## Sessione #ping-pivot-close — 2026-07-07
+
+**Obiettivo:** WI d96189bf su GTD 8eada1ca (dispatch autopilot) — il codice della sessione #ping-pivot sopra era pronto ma non committato.
+**Completato:** verificato tsc/80 test verdi, build dist locale, commit 9e3b5b6. Chiuso GTD 8eada1ca (superseded — task originale D-092 sostituito dal pivot D-093) e GTD 5177f528 (task it-manager) come done. board_send done a loomy (ref 36705bdb).
+**Blocchi / note:** invariato — `board_messages.wake_priority` resta da migrare lato DBA; follow-on già tracciato in GTD 7e896506.
