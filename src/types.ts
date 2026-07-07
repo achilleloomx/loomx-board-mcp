@@ -109,6 +109,14 @@ export type WiTemplateLayer = (typeof WI_TEMPLATE_LAYERS)[number];
 export const RUNTIME_REQUEST_TYPES = ["continue", "clear", "kill", "model", "none"] as const;
 export type RuntimeRequestType = (typeof RUNTIME_REQUEST_TYPES)[number];
 
+// --- Wake priority (board_messages.wake_priority — cross-agent cold-start marker, D-093) ---
+// Supersedes the separate-table `loomx_agent_pings` design (dropped, never populated,
+// flag-OFF). A "ping" is now just a board_send carrying this marker; NULL = normal
+// message, unchanged behavior. See hub/it-manager/design/ping-cold-start.md.
+
+export const WAKE_PRIORITIES = ["normal", "high", "urgent"] as const;
+export type WakePriority = (typeof WAKE_PRIORITIES)[number];
+
 export interface WorkItem {
   id: string;
   gtd_item_id: string;

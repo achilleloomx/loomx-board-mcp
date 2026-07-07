@@ -98,7 +98,7 @@ loomx-board-mcp/
 
 ## MCP Tools
 
-32 tool base esposti a ogni agente (23 board/gtd/wi/runtime + 8 doc_* document model + 1 `org_lookup`) + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
+33 tool base esposti a ogni agente (24 board/gtd/wi/runtime/ping + 8 doc_* document model + 1 `org_lookup`) + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
 
 ### Board Tools (board_messages)
 
@@ -106,15 +106,16 @@ loomx-board-mcp/
 
 | Tool | Descrizione | Operazione DB |
 |---|---|---|
-| `board_send` | Invia messaggio con summary e tags opzionali | INSERT (from_agent = self) |
+| `board_send` | Invia messaggio con summary e tags opzionali. **`wake_priority?`** (D-093, v0.13.0): normal\|high\|urgent — marca il messaggio per cold-wake | INSERT (from_agent = self) |
 | `board_broadcast` | Invia messaggio a tutti gli agenti attivi | RPC board_broadcast |
-| `board_inbox` | Leggi messaggi in arrivo — **`preview_only=true` default** (no body) | SELECT (to_agent = self) |
+| `board_inbox` | Leggi messaggi in arrivo — **`preview_only=true` default** (no body). **`wake_only?`** (D-093): filtra solo i messaggi con `wake_priority` settato | SELECT (to_agent = self) |
 | `board_get` | Body completo di un singolo messaggio (detail on-demand) | SELECT by id |
 | `board_ack` | Conferma ricezione messaggio | UPDATE status → acknowledged |
 | `board_update_status` | Aggiorna stato messaggio | UPDATE status → in_progress / done / cancelled |
 | `board_overview` | Vista globale — **`include_body=false` default**, limit 20 | SELECT da view board_overview |
 | `board_thread` | Recupera thread di conversazione (messaggio originale + risposte) | SELECT (id/ref_id match) |
 | `board_archive` | Archivia messaggi done/cancelled piu' vecchi di N giorni | RPC board_archive_old |
+| `ping` | Alias ergonomico (D-093) su `board_send(type='info', wake_priority=priority)` — NON storage separato | INSERT board_messages (via board_send) |
 
 ### GTD Tools (loomx_items)
 
@@ -226,6 +227,19 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 | `kill` | Stop agente (il reconciler non ri-schedula) |
 | `model` | Cambia modello (richiede `requested_model` es. `sonnet`, `opus`) |
 | `none` | Annulla richiesta pendente |
+
+### Ping (cold-start cross-agente, D-093 — hooked su board_send/board_ack)
+
+**Pivot ratificato (D-093, Loomy msg 58c130be):** il build separate-table `loomx_agent_pings` (D-092, dev-hq) è stato **abbandonato** — tabella mai popolata, `DROP TABLE` proposto a DBA. Il ping si aggancia al meccanismo esistente `board_send`/`board_ack`: un ping è un `board_send(type='info')` con il marcatore `wake_priority` (colonna additiva su `board_messages`, nullable — NULL = messaggio normale, comportamento invariato). Nessuna tabella/inbox/tool di ack dedicati. Design completo: `hub/it-manager/design/ping-cold-start.md`.
+
+- `ping(target_agent, message, priority?)` → thin wrapper su `board_send` (vedi tabella Board Tools sopra)
+- Lettura ping: `board_inbox(wake_only=true)` (non esiste `ping_inbox`)
+- Ack: `board_ack` esistente (non esiste `ping_ack`)
+- Enum `wake_priority`: `normal` / `high` / `urgent` (niente `low` — assenza di wake = campo NULL)
+
+> **Colonna pending (D-093):** `board_messages.wake_priority` è da aggiungere lato DBA (coordinamento it-manager↔DBA, ordine: colonna prima del pass-through). `board_send`/`ping` passano già il campo — falliranno a runtime finché la migration non è live (stesso pattern di `loomx_work_items`/`loomx_agent_runtime` pre-DDL).
+>
+> **L2 cold-wake (ownership it-manager/reconciler):** il reconciler farà scan `board_messages WHERE wake_priority IN ('high','urgent') AND status='pending'` per il cold-wake del target — fuori scope board-mcp, riusa ~90% del motore `process_pings` di dev-hq (repoint della query).
 
 ### Org Registry Tool (loomx_role_cards / loomx_org_edges / loomx_sow_raci — D-090/D-091)
 

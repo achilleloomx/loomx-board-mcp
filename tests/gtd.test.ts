@@ -29,3 +29,11 @@ test("buildGtdUpdatePayload: always stamps updated_at", () => {
   const updates = buildGtdUpdatePayload({});
   assert.ok(typeof updates.updated_at === "string");
 });
+
+test("buildGtdUpdatePayload: clarified_at is included when set, untouched when omitted", () => {
+  assert.equal("clarified_at" in buildGtdUpdatePayload({ body: "note" }), false);
+  const cleared = buildGtdUpdatePayload({ clarified_at: null });
+  assert.equal(cleared.clarified_at, null);
+  const stamped = buildGtdUpdatePayload({ clarified_at: "2026-07-07T10:00:00.000Z" });
+  assert.equal(stamped.clarified_at, "2026-07-07T10:00:00.000Z");
+});

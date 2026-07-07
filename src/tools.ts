@@ -1,7 +1,7 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getSupabaseClient, refreshAgentRegistry } from "./supabase.js";
-import { MESSAGE_TYPES, MESSAGE_STATUSES, GTD_STATUSES, GTD_PRIORITIES, MEAL_TYPES, MENU_STATUSES, WI_END_STATUSES, WI_TEMPLATE_LAYERS, RUNTIME_REQUEST_TYPES } from "./types.js";
+import { MESSAGE_TYPES, MESSAGE_STATUSES, GTD_STATUSES, GTD_PRIORITIES, MEAL_TYPES, MENU_STATUSES, WI_END_STATUSES, WI_TEMPLATE_LAYERS, RUNTIME_REQUEST_TYPES, WAKE_PRIORITIES } from "./types.js";
 import type { AgentRegistry, MessageStatus } from "./types.js";
 import {
   DB_DOCUMENT_TYPES,
@@ -68,6 +68,7 @@ export interface GtdUpdateFields {
   recurrence_days?: number | null;
   block_scope?: string | null;
   resume_hint?: string | null;
+  clarified_at?: string | null;
 }
 
 export function buildGtdUpdatePayload(fields: GtdUpdateFields): Record<string, unknown> {
@@ -84,11 +85,13 @@ export function buildGtdUpdatePayload(fields: GtdUpdateFields): Record<string, u
   if (fields.recurrence_days !== undefined) updates.recurrence_days = fields.recurrence_days;
   if (fields.block_scope !== undefined) updates.block_scope = fields.block_scope;
   if (fields.resume_hint !== undefined) updates.resume_hint = fields.resume_hint;
+  if (fields.clarified_at !== undefined) updates.clarified_at = fields.clarified_at;
   return updates;
 }
 
 const MessageTypeSchema = z.enum(MESSAGE_TYPES);
 const StatusFilterSchema = z.enum(MESSAGE_STATUSES);
+const WakePrioritySchema = z.enum(WAKE_PRIORITIES);
 
 export function registerTools(
   server: McpServer,
@@ -131,8 +134,11 @@ export function registerTools(
         .uuid()
         .optional()
         .describe("Reference message ID (for done/replies)"),
+      wake_priority: WakePrioritySchema.optional().describe(
+        "Cold-start wake marker (D-093): normal|high|urgent. high/urgent asks the reconciler to cold-wake a sleeping recipient; omit for a regular message (no wake). Requires the board_messages.wake_priority column (DBA migration pending) — errors until it lands."
+      ),
     },
-    async ({ to_agent, type, subject, body, summary, tags, ref_id }) => {
+    async ({ to_agent, type, subject, body, summary, tags, ref_id, wake_priority }) => {
       const validationError = await validateRecipientSlug(to_agent);
       if (validationError) {
         return {
@@ -156,6 +162,7 @@ export function registerTools(
           tags: tags ?? [],
           ref_id: ref_id ?? null,
           status: "pending",
+          ...(wake_priority !== undefined ? { wake_priority } : {}),
         })
         .select("id, created_at")
         .maybeSingle();
@@ -204,8 +211,12 @@ export function registerTools(
         .boolean()
         .optional()
         .describe("Omit body field (default: true). Set false to receive full body — avoid in batch."),
+      wake_only: z
+        .boolean()
+        .optional()
+        .describe("Filter to wake-marked messages only (wake_priority IS NOT NULL) — replaces the deprecated ping_inbox tool (D-093)."),
     },
-    async ({ status, tag, limit, preview_only }) => {
+    async ({ status, tag, limit, preview_only, wake_only }) => {
       const db = getSupabaseClient();
       let query = db
         .from(TABLE)
@@ -221,6 +232,10 @@ export function registerTools(
 
       if (tag) {
         query = query.contains("tags", [tag]);
+      }
+
+      if (wake_only) {
+        query = query.not("wake_priority", "is", null);
       }
 
       const { data, error } = await query;
@@ -906,8 +921,9 @@ export function registerTools(
       recurrence_days: z.number().int().positive().nullable().optional().describe("Recurrence interval in days (or null to clear)"),
       block_scope: z.string().nullable().optional().describe("Autopilot dispatch scope constraint (or null to clear)"),
       resume_hint: z.string().nullable().optional().describe("Hint for the agent on how to resume (or null to clear)"),
+      clarified_at: z.union([z.literal(true), z.string(), z.null()]).optional().describe("Owner ack flag: true = set to now, ISO 8601 string = explicit timestamp, null = clear. NULL means the owner has never reviewed the item (loomy/broker may freely evaluate/arm autopilot); once set, the owner's autopilot choice is respected and must not be overridden by others. Settable by the GTD owner or loomy only (not broker on others' items)."),
     },
-    async ({ id, title, body, gtd_status, priority, deadline, waiting_on, owner, autopilot, autopilot_model, recurrence_days, block_scope, resume_hint }) => {
+    async ({ id, title, body, gtd_status, priority, deadline, waiting_on, owner, autopilot, autopilot_model, recurrence_days, block_scope, resume_hint, clarified_at }) => {
       const db = getSupabaseClient();
 
       // Only loomy/broker can reassign owner
@@ -918,6 +934,30 @@ export function registerTools(
           ],
           isError: true,
         };
+      }
+
+      // clarified_at is the owner's ack — settable by the actual owner or
+      // loomy only. Unlike other fields, the broker's cross-agent update
+      // privilege does NOT extend here: if the broker could set it on behalf
+      // of another agent, the ack flag would lose its meaning (D-091 follow-on,
+      // see GTD task requested by Achille 2026-07-07).
+      let resolvedClarifiedAt: string | null | undefined = undefined;
+      if (clarified_at !== undefined) {
+        resolvedClarifiedAt = clarified_at === true ? new Date().toISOString() : clarified_at;
+        const { data: existing } = await db
+          .from(GTD_TABLE)
+          .select("owner")
+          .eq("id", id)
+          .maybeSingle();
+        const currentOwner = (existing as { owner?: string } | null)?.owner;
+        if (currentOwner && currentOwner !== selfSlug && !isLoomy) {
+          return {
+            content: [
+              { type: "text", text: `Error: only the GTD owner ('${currentOwner}') or loomy can set clarified_at.` },
+            ],
+            isError: true,
+          };
+        }
       }
 
       if (autopilot === true) {
@@ -939,6 +979,7 @@ export function registerTools(
       const updates = buildGtdUpdatePayload({
         title, body, gtd_status, priority, deadline, waiting_on, owner,
         autopilot, autopilot_model, recurrence_days, block_scope, resume_hint,
+        clarified_at: resolvedClarifiedAt,
       });
 
       let query = db
@@ -2660,6 +2701,61 @@ export function registerTools(
         };
       }
       return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...data }, null, 2) }] };
+    }
+  );
+
+  // =========================================================================
+  // Ping (cross-agent cold-start wake, D-093 — hooked on board_send/board_ack)
+  // Supersedes the separate-table build (loomx_agent_pings, D-092/dev-hq):
+  // Loomy ratified the pivot (msg 58c130be) — no dedicated storage/inbox.
+  // `ping` is a thin alias over board_send carrying wake_priority; there is
+  // no ping_inbox/ping_ack tool — use board_inbox(wake_only=true) / board_ack.
+  // Design: hub/it-manager/design/ping-cold-start.md.
+  // =========================================================================
+
+  // --- ping ---
+  server.tool(
+    "ping",
+    "Ergonomic alias for board_send(type='info', wake_priority=priority) — NOT a separate storage/tool (D-093). Sends a lightweight cross-agent message marked for cold-start wake. high/urgent asks the reconciler to cold-wake a sleeping target; normal just surfaces at the target's next natural cycle. Use board_ack to close it, board_inbox(wake_only=true) to list wake-marked messages.",
+    {
+      target_agent: z.string().min(1).describe("Recipient agent slug"),
+      message: z.string().min(1).describe("Ping message"),
+      priority: WakePrioritySchema.optional().describe("Wake priority (default: normal). high/urgent cold-wake the target via the reconciler."),
+    },
+    async ({ target_agent, message, priority }) => {
+      const validationError = await validateRecipientSlug(target_agent);
+      if (validationError) {
+        return { content: [{ type: "text", text: `Error: ${validationError}` }], isError: true };
+      }
+
+      const toCode = slugToCode.get(target_agent)!;
+      const db = getSupabaseClient();
+      const { data, error } = await db
+        .from(TABLE)
+        .insert({
+          from_agent: selfCode,
+          to_agent: toCode,
+          type: "info",
+          subject: `[ping] ${message.slice(0, 80)}`,
+          body: message,
+          summary: null,
+          tags: [],
+          ref_id: null,
+          status: "pending",
+          wake_priority: priority ?? "normal",
+        })
+        .select("id, created_at")
+        .maybeSingle();
+
+      if (error || !data) {
+        return {
+          content: [
+            { type: "text", text: `Error sending ping: ${error?.message ?? "no row returned (RLS?). Retry ping with the same args."}` },
+          ],
+          isError: true,
+        };
+      }
+      return { content: [{ type: "text", text: JSON.stringify({ ok: true, id: data.id, created_at: data.created_at }, null, 2) }] };
     }
   );
 

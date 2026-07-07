@@ -969,3 +969,31 @@ Reconciler/LA fermi: nessun re-arm.
 **Decisioni prese:** nessuna nuova
 **Blocchi / note:** nessuno
 **Prossima sessione:** nessuna prevista — bug chiuso
+
+## Sessione #ping — 2026-07-07
+
+**Obiettivo:** Task dev-hq (msg 36705bdb, GTD 8eada1ca) — 3 tool MCP `ping`/`ping_inbox`/`ping_ack` sopra `loomx_agent_pings` (primitivo cold-start cross-agente, D-092)
+**Completato:**
+- Aggiunti enum `PING_PRIORITIES` (low/normal/high/urgent) e `PING_STATUSES` (pending/acked/resolved) in `src/types.ts`
+- Aggiunti 3 tool in `src/tools.ts` seguendo il pattern di `runtime_request`/`runtime_status`: `ping` (INSERT, nessuna restrizione slug come `org_lookup`), `ping_inbox` (SELECT to_agent=self, ordina priority desc/created_at asc via sort client-side — niente colonna `priority_rank` generata, la tabella non esiste ancora), `ping_ack` (UPDATE, guard applicativo to_agent=self, resolution opzionale → status=resolved altrimenti acked)
+- Bump versione 0.12.0 → 0.13.0
+- `npx tsc --noEmit` pulito, 55/55 test esistenti verdi (nessun test dedicato aggiunto: nessuna logica pura estraibile oltre lo shape dei tool, coerente con `runtime_request`/`runtime_status` che non ne hanno)
+- CLAUDE.md aggiornato (nuova sezione "Ping Tools", conteggio tool 32→35)
+**Decisioni prese:** nessuna nuova (schema tabella proposto al DBA via board_send, D-092 in allocazione codice cross-project da Loomy)
+**Blocchi / note:** **`loomx_agent_pings` non esiste ancora** — verificato assenza migration nel repo DBA. I 3 tool sono committati in anticipo (stesso pattern di `loomx_work_items`/`loomx_agent_runtime` prima delle rispettive migration) e falleranno a runtime finché il DBA non applica la DDL + redeploy/restart del server board-mcp. Richiesta DDL inviata al DBA con lo schema esatto atteso dal codice (colonne, enum, RLS).
+**Prossima sessione:** a migration DBA applicata + redeploy, smoke test live dei 3 tool; poi board_send done a dev-hq per sbloccare `LOOMX_PING_WAKE_ENABLED`.
+
+## Sessione #ping-pivot — 2026-07-07 (D-093)
+
+**Obiettivo:** Task it-manager (msg 36e61487, GTD a5098efd) — Loomy ha ratificato il pivot ping (D-093, msg 58c130be): abbandonare la separate-table `loomx_agent_pings` (sessione #ping sopra, mai deployata/popolata) e agganciare il ping al meccanismo `board_send`/`board_ack` esistente.
+**Completato:**
+- Rimossi i 3 tool separate-table `ping`/`ping_inbox`/`ping_ack` (mai deployati, restati in standby su richiesta di Loomy/it-manager) e l'enum `PING_PRIORITIES`/`PING_STATUSES` in `src/types.ts`
+- Aggiunto enum `WAKE_PRIORITIES` (normal/high/urgent — niente `low`, l'assenza di wake è NULL) in `src/types.ts`
+- `board_send`: nuovo param opzionale `wake_priority` (persistito su `board_messages.wake_priority`, colonna additiva ancora da migrare lato DBA — pass-through già pronto, coordinamento ordine con it-manager)
+- `board_inbox`: nuovo param opzionale `wake_only` (filtra `wake_priority IS NOT NULL`) — sostituisce `ping_inbox`
+- `ping` riscritto come thin wrapper ergonomico su `board_send(type='info', wake_priority=priority)` — nessun nuovo storage, nessun `ping_inbox`/`ping_ack` (si usano `board_inbox(wake_only=true)`/`board_ack`)
+- CLAUDE.md aggiornato (sezione "Ping Tools" → "Ping (D-093)", conteggio tool 35→33, righe board_send/board_inbox aggiornate)
+- `npx tsc --noEmit` pulito, 80/80 test verdi
+**Decisioni prese:** nessuna nuova lato board-mcp — design/ownership è di it-manager (D-089), `hub/it-manager/design/ping-cold-start.md`
+**Blocchi / note:** `board_messages.wake_priority` non esiste ancora (DDL pending, ordine concordato: colonna DBA prima che il pass-through sia utilizzabile in produzione) — `board_send(wake_priority=...)` e `ping` falliranno a runtime finché la migration non è live, stesso pattern pre-DDL già usato altrove. `loomx_agent_pings` resta da droppare lato DBA (proposta già nel design, mai popolata, zero impatto runtime) — non azionabile da board-mcp.
+**Prossima sessione:** a colonna DBA applicata, smoke test live di `ping`/`board_inbox(wake_only)`/`board_ack`; poi board_send done a it-manager per sbloccare L2 (reconciler cold-wake) e §0ter/hook (L3).
