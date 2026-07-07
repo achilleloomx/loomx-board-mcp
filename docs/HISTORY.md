@@ -4,6 +4,18 @@
 
 ---
 
+## Sessione #50 — 2026-07-07 (D-093 deploy: wake_priority column live, wake_only bugfix)
+
+**GTD:** `D-093: deploy pass-through wake_priority appena la colonna board_messages.wake_priority è live` (`7e896506`). **WI** `917b2262` (deploy-feature, on-the-fly). Modello: sonnet (autopilot). GO ricevuto da it-manager (msg `e4c95ac3`): colonna live, DDL applicata da DBA, tabella `loomx_agent_pings` droppata.
+
+**Cosa:** codice pass-through wake_priority/wake_only era già scritto (commit 9e3b5b6, sessione precedente) ma mai verificato contro il DB reale con la colonna live. Test end-to-end (`board_send` con `wake_priority`, poi query filtrata) ha scoperto un bug reale: `board_inbox(wake_only=true)` lancia `Unsupported .not() form: is` — il query builder di `src/pg-shim.ts` gestiva solo l'op `"in"` di `.not()`, non `"is"` usato da `tools.ts:238` (`.not("wake_priority", "is", null)`).
+
+**Fix:** aggiunto il branch `op === "is" && val === null` → `col IS NOT NULL` in `pg-shim.ts` `_buildWhere`. Riverificato end-to-end via script diretto contro `LOOMX_DB_URL` (insert con `wake_priority`, poi `wake_only`-style query → 1 riga corretta). Rimossa anche la nota stale "DBA migration pending" dalla docstring `wake_priority` di `board_send` (`tools.ts:138`). tsc clean, 80/80 test verdi (nessuna regressione).
+
+**Nota:** il messaggio di self-test (`83bb2c1f`, to_agent=loomy) non è cancellabile dal ruolo `board-mcp` diretto (`permission denied` su DELETE) — lasciato, è auto-esplicativo ("self-test wake_priority column live"), loomy può ignorarlo/ackarlo.
+
+---
+
 ## Sessione #49 — 2026-07-06 (org-registry F3: tool org_lookup, D-090/D-091)
 
 **GTD:** `[org-registry F3] Tool MCP org_lookup read-only (D-091) — card/chain/escalation/help + RACI per progetto` (`7415a6a1`). **WI** `ac48242b` (feature-mcp-tool, on-the-fly). Modello: sonnet (autopilot).
