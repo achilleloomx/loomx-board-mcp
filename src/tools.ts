@@ -135,7 +135,7 @@ export function registerTools(
         .optional()
         .describe("Reference message ID (for done/replies)"),
       wake_priority: WakePrioritySchema.optional().describe(
-        "Cold-start wake marker (D-093): normal|high|urgent. high/urgent asks the reconciler to cold-wake a sleeping recipient; omit for a regular message (no wake). Requires the board_messages.wake_priority column (DBA migration pending) — errors until it lands."
+        "Cold-start wake marker (D-093): normal|high|urgent. high/urgent asks the reconciler to cold-wake a sleeping recipient; omit for a regular message (no wake)."
       ),
     },
     async ({ to_agent, type, subject, body, summary, tags, ref_id, wake_priority }) => {

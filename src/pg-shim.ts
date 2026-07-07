@@ -194,7 +194,7 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
           break;
         }
         case "not": {
-          // Only "in" op used in tools.ts: not(col, "in", "(done,trash)")
+          // "in" op: not(col, "in", "(done,trash)")
           if (f.op === "in" && typeof f.val === "string") {
             const items = f.val
               .replace(/^\(|\)$/g, "")
@@ -203,6 +203,9 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
               .filter(Boolean);
             params.push(items);
             clauses.push(`${ident(f.col!)} <> ALL($${params.length})`);
+          } else if (f.op === "is" && f.val === null) {
+            // "is" op: not(col, "is", null) → col IS NOT NULL
+            clauses.push(`${ident(f.col!)} IS NOT NULL`);
           } else {
             throw new Error(`Unsupported .not() form: ${f.op}`);
           }
