@@ -124,6 +124,33 @@ export function buildGtdUpdatePayload(fields: GtdUpdateFields): Record<string, u
   return updates;
 }
 
+// GTD 994b3bbc (dedup broadcast, reassigned dev-hq->board-mcp 2026-07-21):
+// board_send/board_broadcast never auto-created a GTD for the recipient(s) —
+// the "N destinatari -> 1 GTD" symptom traced (dev-hq, 2026-07-04) to
+// loomy-assistant's manual triage missing messages, not a code dedup bug
+// (D-066 dedup is scoped per (owner, source_ref), so distinct recipients of
+// the same broadcast never collide). Opt-in `auto_gtd` on both tools closes
+// the actual gap: each recipient gets its own GTD, one per owner, deduped
+// against re-sends of the same message via the same (owner, source_ref) rule
+// gtd_add already uses.
+export function buildAutoGtdInsertPayload(params: {
+  owner: string;
+  title: string;
+  body: string | null;
+  source_ref: string;
+  priority?: "low" | "normal" | "high" | "urgent";
+}): Record<string, unknown> {
+  return {
+    title: params.title,
+    body: params.body,
+    gtd_status: "inbox",
+    owner: params.owner,
+    priority: params.priority ?? "normal",
+    source: "board",
+    source_ref: params.source_ref,
+  };
+}
+
 const MessageTypeSchema = z.enum(MESSAGE_TYPES);
 const StatusFilterSchema = z.enum(MESSAGE_STATUSES);
 const WakePrioritySchema = z.enum(WAKE_PRIORITIES);
@@ -153,6 +180,32 @@ export function registerTools(
     return null;
   };
 
+  // Best-effort GTD auto-creation for a message recipient (GTD 994b3bbc,
+  // auto_gtd opt-in on board_send/board_broadcast). Dedup mirrors gtd_add
+  // (D-066): scoped (owner, source_ref) so this never collides across
+  // recipients — only guards against re-sending the same message id twice.
+  // Never throws: a GTD-creation failure must not fail the message send.
+  const autoCreateGtdForRecipient = async (
+    db: ReturnType<typeof getSupabaseClient>,
+    params: { owner: string; title: string; body: string | null; source_ref: string; priority?: "low" | "normal" | "high" | "urgent" }
+  ): Promise<string | null> => {
+    try {
+      const { data: existing } = await db
+        .from(GTD_TABLE)
+        .select("id")
+        .eq("owner", params.owner)
+        .eq("source_ref", params.source_ref)
+        .not("gtd_status", "eq", "trash")
+        .maybeSingle();
+      if (existing) return null;
+
+      const { error } = await db.from(GTD_TABLE).insert(buildAutoGtdInsertPayload(params));
+      return error ? error.message : null;
+    } catch (err) {
+      return err instanceof Error ? err.message : String(err);
+    }
+  };
+
   // --- board_send ---
   server.tool(
     "board_send",
@@ -172,8 +225,11 @@ export function registerTools(
       wake_priority: WakePrioritySchema.optional().describe(
         "Cold-start wake marker (D-093): normal|high|urgent. high/urgent asks the reconciler to cold-wake a sleeping recipient; omit for a regular message (no wake)."
       ),
+      auto_gtd: z.boolean().optional().describe(
+        "GTD 994b3bbc: also create a GTD item (owner=recipient, source='board', source_ref=this message's id) so the recipient sees it in gtd_inbox without relying on manual triage. Default false (unchanged behavior). Deduped against re-sends of the same message."
+      ),
     },
-    async ({ to_agent, type, subject, body, summary, tags, ref_id, wake_priority }) => {
+    async ({ to_agent, type, subject, body, summary, tags, ref_id, wake_priority, auto_gtd }) => {
       const validationError = await validateRecipientSlug(to_agent);
       if (validationError) {
         return {
@@ -211,12 +267,23 @@ export function registerTools(
         };
       }
 
+      let gtdError: string | null = null;
+      if (auto_gtd) {
+        gtdError = await autoCreateGtdForRecipient(db, {
+          owner: to_agent,
+          title: subject,
+          body: summary ?? body,
+          source_ref: data.id,
+          priority: wake_priority === "urgent" ? "urgent" : wake_priority === "high" ? "high" : "normal",
+        });
+      }
+
       return {
         content: [
           {
             type: "text",
             text: JSON.stringify(
-              { ok: true, id: data.id, created_at: data.created_at },
+              { ok: true, id: data.id, created_at: data.created_at, ...(gtdError ? { gtd_creation_error: gtdError } : {}) },
               null,
               2
             ),
@@ -393,8 +460,11 @@ export function registerTools(
         .uuid()
         .optional()
         .describe("Reference message ID (optional)"),
+      auto_gtd: z.boolean().optional().describe(
+        "GTD 994b3bbc: also create one GTD item per recipient (owner=recipient, source='board', source_ref=that recipient's message id) instead of relying on each agent's manual triage to convert the broadcast into a GTD. Default false (unchanged behavior)."
+      ),
     },
-    async ({ type, subject, body, summary, tags, ref_id }) => {
+    async ({ type, subject, body, summary, tags, ref_id, auto_gtd }) => {
       const db = getSupabaseClient();
       const { data, error } = await db.rpc("board_broadcast", {
         p_from_agent: selfCode,
@@ -423,12 +493,29 @@ export function registerTools(
         to_agent_slug: codeToSlug.get(msg.to_agent) ?? msg.to_agent,
       }));
 
+      let gtdErrors: Array<{ to_agent_slug: string; error: string }> = [];
+      if (auto_gtd) {
+        const results = await Promise.all(
+          enriched.map(async (msg: any) => ({
+            to_agent_slug: msg.to_agent_slug,
+            error: await autoCreateGtdForRecipient(db, {
+              owner: msg.to_agent_slug,
+              title: subject,
+              body: summary ?? body,
+              source_ref: msg.id,
+              priority: "normal",
+            }),
+          }))
+        );
+        gtdErrors = results.filter((r) => r.error) as Array<{ to_agent_slug: string; error: string }>;
+      }
+
       return {
         content: [
           {
             type: "text",
             text: JSON.stringify(
-              { ok: true, sent_to: enriched.length, messages: enriched },
+              { ok: true, sent_to: enriched.length, messages: enriched, ...(gtdErrors.length ? { gtd_creation_errors: gtdErrors } : {}) },
               null,
               2
             ),

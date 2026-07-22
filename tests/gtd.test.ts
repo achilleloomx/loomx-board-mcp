@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 
-import { buildGtdUpdatePayload, brokerAutopilotArmBlocked, resolveBoardActorFilterCode } from "../src/tools.ts";
+import { buildGtdUpdatePayload, brokerAutopilotArmBlocked, resolveBoardActorFilterCode, buildAutoGtdInsertPayload } from "../src/tools.ts";
 
 test("buildGtdUpdatePayload: body-only leaves gtd_status untouched (footgun regression)", () => {
   const updates = buildGtdUpdatePayload({ body: "just a note" });
@@ -129,4 +129,42 @@ test("resolveBoardActorFilterCode: broker without a resolvable loomy code falls 
     loomyCode: undefined,
   });
   assert.equal(filter, "005");
+});
+
+// GTD 994b3bbc: board_send/board_broadcast auto_gtd payload shape.
+test("buildAutoGtdInsertPayload: defaults to inbox/normal, source='board'", () => {
+  const payload = buildAutoGtdInsertPayload({
+    owner: "dev-hq",
+    title: "subject line",
+    body: "body text",
+    source_ref: "11111111-1111-1111-1111-111111111111",
+  });
+  assert.deepEqual(payload, {
+    title: "subject line",
+    body: "body text",
+    gtd_status: "inbox",
+    owner: "dev-hq",
+    priority: "normal",
+    source: "board",
+    source_ref: "11111111-1111-1111-1111-111111111111",
+  });
+});
+
+test("buildAutoGtdInsertPayload: distinct owners never collide on the same source_ref (broadcast fan-out)", () => {
+  const sameRef = "22222222-2222-2222-2222-222222222222";
+  const a = buildAutoGtdInsertPayload({ owner: "dev-hq", title: "t", body: null, source_ref: sameRef });
+  const b = buildAutoGtdInsertPayload({ owner: "atlas", title: "t", body: null, source_ref: sameRef });
+  assert.notEqual(a.owner, b.owner);
+  assert.equal(a.source_ref, b.source_ref);
+});
+
+test("buildAutoGtdInsertPayload: priority passthrough for wake-marked messages", () => {
+  const payload = buildAutoGtdInsertPayload({
+    owner: "dev-hq",
+    title: "t",
+    body: null,
+    source_ref: "33333333-3333-3333-3333-333333333333",
+    priority: "urgent",
+  });
+  assert.equal(payload.priority, "urgent");
 });

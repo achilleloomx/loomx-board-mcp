@@ -106,8 +106,8 @@ loomx-board-mcp/
 
 | Tool | Descrizione | Operazione DB |
 |---|---|---|
-| `board_send` | Invia messaggio con summary e tags opzionali. **`wake_priority?`** (D-093, v0.13.0): normal\|high\|urgent — marca il messaggio per cold-wake | INSERT (from_agent = self) |
-| `board_broadcast` | Invia messaggio a tutti gli agenti attivi | RPC board_broadcast |
+| `board_send` | Invia messaggio con summary e tags opzionali. **`wake_priority?`** (D-093, v0.13.0): normal\|high\|urgent — marca il messaggio per cold-wake. **`auto_gtd?`** (GTD 994b3bbc): crea anche un GTD per il destinatario (owner=recipient, source='board', source_ref=id messaggio), deduplicato su re-invii — default false, non cambia il comportamento esistente | INSERT (from_agent = self) [+ INSERT loomx_items se auto_gtd] |
+| `board_broadcast` | Invia messaggio a tutti gli agenti attivi. **`auto_gtd?`** (GTD 994b3bbc): come sopra ma un GTD per ciascun destinatario (N destinatari → N GTD, uno per owner — non più affidato al triage manuale) | RPC board_broadcast [+ INSERT loomx_items per destinatario se auto_gtd] |
 | `board_inbox` | Leggi messaggi in arrivo — **`preview_only=true` default** (no body). **`wake_only?`** (D-093): filtra solo i messaggi con `wake_priority` settato | SELECT (to_agent = self) |
 | `board_get` | Body completo di un singolo messaggio (detail on-demand) | SELECT by id |
 | `board_ack` | Conferma ricezione messaggio | UPDATE status → acknowledged |

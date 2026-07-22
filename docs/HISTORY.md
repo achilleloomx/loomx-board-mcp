@@ -4,6 +4,18 @@
 
 ---
 
+## Sessione #56 — 2026-07-22 (commit lavoro sospeso #54/#55 + fix dedup broadcast auto_gtd)
+
+**GTD:** `a4dcbb35` ("[msg] loomy: fix no_auto_arm esposizione (4edd99de) + dedup broadcast bug (994b3bbc)"). **WI** `1d1fd209` (fix-bug). Modello: sonnet (autopilot dispatch, loomy).
+
+**1) no_auto_arm — chiusura amministrativa.** Il fix tool-layer (sessione #55) e il fix broker cross-owner-ack (sessione #54) erano entrambi pronti e testati ma mai committati (89/89 pass, tsc pulito) — committato ora (`80a1d2d`). GTD `4edd99de` resta `waiting`/`waiting_on=dba`: il gap reale (trigger DB `loomx_enforce_no_auto_arm` che confronta `session_user`, irraggiungibile sotto backend `service_role`) non è lato board-mcp — nessuna risposta ricevuta all'escalation `ad85b813`.
+
+**2) GTD `994b3bbc` — dedup broadcast (N destinatari → 1 GTD), reassegnato dev-hq→board-mcp il 21/07.** Riletta l'indagine dev-hq (2026-07-04): confermato che `board_send`/`board_broadcast` non hanno mai creato GTD (solo INSERT su `board_messages`) e che il dedup D-066 è scoped `(owner, source_ref)` — nessuna collisione cross-owner possibile. Il sintomo "N destinatari → 1 GTD" è quindi un gap nel triage manuale di loomy-assistant, non un bug di codice. Fix implementato come richiesto da Loomy ("decidi il fix"): nuovo param opt-in `auto_gtd?: boolean` su entrambi i tool — quando `true`, crea un GTD per destinatario (`owner=recipient`, `source='board'`, `source_ref=<message id>`, dedup riusando la stessa regola di `gtd_add`). Default `false`, nessun cambio di comportamento per i chiamanti esistenti. Helper puro `buildAutoGtdInsertPayload` + funzione best-effort `autoCreateGtdForRecipient` (mai fa fallire l'invio del messaggio; errori riportati in `gtd_creation_error`/`gtd_creation_errors`). 3 nuovi test unitari. 92/92 pass, `tsc --noEmit` pulito, build ok.
+
+**Non fatto:** GTD `994b3bbc` lasciato `next_action` (non `done`) — è un opt-in, i chiamanti (loomy-assistant e altri) devono ancora scegliere di usarlo; segnalato a loomy per decidere se/dove attivarlo di default.
+
+---
+
 ## Sessione #55 — 2026-07-21 (gap `no_auto_arm`: param esposto, ma bloccato da un secondo gap DB — trigger irraggiungibile)
 
 **GTD:** `4edd99de` ("[BUG/gap] no_auto_arm non settabile via gtd_update/gtd_add"). **WI** `69e03933` (fix-bug). Modello: sonnet (autopilot dispatch, loomy).
