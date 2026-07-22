@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 
-import { buildGtdUpdatePayload } from "../src/tools.ts";
+import { buildGtdUpdatePayload, brokerAutopilotArmBlocked, resolveBoardActorFilterCode } from "../src/tools.ts";
 
 test("buildGtdUpdatePayload: body-only leaves gtd_status untouched (footgun regression)", () => {
   const updates = buildGtdUpdatePayload({ body: "just a note" });
@@ -30,10 +30,103 @@ test("buildGtdUpdatePayload: always stamps updated_at", () => {
   assert.ok(typeof updates.updated_at === "string");
 });
 
+test("buildGtdUpdatePayload: no_auto_arm is included when set (D-100 park gap)", () => {
+  assert.equal("no_auto_arm" in buildGtdUpdatePayload({ body: "note" }), false);
+  const parked = buildGtdUpdatePayload({ no_auto_arm: true });
+  assert.equal(parked.no_auto_arm, true);
+  const unparked = buildGtdUpdatePayload({ no_auto_arm: false });
+  assert.equal(unparked.no_auto_arm, false);
+});
+
 test("buildGtdUpdatePayload: clarified_at is included when set, untouched when omitted", () => {
   assert.equal("clarified_at" in buildGtdUpdatePayload({ body: "note" }), false);
   const cleared = buildGtdUpdatePayload({ clarified_at: null });
   assert.equal(cleared.clarified_at, null);
   const stamped = buildGtdUpdatePayload({ clarified_at: "2026-07-07T10:00:00.000Z" });
   assert.equal(stamped.clarified_at, "2026-07-07T10:00:00.000Z");
+});
+
+test("brokerAutopilotArmBlocked: broker blocked once owner has acked (clarified_at set)", () => {
+  const blocked = brokerAutopilotArmBlocked({
+    isBroker: true,
+    isLoomy: false,
+    selfSlug: "loomy-assistant",
+    targetOwner: "dev-hq",
+    targetClarifiedAt: "2026-07-07T10:00:00.000Z",
+  });
+  assert.equal(blocked, true);
+});
+
+test("brokerAutopilotArmBlocked: broker allowed on never-acked item (clarified_at null)", () => {
+  const allowed = brokerAutopilotArmBlocked({
+    isBroker: true,
+    isLoomy: false,
+    selfSlug: "loomy-assistant",
+    targetOwner: "dev-hq",
+    targetClarifiedAt: null,
+  });
+  assert.equal(allowed, false);
+});
+
+test("brokerAutopilotArmBlocked: broker on own item is never blocked by this gate", () => {
+  const blocked = brokerAutopilotArmBlocked({
+    isBroker: true,
+    isLoomy: false,
+    selfSlug: "loomy-assistant",
+    targetOwner: "loomy-assistant",
+    targetClarifiedAt: "2026-07-07T10:00:00.000Z",
+  });
+  assert.equal(blocked, false);
+});
+
+test("brokerAutopilotArmBlocked: loomy is never blocked (full override)", () => {
+  const blocked = brokerAutopilotArmBlocked({
+    isBroker: true,
+    isLoomy: true,
+    selfSlug: "loomy",
+    targetOwner: "dev-hq",
+    targetClarifiedAt: "2026-07-07T10:00:00.000Z",
+  });
+  assert.equal(blocked, false);
+});
+
+// D-093 cross-owner ack (GTD 983c0784): broker can close loomy's mail only.
+test("resolveBoardActorFilterCode: loomy gets no filter (full override)", () => {
+  const filter = resolveBoardActorFilterCode({
+    isLoomy: true,
+    isBroker: false,
+    selfCode: "001",
+    loomyCode: "001",
+  });
+  assert.equal(filter, null);
+});
+
+test("resolveBoardActorFilterCode: broker is scoped to loomy's inbox, not any agent", () => {
+  const filter = resolveBoardActorFilterCode({
+    isLoomy: false,
+    isBroker: true,
+    selfCode: "005",
+    loomyCode: "001",
+  });
+  assert.equal(filter, "001");
+});
+
+test("resolveBoardActorFilterCode: plain agent is scoped to its own inbox", () => {
+  const filter = resolveBoardActorFilterCode({
+    isLoomy: false,
+    isBroker: false,
+    selfCode: "032",
+    loomyCode: "001",
+  });
+  assert.equal(filter, "032");
+});
+
+test("resolveBoardActorFilterCode: broker without a resolvable loomy code falls back to its own inbox (no unbounded ack)", () => {
+  const filter = resolveBoardActorFilterCode({
+    isLoomy: false,
+    isBroker: true,
+    selfCode: "005",
+    loomyCode: undefined,
+  });
+  assert.equal(filter, "005");
 });

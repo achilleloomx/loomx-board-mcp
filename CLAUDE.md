@@ -126,7 +126,7 @@ loomx-board-mcp/
 | `gtd_inbox` | Leggi item GTD dell'agente — **`preview_only=true` default** (body_preview 200 chars) | SELECT (owner = self) |
 | `gtd_get` | Body completo di un singolo GTD item (detail on-demand) | SELECT by id |
 | `gtd_add` | Crea nuovo item GTD | INSERT |
-| `gtd_update` | Aggiorna item esistente (owner-only, loomy puo' tutto). **D-069 guard:** rifiuta `autopilot=true` se l'owner ha un WI active (two-phase arm) | UPDATE |
+| `gtd_update` | Aggiorna item esistente (owner-only, loomy puo' tutto). **D-069 guard:** rifiuta `autopilot=true` se l'owner ha un WI active (two-phase arm). **D-093 hardening:** il broker (loomy-assistant) puo' armare `autopilot=true` su un item di un altro owner SOLO se `clarified_at IS NULL` (mai ackato dall'owner); se `clarified_at` e' valorizzato deve escalare a loomy — stessa logica del gate `clarified_at` (non settabile dal broker su item altrui), ma condizionale invece di esclusione totale | UPDATE |
 | `gtd_query` | Query flessibile — **`preview_only=true` default**, limit 20 | SELECT + JOIN |
 | `gtd_complete` | Shortcut per segnare item come done | UPDATE (gtd_status = done) |
 | `gtd_link_agent` | Aggancia un agente come co-engaged su un item (owner o loomy only) | INSERT loomx_item_agents |

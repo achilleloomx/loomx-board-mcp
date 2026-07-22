@@ -4,6 +4,66 @@
 
 ---
 
+## Sessione #55 — 2026-07-21 (gap `no_auto_arm`: param esposto, ma bloccato da un secondo gap DB — trigger irraggiungibile)
+
+**GTD:** `4edd99de` ("[BUG/gap] no_auto_arm non settabile via gtd_update/gtd_add"). **WI** `69e03933` (fix-bug). Modello: sonnet (autopilot dispatch, loomy).
+
+**Fix tool-layer (fatto):** `no_auto_arm?: boolean` aggiunto a `GtdUpdateFields`/`buildGtdUpdatePayload` e ai param Zod di `gtd_update` e `gtd_add` (`src/tools.ts`). Help tool aggiornato per spiegare la semantica "sticky park" (autopilot=false da solo non basta, il reconciler lo riarma). 1 nuovo test unitario (`tests/gtd.test.ts`, 15/15 pass su `gtd.test.ts`, 89/89 sull'intera suite). `tsc --noEmit` pulito, `npm run build` ok.
+
+**Gap più profondo scoperto in verifica E2E (non risolvibile da board-mcp):** la migration DBA `20260721110000_loomx_items_no_auto_arm.sql` implementa il gate d'autorità nel trigger `loomx_enforce_no_auto_arm` confrontando `session_user` con `NEW.owner`/`'loomy'`/`'postgres'` — assumendo la connessione "native-role per-agente" (D-082/D-084 "RLS Fase 2 full-fleet", commento riga 23-31 della migration). In realtà **nessun agente della flotta gira ancora su `DATABASE_URL`** per le scritture GTD (verificato: `/proc/<pid>/environ` di tutti i processi `board-mcp` attivi — trader, analyst-ennebi, loomy incluso — ha solo `SUPABASE_URL`+`SUPABASE_SERVICE_ROLE_KEY`, mai `DATABASE_URL`; solo `DOC_RW_DATABASE_URL` per i tool `doc_*`, pattern F4.5). Sotto backend service_role, PostgREST espone `session_user = 'authenticator'` a qualunque chiamante — quindi il check del trigger **non passa mai**, nemmeno per `loomy` o per l'owner reale via `postgres` bootstrap. Riprodotto live: `UPDATE loomx_items SET no_auto_arm=true` con la service_role key del processo `board-mcp` attivo → `42501 no_auto_arm: only the item owner (board-mcp) or loomy may set/unset this flag (caller=authenticator)`. Nessuna riga toccata (rollback naturale, la seconda update di test era un no-op false→false).
+
+**Escalation:** `board_send` a loomy (schema/trigger fuori scope board-mcp, D-005) con la diagnosi sopra — serve o (a) estendere D-084 Fase 2 native-role anche a `loomx_items`, o (b) un fix trigger interim in stile `doc_rw` (GUC `request.agent_slug` al posto di `session_user`), coordinato con DBA. GTD `4edd99de` lasciato `waiting`/`waiting_on=dba` (il fix tool-layer è pronto ma la conferma "persiste a DB" richiesta dal resume_hint non è ottenibile finché il trigger resta legato a `session_user`).
+
+**Non committato:** `src/tools.ts` e `tests/gtd.test.ts` avevano già modifiche non committate di un'altra sessione (hardening broker D-093/D-100 cross-owner-ack) al momento dell'apertura di questo WI — il mio fix è stato aggiunto sopra, ma non ho fatto `git commit` per non bundlare lavoro altrui non rivisto. Segnalato a loomy.
+
+---
+
+## Sessione #54 — 2026-07-21 (fix cross-owner-ack: broker scoped a to_agent=loomy, non "chiunque")
+
+**GTD:** `99d8ab43` (auto-creato, task loomy diretto — rif. GTD `983c0784` del broker, design pillar C Q2). **WI** `80acd022` (fix-bug). Modello: sonnet.
+
+**Diagnosi:** il broker `loomy-assistant` NON era bloccato come da assunzione del task — `board_ack`/`board_update_status` avevano già delega broker da D-059 (v0.6.2), confermata deployata (`dist/tools.js` già allineato). Il problema reale era l'opposto della diagnosi iniziale: la delega D-059 era **troppo larga** (`!isLoomy && !isBroker` → nessun filtro `to_agent` per broker, quindi ack su QUALSIASI agente), mentre la motivazione originale D-059 e la richiesta odierna di Loomy riguardano solo l'inbox di loomy.
+
+**Fix (`src/tools.ts`):** nuova funzione pura `resolveBoardActorFilterCode({isLoomy, isBroker, selfCode, loomyCode})` — loomy: nessun filtro; broker: filtro `to_agent=loomyCode` (non più nessun filtro); altri agenti: filtro `to_agent=selfCode` (invariato). Applicata sia a `board_ack` che `board_update_status` (stessa semantica di chiusura messaggio). Fallback sicuro se `loomyCode` non risolvibile: broker degrada a self-scope (mai ack illimitato per errore di lookup).
+
+**Test:** 4 nuovi case in `tests/gtd.test.ts` su `resolveBoardActorFilterCode` (loomy unrestricted, broker→loomy-only, agente normale→self, broker con loomyCode assente→self). 13/13 pass su `gtd.test.ts`, 44/44 su `wi.test.ts`+`resolve-self-slug.test.ts`, `tsc --noEmit` pulito, build ok.
+
+**Decisione:** `D-100` (DB-first, supersede parziale di D-059 sullo scope ack/update-status) — linkata al WI `80acd022` (durable gate).
+
+**Non fatto:** GTD `983c0784` (owner presumibilmente `loomy-assistant`, non `board-mcp`) non chiudibile da qui — segnalato a loomy via board_send, chiusura delegata a loomy/broker.
+
+---
+
+## Sessione #53 — 2026-07-21 (chiusura indagine 281 dup: sintesi it-manager+DBA mai fatta, colmata)
+
+**GTD:** `Risposta it-manager su retry-loop reconciler/dev-quadro/loomy-assistant` (`b1a7c2e4`) + follow-on gemello `Raccogli timestamp dettaglio duplicati estremi da DBA` (`73ef5ab9`). **WI** `897986a4` (triage, on-the-fly). Modello: sonnet (autopilot).
+
+**Cosa:** entrambe le risposte attese (it-manager msg `b0eb2e66`, DBA msg `f5263b2c`) erano già arrivate il 07/07-08 ma mai incrociate né chiuse — i due GTD erano rimasti `waiting`/`next_action` per 2 settimane, ri-evocati senza esito. Sintesi: root cause confermata (check-before-create ignorava `gtd_status='trash'` → item trashato invisibile al dedup → ricreato ad ogni ciclo dal broker LA e da 4 siti reconciler, quest'ultimo già fixato commit `5f3ac26`). Nuance critica dal dettaglio DBA: i gruppi `loomy-assistant` (666da5a1/445a9b57) NON sono duplicati-bug ma il job ricorrente `stale-armed-decay` che riusa lo stesso `source_ref` by-design — un cleanup o unique index che li trattasse come duplicati romperebbe il job. Solo i gruppi `dev-quadro` (bf5beded/5533fad3, burst race) sono spazzatura vera.
+
+**Delegato a loomy** (msg `cb7510a2`, question): (1) via libera al fix broker LA proposto da it-manager, (2) decisione di scoping sull'UNIQUE index parziale (il job stale-armed-decay va reso source_ref-univoco per ciclo, o l'index va escluso per quel pattern), (3) autorizzare DBA a pulire SOLO i due gruppi dev-quadro, non toccare i gruppi loomy-assistant. Ack sui 2 messaggi origine. Nessuna riga cancellata lato board-mcp.
+
+---
+
+## Sessione #52 — 2026-07-08 (verifica follow-on: indice DBA ancora non applicato)
+
+**GTD:** `Verifica applicazione partial UNIQUE index loomx_items(owner,source_ref) da parte DBA` (`fd4479f4`, follow-on sessione #51). **WI** `c615befa` (verify-db-change, on-the-fly, force_ephemeral). Modello: sonnet (autopilot).
+
+**Cosa:** verificato via `pg_indexes` su `loomx_items`: nessun UNIQUE index su `(owner,source_ref)`, solo indici non-unique esistenti. La richiesta a DBA (msg `2a57118e`, 2026-07-07 22:31) è ancora `status=pending`, nessuna risposta. Riportato a loomy (msg `f498c44c`) — nessuna azione ulteriore possibile lato board-mcp, escalation lasciata a lui.
+
+---
+
+## Sessione #51 — 2026-07-07/08 (indagine 281 gruppi duplicati loomx_items — root cause: indice DBA mai applicato)
+
+**GTD:** `Indaga causa 281 gruppi duplicati loomx_items (807 righe eccesso)` (`1c28eab0`, da loomy msg `a18c5087`). **WI** `2017573e` (investigate-bug, on-the-fly, force_ephemeral). Modello: sonnet (autopilot).
+
+**Cosa:** DBA aveva rilevato 281 gruppi duplicati (owner,source_ref), 807 righe in eccesso, con picchi estremi (dev-quadro bf5beded 51 righe, 5533fad3 49, loomy-assistant 666da5a1/445a9b57 48). Rianalizzato il codice `gtd_add` (dedup SELECT-then-INSERT non atomico, commento esplicito su race in attesa di indice DB) e trovato che la sessione #42 (2026-06-30) aveva già identificato lo stesso gap e raccomandato a DBA un partial UNIQUE index `(owner,source_ref) WHERE source_ref IS NOT NULL AND gtd_status <> 'trash'` — **mai applicato**. Verificato ora via `psql "$LOOMX_DB_URL" \d loomx_items`/`pg_indexes`: nessun UNIQUE su quella coppia, solo indici non-unique. Spiega l'escalation 148→281 gruppi in 8 giorni.
+
+**Limite scoperto:** il ruolo DB `board-mcp` è RLS-scoped a owner=self — query diretta mostra solo 134 righe totali (quasi tutte owner=board-mcp), quindi non ho potuto ispezionare i timestamp dei gruppi estremi di altri owner per distinguere burst-race da accumulo ciclico (item trashato e ri-sincronizzato, dato che il dedup esclude `gtd_status='trash'` dal match).
+
+**Delegato:** board_send a DBA (applica indice ora + condividi timestamp gruppi estremi), a it-manager (verifica retry-loop reconciler/sync su dev-quadro/loomy-assistant), a loomy (riepilogo). 3 GTD follow-on creati (armati post-`wi_end`, D-069): verifica indice DBA, raccolta timestamp, risposta it-manager. NON cancellata alcuna riga.
+
+---
+
 ## Sessione #50 — 2026-07-07 (D-093 deploy: wake_priority column live, wake_only bugfix)
 
 **GTD:** `D-093: deploy pass-through wake_priority appena la colonna board_messages.wake_priority è live` (`7e896506`). **WI** `917b2262` (deploy-feature, on-the-fly). Modello: sonnet (autopilot). GO ricevuto da it-manager (msg `e4c95ac3`): colonna live, DDL applicata da DBA, tabella `loomx_agent_pings` droppata.

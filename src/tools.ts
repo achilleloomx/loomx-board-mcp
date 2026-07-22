@@ -69,6 +69,40 @@ export interface GtdUpdateFields {
   block_scope?: string | null;
   resume_hint?: string | null;
   clarified_at?: string | null;
+  no_auto_arm?: boolean;
+}
+
+// Broker may arm autopilot on another owner's GTD only while the owner has
+// never acked it (clarified_at IS NULL). Once acked, that choice stands and
+// the broker must escalate to loomy instead (D-093 hardening, 2026-07-07).
+export function brokerAutopilotArmBlocked(params: {
+  isBroker: boolean;
+  isLoomy: boolean;
+  selfSlug: string;
+  targetOwner: string | undefined;
+  targetClarifiedAt: string | null | undefined;
+}): boolean {
+  const { isBroker, isLoomy, selfSlug, targetOwner, targetClarifiedAt } = params;
+  return Boolean(
+    isBroker && !isLoomy && targetOwner && targetOwner !== selfSlug && targetClarifiedAt
+  );
+}
+
+// D-093 broker cross-owner ack: loomy-assistant triages loomy's low-pri mail
+// (design pillar C, GTD 983c0784), so it must be able to close (ack/update)
+// messages addressed to loomy specifically — not to any agent. Returns the
+// `to_agent` code the query must filter on, or null for no filter (full
+// override, loomy only). Everyone else stays scoped to their own inbox.
+export function resolveBoardActorFilterCode(params: {
+  isLoomy: boolean;
+  isBroker: boolean;
+  selfCode: string;
+  loomyCode: string | undefined;
+}): string | null {
+  const { isLoomy, isBroker, selfCode, loomyCode } = params;
+  if (isLoomy) return null;
+  if (isBroker && loomyCode) return loomyCode;
+  return selfCode;
 }
 
 export function buildGtdUpdatePayload(fields: GtdUpdateFields): Record<string, unknown> {
@@ -86,6 +120,7 @@ export function buildGtdUpdatePayload(fields: GtdUpdateFields): Record<string, u
   if (fields.block_scope !== undefined) updates.block_scope = fields.block_scope;
   if (fields.resume_hint !== undefined) updates.resume_hint = fields.resume_hint;
   if (fields.clarified_at !== undefined) updates.clarified_at = fields.clarified_at;
+  if (fields.no_auto_arm !== undefined) updates.no_auto_arm = fields.no_auto_arm;
   return updates;
 }
 
@@ -292,9 +327,16 @@ export function registerTools(
         .update({ status: "acknowledged" as MessageStatus })
         .eq("id", message_id);
 
-      // Broker/loomy can ack messages addressed to any agent; others only their own
-      if (!isLoomy && !isBroker) {
-        query = query.eq("to_agent", selfCode);
+      // Loomy: unrestricted. Broker: only loomy's mail (D-093 cross-owner ack,
+      // GTD 983c0784). Everyone else: own inbox only.
+      const ackFilterCode = resolveBoardActorFilterCode({
+        isLoomy,
+        isBroker,
+        selfCode,
+        loomyCode: slugToCode.get("loomy"),
+      });
+      if (ackFilterCode !== null) {
+        query = query.eq("to_agent", ackFilterCode);
       }
 
       const { data, error } = await query
@@ -414,9 +456,16 @@ export function registerTools(
         .update({ status: status as MessageStatus })
         .eq("id", message_id);
 
-      // Broker/loomy can update messages addressed to any agent; others only their own
-      if (!isLoomy && !isBroker) {
-        query = query.eq("to_agent", selfCode);
+      // Loomy: unrestricted. Broker: only loomy's mail (D-093 cross-owner ack,
+      // GTD 983c0784). Everyone else: own inbox only.
+      const statusFilterCode = resolveBoardActorFilterCode({
+        isLoomy,
+        isBroker,
+        selfCode,
+        loomyCode: slugToCode.get("loomy"),
+      });
+      if (statusFilterCode !== null) {
+        query = query.eq("to_agent", statusFilterCode);
       }
 
       const { data, error } = await query
@@ -795,8 +844,9 @@ export function registerTools(
       recurrence_days: z.number().int().positive().optional().describe("Re-arm autopilot N days after completion (recurring task)"),
       block_scope: z.string().optional().describe("Scope tag constraining autopilot dispatch (e.g. 'dns', 'grocery') — agent manager only evokes for matching scope"),
       resume_hint: z.string().optional().describe("Free-text hint for the agent on how/where to resume this item"),
+      no_auto_arm: z.boolean().optional().describe("D-100: permanently park this item from autopilot re-arming — the reconciler/broker will not flip autopilot back to true while this is set, even after autopilot=false. Set false to unpark."),
     },
-    async ({ title, body, gtd_status, owner, priority, deadline, source, source_ref, autopilot, autopilot_model, recurrence_days, block_scope, resume_hint }) => {
+    async ({ title, body, gtd_status, owner, priority, deadline, source, source_ref, autopilot, autopilot_model, recurrence_days, block_scope, resume_hint, no_auto_arm }) => {
       const targetOwner = owner ?? selfSlug;
 
       // Only loomy/broker can create items for other agents
@@ -853,6 +903,7 @@ export function registerTools(
       if (recurrence_days !== undefined) insertPayload.recurrence_days = recurrence_days;
       if (block_scope !== undefined) insertPayload.block_scope = block_scope;
       if (resume_hint !== undefined) insertPayload.resume_hint = resume_hint;
+      if (no_auto_arm !== undefined) insertPayload.no_auto_arm = no_auto_arm;
 
       const { data, error } = await db
         .from(GTD_TABLE)
@@ -922,8 +973,9 @@ export function registerTools(
       block_scope: z.string().nullable().optional().describe("Autopilot dispatch scope constraint (or null to clear)"),
       resume_hint: z.string().nullable().optional().describe("Hint for the agent on how to resume (or null to clear)"),
       clarified_at: z.union([z.literal(true), z.string(), z.null()]).optional().describe("Owner ack flag: true = set to now, ISO 8601 string = explicit timestamp, null = clear. NULL means the owner has never reviewed the item (loomy/broker may freely evaluate/arm autopilot); once set, the owner's autopilot choice is respected and must not be overridden by others. Settable by the GTD owner or loomy only (not broker on others' items)."),
+      no_auto_arm: z.boolean().optional().describe("D-100: permanently park this item from autopilot re-arming — set true so the reconciler/broker stop flipping autopilot back to true on their cycle (autopilot=false alone is not sticky). Set false to unpark."),
     },
-    async ({ id, title, body, gtd_status, priority, deadline, waiting_on, owner, autopilot, autopilot_model, recurrence_days, block_scope, resume_hint, clarified_at }) => {
+    async ({ id, title, body, gtd_status, priority, deadline, waiting_on, owner, autopilot, autopilot_model, recurrence_days, block_scope, resume_hint, clarified_at, no_auto_arm }) => {
       const db = getSupabaseClient();
 
       // Only loomy/broker can reassign owner
@@ -962,14 +1014,26 @@ export function registerTools(
 
       if (autopilot === true) {
         let targetOwner = owner;
-        if (targetOwner === undefined) {
+        let targetClarifiedAt: string | null | undefined;
+        if (targetOwner === undefined || (isBroker && !isLoomy)) {
           const { data: existing } = await db
             .from(GTD_TABLE)
-            .select("owner")
+            .select("owner, clarified_at")
             .eq("id", id)
             .maybeSingle();
-          targetOwner = (existing as { owner?: string } | null)?.owner;
+          targetOwner = targetOwner ?? (existing as { owner?: string } | null)?.owner;
+          targetClarifiedAt = (existing as { clarified_at?: string | null } | null)?.clarified_at;
         }
+
+        if (brokerAutopilotArmBlocked({ isBroker, isLoomy, selfSlug, targetOwner, targetClarifiedAt })) {
+          return {
+            content: [
+              { type: "text", text: `Error: GTD item id='${id}' has already been reviewed by its owner ('${targetOwner}', clarified_at=${targetClarifiedAt}) — the broker cannot arm autopilot on it. Escalate to loomy.` },
+            ],
+            isError: true,
+          };
+        }
+
         if (targetOwner) {
           const guardError = await checkAutopilotArmGuard(db, targetOwner);
           if (guardError) return guardError;
@@ -979,7 +1043,7 @@ export function registerTools(
       const updates = buildGtdUpdatePayload({
         title, body, gtd_status, priority, deadline, waiting_on, owner,
         autopilot, autopilot_model, recurrence_days, block_scope, resume_hint,
-        clarified_at: resolvedClarifiedAt,
+        clarified_at: resolvedClarifiedAt, no_auto_arm,
       });
 
       let query = db
