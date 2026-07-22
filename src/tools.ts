@@ -949,6 +949,18 @@ export function registerTools(
         };
       }
 
+      // no_auto_arm authority mirrors clarified_at/gtd_update (D-100 fix):
+      // settable only when the caller is the item's own owner, or loomy — not
+      // the broker creating an item on another agent's behalf.
+      if (no_auto_arm !== undefined && targetOwner !== selfSlug && !isLoomy) {
+        return {
+          content: [
+            { type: "text", text: `Error: only the item owner or loomy can set no_auto_arm.` },
+          ],
+          isError: true,
+        };
+      }
+
       const db = getSupabaseClient();
 
       if (autopilot === true) {
@@ -1093,6 +1105,29 @@ export function registerTools(
           return {
             content: [
               { type: "text", text: `Error: only the GTD owner ('${currentOwner}') or loomy can set clarified_at.` },
+            ],
+            isError: true,
+          };
+        }
+      }
+
+      // no_auto_arm authority mirrors clarified_at (D-100 fix): the DB trigger
+      // no longer enforces "owner or loomy only" under service_role
+      // (session_user is always 'authenticator'), so the check moves here.
+      // Broker's general cross-agent update privilege does NOT extend to this
+      // field — otherwise the broker could unpark/re-arm what it's meant to
+      // be blocked from touching (GTD e21ba805, msg d599d81c from dba).
+      if (no_auto_arm !== undefined) {
+        const { data: existing } = await db
+          .from(GTD_TABLE)
+          .select("owner")
+          .eq("id", id)
+          .maybeSingle();
+        const currentOwner = (existing as { owner?: string } | null)?.owner;
+        if (currentOwner && currentOwner !== selfSlug && !isLoomy) {
+          return {
+            content: [
+              { type: "text", text: `Error: only the GTD owner ('${currentOwner}') or loomy can set no_auto_arm.` },
             ],
             isError: true,
           };

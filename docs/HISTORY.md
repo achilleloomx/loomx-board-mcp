@@ -4,6 +4,20 @@
 
 ---
 
+## Sessione #57 — 2026-07-22 (D-100 fix: authority-check no_auto_arm spostato nel tool layer)
+
+**GTD:** `e21ba805` ("[msg] dba→board-mcp: sposta authority-check owner/loomy no_auto_arm nel tool layer (D-100 fix)"). **WI** `59db4c5b`. Modello: sonnet (autopilot dispatch).
+
+**Root cause (dba, migration `20260722100000`):** il trigger `loomx_enforce_no_auto_arm` confrontava `session_user` con owner/loomy — gap già noto (sessione #55) e ora confermato non risolvibile lato DB: sotto backend `service_role` `session_user` è sempre `'authenticator'`, quindi il gate non passa mai per nessuno. La DBA ha applicato un fix che **rimuove l'enforcement lato trigger** e chiede il check applicativo lato board-mcp.
+
+**Fix (`src/tools.ts`):** authority-check esplicito su `no_auto_arm`, stesso pattern già usato per `clarified_at`:
+- `gtd_update`: se `no_auto_arm !== undefined`, legge l'owner corrente dell'item e rifiuta (`isError`) se il chiamante non è né l'owner né loomy. Il privilegio cross-agente generico del broker (`isBroker && !isLoomy`) NON si estende a questo campo — altrimenti il broker potrebbe unparkare/riarmare item marcati proprio per bloccarlo (anti self-triage, GTD `3c982c33`).
+- `gtd_add`: se `no_auto_arm !== undefined` e `targetOwner !== selfSlug`, richiede `isLoomy` (il broker può creare item per altri owner ma non settare `no_auto_arm` su di essi).
+
+Nessun nuovo test aggiunto: i test esistenti coprono solo le funzioni pure (`buildGtdUpdatePayload`, `brokerAutopilotArmBlocked`) — il check di autorità vive nell'handler inline, stesso pattern non testato a livello handler già usato per `clarified_at`. 92/92 pass, `tsc --noEmit` pulito, `npm run build` ok.
+
+---
+
 ## Sessione #56 — 2026-07-22 (commit lavoro sospeso #54/#55 + fix dedup broadcast auto_gtd)
 
 **GTD:** `a4dcbb35` ("[msg] loomy: fix no_auto_arm esposizione (4edd99de) + dedup broadcast bug (994b3bbc)"). **WI** `1d1fd209` (fix-bug). Modello: sonnet (autopilot dispatch, loomy).
