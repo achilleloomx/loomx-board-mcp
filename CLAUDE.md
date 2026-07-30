@@ -228,6 +228,14 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 | `model` | Cambia modello (richiede `requested_model` es. `sonnet`, `opus`) |
 | `none` | Annulla richiesta pendente |
 
+### Eval Tools (loomx_eval_runs — D-105 attribution gap, v0.14.0)
+
+| Tool | Descrizione | Operazione DB |
+|---|---|---|
+| `eval_run_add` | Registra un run in `loomx_eval_runs`. **`triggered_by`** non è mai accettato come testo libero dal chiamante — viene forzato a `selfSlug` (identità nativa D-084 dove il rollout è arrivato, altrimenti `--agent`). Solo loomy può attribuire un run a un altro agente. Link via `eval_id` (uuid) o `eval_code` (`loomx_evals.code`, risolto server-side) | INSERT loomx_eval_runs |
+
+> **Gap chiuso (D-105, GTD 289954a0):** dba aveva applicato lo schema `loomx_evals`/`loomx_eval_runs` 1:1 col design ma segnalato che "l'owner scrive i propri run" non è enforceable a floor DB — tutta la flotta tranne loomy scrive via `service_role` letterale (bypassa RLS per definizione, D-084). L'enforcement reale (non-ripudiabilità di chi ha lanciato un run) è qui: solo loomy può override `triggered_by`. Stesso gap noto per `loomx_agent_consumption` (nessun tool board-mcp la scrive, fuori scope) e `loomx_agent_pings` (tabella droppata, superseduta da `ping`/D-093 — vedi sotto).
+
 ### Ping (cold-start cross-agente, D-093 — hooked su board_send/board_ack)
 
 **Pivot ratificato (D-093, Loomy msg 58c130be):** il build separate-table `loomx_agent_pings` (D-092, dev-hq) è stato **abbandonato** — tabella mai popolata, `DROP TABLE` proposto a DBA. Il ping si aggancia al meccanismo esistente `board_send`/`board_ack`: un ping è un `board_send(type='info')` con il marcatore `wake_priority` (colonna additiva su `board_messages`, nullable — NULL = messaggio normale, comportamento invariato). Nessuna tabella/inbox/tool di ack dedicati. Design completo: `hub/it-manager/design/ping-cold-start.md`.
@@ -239,7 +247,7 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 
 > **Colonna pending (D-093):** `board_messages.wake_priority` è da aggiungere lato DBA (coordinamento it-manager↔DBA, ordine: colonna prima del pass-through). `board_send`/`ping` passano già il campo — falliranno a runtime finché la migration non è live (stesso pattern di `loomx_work_items`/`loomx_agent_runtime` pre-DDL).
 >
-> **L2 cold-wake (ownership it-manager/reconciler):** il reconciler farà scan `board_messages WHERE wake_priority IN ('high','urgent') AND status='pending'` per il cold-wake del target — fuori scope board-mcp, riusa ~90% del motore `process_pings` di dev-hq (repoint della query).
+> **L2 cold-wake (ownership it-manager/reconciler, D-099):** il reconciler scansiona `board_messages WHERE wake_priority IS NOT NULL AND status='pending'` per il cold-wake del target — QUALSIASI valore (anche `normal`) sveglia, la priorità ordina solo la coda (`urgent`>`high`>`normal`), non decide se svegliare (verificato in `loomx_agent_manager.py:2375`). Fuori scope board-mcp, riusa ~90% del motore `process_pings` di dev-hq (repoint della query).
 
 ### Org Registry Tool (loomx_role_cards / loomx_org_edges / loomx_sow_raci — D-090/D-091)
 
@@ -291,37 +299,17 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 | `alignment_issue` | Inconsistenza governance rilevata |
 | `info` | Messaggio informativo generico (es. status update, notifica) |
 
-### Agent IDs (slug da `board_agents` — source of truth nel DBA)
+### Agenti — DB-first (D-104)
 
-| Slug | Agente | Repo |
-|---|---|---|
-| `loomy` | Root Coordinator (Loomy) | 00. LoomX Consulting |
-| `app` | Product Owner | loomx-home-app |
-| `assistant` | Home Assistant | loomx-home-assistant |
-| `dba` | Database Admin | loomx-home-DBA |
-| `board-mcp` | Board MCP Server | loomx-board-mcp |
-| `sito-loomx` | PO Sito LoomX | LoomXweb |
-| `loomx-tracker` | PO Tracker (ex-Commercialisti) | LoomXCommercialisti |
-| `damato` | PO D'Amato | DamatoArredamenti_Website |
-| `sintesi-impianti` | Consulting — _tombstone (active=false, D-048, ex-code 013)_ | — |
-| `mcpromo` | Consulting — MCpromo (Antonelli) | 01. Progetti/20. MCpromo |
-| `marketing` | Muse — Marketing Agent | hub/marketing/ |
-| `gardenstone` | Consulting — Gardenstone SRL Lucca (primo cliente pagante Tracker) | — |
-| `detective` | Fletcher — Detective / People & Companies research | hub/detective/ |
-| `loomx-controlling` | PO LoomX Controlling | achilleloomx/LoomXControlling (01. Progetti/23. LoomX Controlling/) |
-| `analyst-pieroni` | Consulting — Pieroni Edilizia (analisi / semantic layer, ex-`pieroni`, code 029) | — |
-| `dev-pieroni` | Dev — Pieroni app reporting (code 031) | achilleloomx/pieroni-app (01. Progetti/25. Pieroni App) |
-| `dev-hq` | Dev — LoomX HQ (D-038 emend., code 032) | — |
-| `dev-kinesis` | Dev — Kinesis (ex-`pm-kinesis`, D-047 split) | — |
-| `analyst-kinesis` | Consulting — Kinesis (analisi, D-047 split) | — |
-| `analyst-quadro` | Consulting — Quadro (analisi, D-048, code 035) | — |
-| `dev-quadro` | Dev — Quadro (D-048, code 036) | — |
-| `forge` | D-048 (code 037) | — |
-| `atlas` | D-048 (code 038) | — |
-| `analyst-numera` | Consulting — Numera (analisi, code 039) | — |
-| `dev-numera` | Dev — Numera (code 040) | — |
-| `analyst-ennebi` | Consulting — Ennebi Computers (analisi, ex-`ennebi`, code 030) | — |
-| `dev-ennebi` | Dev — Ennebi Computers (code 041) | — |
+Niente più roster narrativo qui: era una tabella duplicata (31 slug, includeva `sintesi-impianti` e `marketing`/Muse — entrambi offboarded) scambiata in una scansione precedente per "lista destinatari `board_send`" — non lo è. Fonti live:
+
+| Cosa serve | Dove |
+|---|---|
+| Ruolo/confini/riporti di un agente | `org_lookup(agent="<slug>")` |
+| Chi esiste ed è attivo | `board_agents` (via `org_lookup` o query diretta) |
+| Dove sta il repo/dir di un agente | `hub/agents.yaml` |
+
+**Confine (non è duplicazione):** l'**enum dei destinatari** di `board_send`/`ping` resta di proprietà board-mcp e va tenuto allineato a `board_agents` — è il contratto del tool (AGENT-STANDARD §0), non questa tabella descrittiva.
 
 ---
 

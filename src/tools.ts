@@ -223,7 +223,7 @@ export function registerTools(
         .optional()
         .describe("Reference message ID (for done/replies)"),
       wake_priority: WakePrioritySchema.optional().describe(
-        "Cold-start wake marker (D-093): normal|high|urgent. high/urgent asks the reconciler to cold-wake a sleeping recipient; omit for a regular message (no wake)."
+        "Cold-start wake marker (D-093/D-099): normal|high|urgent. ANY value (including normal) asks the reconciler to cold-wake a sleeping recipient — the priority only orders the wake queue (urgent>high>normal), it does not decide whether to wake. Omit (leave unset) for a regular message with no wake."
       ),
       auto_gtd: z.boolean().optional().describe(
         "GTD 994b3bbc: also create a GTD item (owner=recipient, source='board', source_ref=this message's id) so the recipient sees it in gtd_inbox without relying on manual triage. Default false (unchanged behavior). Deduped against re-sends of the same message."
@@ -2902,11 +2902,11 @@ export function registerTools(
   // --- ping ---
   server.tool(
     "ping",
-    "Ergonomic alias for board_send(type='info', wake_priority=priority) — NOT a separate storage/tool (D-093). Sends a lightweight cross-agent message marked for cold-start wake. high/urgent asks the reconciler to cold-wake a sleeping target; normal just surfaces at the target's next natural cycle. Use board_ack to close it, board_inbox(wake_only=true) to list wake-marked messages.",
+    "Ergonomic alias for board_send(type='info', wake_priority=priority) — NOT a separate storage/tool (D-093). Sends a lightweight cross-agent message marked for cold-start wake. ANY priority (normal included, D-099) asks the reconciler to cold-wake a sleeping target — priority only orders the wake queue (urgent>high>normal). Use board_ack to close it, board_inbox(wake_only=true) to list wake-marked messages.",
     {
       target_agent: z.string().min(1).describe("Recipient agent slug"),
       message: z.string().min(1).describe("Ping message"),
-      priority: WakePrioritySchema.optional().describe("Wake priority (default: normal). high/urgent cold-wake the target via the reconciler."),
+      priority: WakePrioritySchema.optional().describe("Wake priority (default: normal). Any priority cold-wakes the target via the reconciler — priority only orders the wake queue (urgent>high>normal), it doesn't gate whether the wake happens (D-099)."),
     },
     async ({ target_agent, message, priority }) => {
       const validationError = await validateRecipientSlug(target_agent);
@@ -2942,6 +2942,101 @@ export function registerTools(
         };
       }
       return { content: [{ type: "text", text: JSON.stringify({ ok: true, id: data.id, created_at: data.created_at }, null, 2) }] };
+    }
+  );
+
+  // =========================================================================
+  // Eval Tools (loomx_eval_runs — D-105 attribution gap, GTD 289954a0)
+  // dba applied loomx_evals/loomx_eval_runs 1:1 with D-105 (migration
+  // 20260729020000) but flagged that "owner writes their own runs" isn't
+  // enforceable at DB-floor: every agent but loomy writes via literal
+  // service_role, which bypasses RLS by definition (D-084). The real
+  // enforcement lands here: eval_run_add always sets triggered_by from
+  // selfSlug (native-role identity where D-084 has rolled out, --agent
+  // identity otherwise) instead of trusting a self-declared field. Only
+  // loomy may override it (matches the cross-owner INSERT grant dba already
+  // gave loomy on this table for coordination).
+  // =========================================================================
+
+  const EVALS_TABLE = "loomx_evals";
+  const EVAL_RUNS_TABLE = "loomx_eval_runs";
+  const EVAL_VERDICTS = ["pass", "fail", "advisory", "not_run"] as const;
+
+  server.tool(
+    "eval_run_add",
+    "Record a run in loomx_eval_runs (D-105). triggered_by is never taken as free text from the caller — it is always your own agent identity (selfSlug). Only loomy may attribute a run to a different agent. Link the run via eval_id (uuid) or eval_code (loomx_evals.code, resolved server-side).",
+    {
+      eval_id: z.string().uuid().optional().describe("UUID of the loomx_evals row. Omit if passing eval_code."),
+      eval_code: z.string().optional().describe("loomx_evals.code — resolved to eval_id server-side. Omit if passing eval_id."),
+      area: z.string().optional(),
+      behavior: z.string().optional(),
+      model: z.string().min(1).describe("Model under test (NOT NULL in schema)"),
+      judge_model: z.string().optional(),
+      score: z.number().optional(),
+      verdict: z.enum(EVAL_VERDICTS).optional().describe("pass | fail | advisory | not_run"),
+      comment: z.string().optional(),
+      scenario_ref: z.string().optional(),
+      actual_ref: z.string().optional(),
+      eval_version: z.string().optional(),
+      git_sha: z.string().optional(),
+      tokens: z.number().int().optional(),
+      triggered_by: z.string().optional().describe("Attribution override — loomy only. Any other caller gets an error if this differs from their own slug; omit to default to yourself."),
+    },
+    async ({ eval_id, eval_code, area, behavior, model, judge_model, score, verdict, comment, scenario_ref, actual_ref, eval_version, git_sha, tokens, triggered_by }) => {
+      if (triggered_by && triggered_by !== selfSlug && !isLoomy) {
+        return {
+          content: [{ type: "text", text: `Error: only loomy can attribute a run to another agent (triggered_by="${triggered_by}"). You can only record runs as yourself ("${selfSlug}") — omit triggered_by.` }],
+          isError: true,
+        };
+      }
+      if (!eval_id && !eval_code) {
+        return { content: [{ type: "text", text: "Error: pass eval_id or eval_code to link the run to a loomx_evals row." }], isError: true };
+      }
+
+      const db = getSupabaseClient();
+      let resolvedEvalId = eval_id ?? null;
+
+      if (!resolvedEvalId && eval_code) {
+        const { data, error } = await db.from(EVALS_TABLE).select("id").eq("code", eval_code).maybeSingle();
+        if (error) {
+          return { content: [{ type: "text", text: `Error resolving eval_code "${eval_code}": ${error.message}` }], isError: true };
+        }
+        if (!data) {
+          return { content: [{ type: "text", text: `Error: no loomx_evals row with code "${eval_code}".` }], isError: true };
+        }
+        resolvedEvalId = (data as { id: string }).id;
+      }
+
+      const payload: Record<string, unknown> = {
+        eval_id: resolvedEvalId,
+        area: area ?? null,
+        behavior: behavior ?? null,
+        model,
+        judge_model: judge_model ?? null,
+        score: score ?? null,
+        verdict: verdict ?? null,
+        comment: comment ?? null,
+        scenario_ref: scenario_ref ?? null,
+        actual_ref: actual_ref ?? null,
+        eval_version: eval_version ?? null,
+        git_sha: git_sha ?? null,
+        tokens: tokens ?? null,
+        triggered_by: triggered_by ?? selfSlug,
+      };
+
+      const { data, error } = await db
+        .from(EVAL_RUNS_TABLE)
+        .insert(payload)
+        .select("id, eval_id, triggered_by, run_at")
+        .maybeSingle();
+
+      if (error || !data) {
+        return {
+          content: [{ type: "text", text: `Error recording eval run: ${error?.message ?? "no row returned (RLS?). Retry with the same args."}` }],
+          isError: true,
+        };
+      }
+      return { content: [{ type: "text", text: JSON.stringify({ ok: true, ...data }, null, 2) }] };
     }
   );
 
