@@ -4,6 +4,14 @@
 
 ---
 
+## Sessione #62 — 2026-08-01 (chiusura ack pendente, wake duplicato msg b5171220)
+
+**Wake cold-start** (msg `b5171220`, loomy — stesso GO già lavorato in sessione #61). **WI** `bda73214`. Modello: sonnet.
+
+Il wake portava lo stesso messaggio già processato in sessione #61: fix committato (`6b83140`), test aggiornati su entrambi i rami + regressione dedicata, `npm test` verde (93/93, riverificato qui). Il messaggio però era rimasto `pending` (mai ackato). Nessun lavoro nuovo: solo `board_ack(b5171220)`. Condizioni (2) verifica live con `592b1cda` e (3) restart bundlato con GTD `f8297931` (D-069) restano fuori portata board-mcp — non ripetuto, già notificato a loomy in sessione #61.
+
+---
+
 ## Sessione #61 — 2026-08-01 (fix board_ack/broker over-scoping, GO loomy msg b5171220)
 
 **Autopilot dispatch** (GTD `89169d5d`, follow-on della diagnosi #60). **WI** `798ca48d`. Modello: sonnet.
