@@ -90,19 +90,22 @@ export function brokerAutopilotArmBlocked(params: {
 
 // D-093 broker cross-owner ack: loomy-assistant triages loomy's low-pri mail
 // (design pillar C, GTD 983c0784), so it must be able to close (ack/update)
-// messages addressed to loomy specifically — not to any agent. Returns the
-// `to_agent` code the query must filter on, or null for no filter (full
-// override, loomy only). Everyone else stays scoped to their own inbox.
+// messages addressed to loomy specifically — not to any agent — WITHOUT
+// losing its own inbox (bug fixed 2026-08-01, msg 5df512b6: the previous
+// single-code return replaced "own inbox" with "loomy only" instead of
+// adding to it, so the broker could no longer ack its own mail). Returns the
+// `to_agent` codes the query must filter on (IN), or null for no filter
+// (full override, loomy only). Everyone else stays scoped to their own inbox.
 export function resolveBoardActorFilterCode(params: {
   isLoomy: boolean;
   isBroker: boolean;
   selfCode: string;
   loomyCode: string | undefined;
-}): string | null {
+}): string[] | null {
   const { isLoomy, isBroker, selfCode, loomyCode } = params;
   if (isLoomy) return null;
-  if (isBroker && loomyCode) return loomyCode;
-  return selfCode;
+  if (isBroker && loomyCode) return [selfCode, loomyCode];
+  return [selfCode];
 }
 
 export function buildGtdUpdatePayload(fields: GtdUpdateFields): Record<string, unknown> {
@@ -403,7 +406,7 @@ export function registerTools(
         loomyCode: slugToCode.get("loomy"),
       });
       if (ackFilterCode !== null) {
-        query = query.eq("to_agent", ackFilterCode);
+        query = query.in("to_agent", ackFilterCode);
       }
 
       const { data, error } = await query
@@ -552,7 +555,7 @@ export function registerTools(
         loomyCode: slugToCode.get("loomy"),
       });
       if (statusFilterCode !== null) {
-        query = query.eq("to_agent", statusFilterCode);
+        query = query.in("to_agent", statusFilterCode);
       }
 
       const { data, error } = await query

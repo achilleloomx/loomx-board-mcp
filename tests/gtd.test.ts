@@ -90,7 +90,7 @@ test("brokerAutopilotArmBlocked: loomy is never blocked (full override)", () => 
   assert.equal(blocked, false);
 });
 
-// D-093 cross-owner ack (GTD 983c0784): broker can close loomy's mail only.
+// D-093 cross-owner ack (GTD 983c0784): broker can close loomy's mail AND its own.
 test("resolveBoardActorFilterCode: loomy gets no filter (full override)", () => {
   const filter = resolveBoardActorFilterCode({
     isLoomy: true,
@@ -101,14 +101,29 @@ test("resolveBoardActorFilterCode: loomy gets no filter (full override)", () => 
   assert.equal(filter, null);
 });
 
-test("resolveBoardActorFilterCode: broker is scoped to loomy's inbox, not any agent", () => {
+test("resolveBoardActorFilterCode: broker is scoped to its own inbox + loomy's, not any agent", () => {
   const filter = resolveBoardActorFilterCode({
     isLoomy: false,
     isBroker: true,
     selfCode: "005",
     loomyCode: "001",
   });
-  assert.equal(filter, "001");
+  assert.deepEqual(filter, ["005", "001"]);
+});
+
+// Regression (msg 5df512b6 / 592b1cda, fixed 2026-08-01): the previous
+// single-code return replaced "own inbox" with "loomy only" instead of
+// adding to it, so board_ack rejected messages addressed to the broker
+// itself. Both branches of the IN-filter must be present.
+test("resolveBoardActorFilterCode: broker's own-inbox messages stay ackable (regression)", () => {
+  const filter = resolveBoardActorFilterCode({
+    isLoomy: false,
+    isBroker: true,
+    selfCode: "005",
+    loomyCode: "001",
+  });
+  assert.ok(filter?.includes("005"), "broker must be able to ack messages addressed to itself");
+  assert.ok(filter?.includes("001"), "broker must be able to ack messages addressed to loomy");
 });
 
 test("resolveBoardActorFilterCode: plain agent is scoped to its own inbox", () => {
@@ -118,7 +133,7 @@ test("resolveBoardActorFilterCode: plain agent is scoped to its own inbox", () =
     selfCode: "032",
     loomyCode: "001",
   });
-  assert.equal(filter, "032");
+  assert.deepEqual(filter, ["032"]);
 });
 
 test("resolveBoardActorFilterCode: broker without a resolvable loomy code falls back to its own inbox (no unbounded ack)", () => {
@@ -128,7 +143,7 @@ test("resolveBoardActorFilterCode: broker without a resolvable loomy code falls 
     selfCode: "005",
     loomyCode: undefined,
   });
-  assert.equal(filter, "005");
+  assert.deepEqual(filter, ["005"]);
 });
 
 // GTD 994b3bbc: board_send/board_broadcast auto_gtd payload shape.
