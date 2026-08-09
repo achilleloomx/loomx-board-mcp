@@ -406,6 +406,46 @@ test("wi_end (error): cannot close already-closed WI", async () => {
   assert.equal(res.ok, false);
 });
 
+// Regression (GTD ba022585/c29d6143, dev-hq 2026-08-09, board msg f5fcd912):
+// post_runtime_request used to be dropped silently on this path — the early
+// already-closed return happened 100+ lines before the runtime_request write,
+// so a caller racing the reconciler's orphan-detection never got its
+// continue/clear/kill posted and its window hung with request=none.
+test("wi_end (error, already closed): post_runtime_request is still posted", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1" }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "failed", side_effects_log: [] },
+    ],
+    loomx_agent_runtime: [{ owner_slug: "app", request: "none" }],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(
+    db,
+    { wi_id: "wi-1", status: "done", post_runtime_request: "clear" },
+    ctxOwn
+  );
+  assert.equal(res.ok, false);
+  if (res.ok) return;
+  assert.match(res.error, /already closed/);
+  assert.equal(res.runtime_request_posted, true);
+  assert.equal(store.loomx_agent_runtime[0].request, "clear");
+});
+
+test("wi_end (error, already closed): no post_runtime_request → unchanged behavior", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1" }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "failed", side_effects_log: [] },
+    ],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxOwn);
+  assert.equal(res.ok, false);
+  if (res.ok) return;
+  assert.equal(res.runtime_request_posted, undefined);
+});
+
 // ---- wi_status ----------------------------------------------------------
 
 test("wi_status: returns active WI for self", async () => {

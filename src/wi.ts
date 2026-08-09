@@ -89,7 +89,9 @@ async function checkDurableGate(
   });
 }
 
-export type WiResult<T> = { ok: true; data: T } | { ok: false; error: string };
+export type WiResult<T> =
+  | { ok: true; data: T }
+  | { ok: false; error: string; runtime_request_posted?: boolean };
 
 interface WiContext {
   selfSlug: string;
@@ -272,6 +274,28 @@ export interface WiEndData {
   gate_bypassed?: boolean;           // true when force_ephemeral was used
   arm_warnings?: string[];           // soft-warns from arm_gtd_ids
   platform_contribution_pending?: string; // content for pull enabler (caller must send)
+  runtime_request_warning?: string;  // post_runtime_request write failed (see writeRuntimeRequest)
+}
+
+// Bug fix (GTD ba022585/c29d6143, dev-hq 2026-08-09, board msg f5fcd912): the
+// post_runtime_request write used to live ONLY on the success path, 100+ lines
+// after the already-closed early-return below — a WI closed by a race (e.g. the
+// reconciler's orphan-detection) before this call landed meant the runtime_request
+// silently never got posted, leaving the caller's window with no pending request:
+// exactly the state orphan-detection later misread as "hung". Extracted so both
+// the early-return and the normal-close path can post it, independent of WI status.
+async function writeRuntimeRequest(
+  db: SupabaseClient,
+  selfSlug: string,
+  request: string,
+  now: string
+): Promise<{ ok: boolean; error?: string }> {
+  const { error } = await db
+    .from(AGENT_RUNTIME_TABLE)
+    .update({ request, updated_at: now })
+    .eq("owner_slug", selfSlug);
+  if (error) return { ok: false, error: error.message };
+  return { ok: true };
 }
 
 export async function wiEnd(
@@ -305,6 +329,17 @@ export async function wiEnd(
   }
 
   if (row.status === "done" || row.status === "failed") {
+    // See writeRuntimeRequest above: post the runtime_request even though the
+    // WI is already closed — a stuck caller waiting on this call needs its
+    // continue/clear/kill request to land regardless of the WI race outcome.
+    if (args.post_runtime_request) {
+      const rr = await writeRuntimeRequest(db, ctx.selfSlug, args.post_runtime_request, nowIso());
+      return {
+        ok: false,
+        error: `WI already closed (status=${row.status}).`,
+        runtime_request_posted: rr.ok,
+      };
+    }
     return { ok: false, error: `WI already closed (status=${row.status}).` };
   }
 
@@ -421,11 +456,12 @@ export async function wiEnd(
   }
 
   // Phase 1 D-074 (REQ-034): write runtime_request after close if requested.
+  // Fix (dev-hq 2026-08-09): the write's error was previously never checked —
+  // a failed update was swallowed silently even on this success path.
+  let runtimeRequestWarning: string | undefined;
   if (args.post_runtime_request) {
-    await db
-      .from(AGENT_RUNTIME_TABLE)
-      .update({ request: args.post_runtime_request, updated_at: now })
-      .eq("owner_slug", ctx.selfSlug);
+    const rr = await writeRuntimeRequest(db, ctx.selfSlug, args.post_runtime_request, now);
+    if (!rr.ok) runtimeRequestWarning = `runtime_request not posted: ${rr.error}`;
   }
 
   return {
@@ -438,6 +474,7 @@ export async function wiEnd(
       ...(gateBypassed ? { gate_bypassed: true } : {}),
       ...(armWarnings.length > 0 ? { arm_warnings: armWarnings } : {}),
       ...(args.platform_contribution ? { platform_contribution_pending: args.platform_contribution } : {}),
+      ...(runtimeRequestWarning ? { runtime_request_warning: runtimeRequestWarning } : {}),
     },
   };
 }
