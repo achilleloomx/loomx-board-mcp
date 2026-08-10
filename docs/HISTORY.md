@@ -4,6 +4,18 @@
 
 ---
 
+## Sessione #68 — 2026-08-10 (coordina restart pg-shim gte fix, cbbb8ac — con it-manager)
+
+**Autopilot dispatch** (GTD `ba843f39`, high, follow-on sessione #67). **WI** `cd70a9b3`. Modello: sonnet.
+
+Riverificato build+test del fix già committato in sessione #67 (`cbbb8ac`, `PgQuery.gte/lte/gt/lt`): `tsc` pulito, 120/120 test verdi. Inviata richiesta di restart a it-manager (msg `defeb884`) per le istanze agente sul backend `DATABASE_URL`/native-identity (D-084) via `restart-reconciler.sh` — mai `systemctl` nudo, stesso pattern coordinato stamattina per `e0c5b0d` (msg `21bdda2d`). Non azionabile da qui: il restart di istanze altrui non è compito board-mcp (pattern consolidato, sessioni #39-#41/#50/#61/#63).
+
+**Decisioni prese:** nessuna nuova.
+**Blocchi / note:** GTD `ba843f39` → `waiting`/`waiting_on=it-manager`. Riportato a loomy (msg `1bc94439`).
+**Prossima sessione:** a conferma restart da it-manager, chiudere GTD `ba843f39`.
+
+---
+
 ## Sessione #67 — 2026-08-10 (fix pg-shim: .gte mancante crashava wi_end(waiting) su backend DATABASE_URL)
 
 **Wake cold-start** (D-093, msg `5cc2fba8` da nottolini, blocker). **WI** `45bd1d42-0f1c-434a-bfe2-f47a5e2639db`. Modello: sonnet.
