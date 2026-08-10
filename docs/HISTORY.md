@@ -4,6 +4,18 @@
 
 ---
 
+## Sessione #63 — 2026-08-10 (verifica build+test fix wi_end post_runtime_request, e0c5b0d — coordina restart con it-manager)
+
+**Wake cold-start** (msg `6f164f8f`, loomy, high — GTD `c482017c`). **WI** `d80b2d2f`. Modello: sonnet.
+
+Fix già committato in sessione precedente (`e0c5b0d`): `writeRuntimeRequest()` estratto così sia il path "WI già chiuso" (early-return) sia il path normale scrivono `post_runtime_request` — prima il caller che raceva con l'orphan-detection del reconciler perdeva silenziosamente la scrittura, lasciando la window con `request=none` (esattamente lo stato che l'orphan-detection poi legge come "hung"). Review diff (`src/wi.ts` + `tests/wi.test.ts`) confermata corretta. `npm run build` pulito, `npm test` 95/95 (incl. 2 nuovi test di regressione: post_runtime_request ancora scritto su WI already-closed; comportamento invariato senza il param).
+
+Coordinamento restart delle 7 istanze live richiesto a it-manager (msg `21bdda2d`, via `restart-reconciler.sh`, mai systemctl nudo — pattern `ba022585`). GTD `c482017c` → `waiting`/`waiting_on=it-manager` (non chiudibile da qui: il restart delle altre istanze non è compito board-mcp, pattern consolidato sessioni #39-#41/#50/#61). Riportato a loomy (msg `c3b037eb`, ref wake).
+
+**Nota di processo:** `wi_start` senza `gtd_item_id` esplicito ha auto-creato un GTD duplicato (invece di agganciare `c482017c` già esistente) — trashato (`e2fe8d01`), nessun impatto sul lavoro.
+
+---
+
 ## Sessione #62 — 2026-08-01 (chiusura ack pendente, wake duplicato msg b5171220)
 
 **Wake cold-start** (msg `b5171220`, loomy — stesso GO già lavorato in sessione #61). **WI** `bda73214`. Modello: sonnet.
