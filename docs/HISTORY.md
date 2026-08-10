@@ -4,6 +4,20 @@
 
 ---
 
+## Sessione #67 — 2026-08-10 (fix pg-shim: .gte mancante crashava wi_end(waiting) su backend DATABASE_URL)
+
+**Wake cold-start** (D-093, msg `5cc2fba8` da nottolini, blocker). **WI** `45bd1d42-0f1c-434a-bfe2-f47a5e2639db`. Modello: sonnet.
+
+**Bug:** `wi_end(status="waiting")` crashava con `db.from(...).select(...).eq(...).gte is not a function`, riprodotto 2 volte da nottolini. Effetto: WI finiva comunque `paused` ma la cascata GTD (waiting_on/resume_hint) non partiva — stato WI/GTD incoerente, richiesto workaround manuale (`gtd_update`).
+
+**Root cause:** `PgQuery` (`src/pg-shim.ts`, backend `DATABASE_URL`/D-084 native-identity) implementava solo `eq/is/in/not/contains/or` — mai `.gte()`. Due call-site lo usano: `resolveAutoWaitingOn` (`wi.ts:194`, guard D-118 "a" — gira SEMPRE a `wi_end(waiting)`, anche con `LOOMX_RW_GUARDS_ENABLED=0`, perché serve comunque per il dry-run log) e `wi_query --since` (`wi.ts:720`). Su backend `supabase-js`/service_role il bug era invisibile perché lì `.gte()` esiste nativamente sul builder reale — solo gli agenti migrati a `DATABASE_URL` lo vedevano. Nessuna regressione nei 120 test esistenti perché le suite D-118 mockano un client diverso dal pg-shim reale.
+
+**Fix:** aggiunti `gte/lte/gt/lt` a `PgQuery` (src/pg-shim.ts) + test dedicato `tests/pgshim-comparators.test.ts`. Build (`tsc`) pulita, 120/120 test verdi. Commit `cbbb8ac`.
+
+**Comunicazione:** `board_send(done)` a loomy (msg `f821054c`) + reply a nottolini (msg `062efaf1`), `board_ack` sul blocker originale. GTD follow-on `ba843f39` (build+restart coordinato con it-manager sulle istanze su backend DATABASE_URL, stesso pattern del fix e0c5b0d di stamattina) — armato post-close.
+
+---
+
 ## Sessione #66 — 2026-08-10 (D-118/eval: contratto cambio-modello — fix bug 69f39997 + guard Haiku/cost-consent + requested_model su board_send/ping)
 
 **Autopilot dispatch** (GTD `41853607`, high, [D-118/eval]). **WI** `9ee67c79-4a7e-47a9-bc32-73e25b4891e2`. Modello: sonnet.
