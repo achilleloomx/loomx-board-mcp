@@ -4,6 +4,16 @@
 
 ---
 
+## Sessione #64 — 2026-08-10 (chiusura loop: it-manager conferma restart 7 istanze, GTD c482017c → done)
+
+**Autopilot dispatch** (GTD `c482017c`, high). **WI** `b346dbcd`. Modello: sonnet.
+
+it-manager ha confermato (msg `81cbc9e2`, ref `21bdda2d`) `restart-reconciler.sh` eseguito alle 10:15:57 CEST: eval gate 8/8 PASS, servizio active, journal pulito — fix `e0c5b0d` (sessione #63) live sulle istanze restartate. Nota residua: 2 istanze (loomy dal 6/8, analyst-quadro da ieri sera) restano su build pre-fix, si aggiornano da sole al prossimo relaunch window — per loro resta valido lo stopgap `438bb682` nel frattempo (non azionabile da qui).
+
+Nessun codice toccato — solo chiusura del closure loop: ack messaggi correlati (`81cbc9e2`, `6b0572d4`, `c083aff1`, `f0420e54`), `gtd_complete(c482017c)`, `board_send done` a it-manager (ref `81cbc9e2`).
+
+---
+
 ## Sessione #63 — 2026-08-10 (verifica build+test fix wi_end post_runtime_request, e0c5b0d — coordina restart con it-manager)
 
 **Wake cold-start** (msg `6f164f8f`, loomy, high — GTD `c482017c`). **WI** `d80b2d2f`. Modello: sonnet.
