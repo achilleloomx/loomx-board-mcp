@@ -106,7 +106,7 @@ loomx-board-mcp/
 
 | Tool | Descrizione | Operazione DB |
 |---|---|---|
-| `board_send` | Invia messaggio con summary e tags opzionali. **`wake_priority?`** (D-093, v0.13.0): normal\|high\|urgent — marca il messaggio per cold-wake. **`auto_gtd?`** (GTD 994b3bbc): crea anche un GTD per il destinatario (owner=recipient, source='board', source_ref=id messaggio), deduplicato su re-invii — default false, non cambia il comportamento esistente. **Hint cold-recipient (D-118 c2, v0.15.0):** se `type∈{task,question,blocker}` e `wake_priority` omesso e il destinatario risulta cold (`loomx_agent_runtime.heartbeat_at` stale/assente, soglia 10'), la risposta include `hint` — mai un errore, il send va comunque a buon fine. Gated da `LOOMX_RW_GUARDS_ENABLED` (default off: log-only su stderr, nessun campo in risposta finché il flag non è `1` — eval-first, vedi HISTORY) | INSERT (from_agent = self) [+ INSERT loomx_items se auto_gtd] |
+| `board_send` | Invia messaggio con summary e tags opzionali. **`wake_priority?`** (D-093, v0.13.0): normal\|high\|urgent — marca il messaggio per cold-wake. **`requested_model?`** (D-098/D-101, v0.16.0): modello per il lancio del destinatario sul cold-wake (es. `sonnet`, `opus`) — significativo solo insieme a `wake_priority`, scritto su `board_messages.requested_model`, free-text pass-through (nessun default/normalizzazione lato tool). **`auto_gtd?`** (GTD 994b3bbc): crea anche un GTD per il destinatario (owner=recipient, source='board', source_ref=id messaggio), deduplicato su re-invii — default false, non cambia il comportamento esistente. **Hint cold-recipient (D-118 c2, v0.15.0):** se `type∈{task,question,blocker}` e `wake_priority` omesso e il destinatario risulta cold (`loomx_agent_runtime.heartbeat_at` stale/assente, soglia 10'), la risposta include `hint` — mai un errore, il send va comunque a buon fine. Gated da `LOOMX_RW_GUARDS_ENABLED` (default off: log-only su stderr, nessun campo in risposta finché il flag non è `1` — eval-first, vedi HISTORY) | INSERT (from_agent = self) [+ INSERT loomx_items se auto_gtd] |
 | `board_broadcast` | Invia messaggio a tutti gli agenti attivi. **`auto_gtd?`** (GTD 994b3bbc): come sopra ma un GTD per ciascun destinatario (N destinatari → N GTD, uno per owner — non più affidato al triage manuale) | RPC board_broadcast [+ INSERT loomx_items per destinatario se auto_gtd] |
 | `board_inbox` | Leggi messaggi in arrivo — **`preview_only=true` default** (no body). **`wake_only?`** (D-093): filtra solo i messaggi con `wake_priority` settato | SELECT (to_agent = self) |
 | `board_get` | Body completo di un singolo messaggio (detail on-demand) | SELECT by id |
@@ -115,7 +115,7 @@ loomx-board-mcp/
 | `board_overview` | Vista globale — **`include_body=false` default**, limit 20 | SELECT da view board_overview |
 | `board_thread` | Recupera thread di conversazione (messaggio originale + risposte) | SELECT (id/ref_id match) |
 | `board_archive` | Archivia messaggi done/cancelled piu' vecchi di N giorni | RPC board_archive_old |
-| `ping` | Alias ergonomico (D-093) su `board_send(type='info', wake_priority=priority)` — NON storage separato | INSERT board_messages (via board_send) |
+| `ping` | Alias ergonomico (D-093) su `board_send(type='info', wake_priority=priority)` — NON storage separato. **`requested_model?`** (D-098/D-101, v0.16.0): come su `board_send`, modello per il lancio sul cold-wake | INSERT board_messages (via board_send) |
 
 ### GTD Tools (loomx_items)
 
@@ -223,6 +223,8 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 > **Uso tipico broker (D-058):** in stall-triage, `runtime_status(agent_slug=<agente in stallo>)` prima di decidere `continue/clear/kill` al posto suo via `runtime_request(agent_slug=...)`.
 >
 > **Regola ownership:** ogni agente scrive/legge la propria riga senza restrizioni; lettura di righe altrui o della flotta intera è riservata a loomy/loomy-assistant. La riga deve esistere (agente già heartbeated), altrimenti ritorna errore esplicito.
+>
+> **Contratto cambio-modello (D-101, v0.16.0):** `request=model` è legittimo in QUALSIASI mode (interactive/autopilot/chat/dream), non solo autopilot — bug storico 69f39997 era un CHECK constraint DB mancante `'model'` nell'enum, già fixato dal DBA il 2026-07-21, verificato live. Guard aggiuntivi gated `LOOMX_MODEL_GUARDS_ENABLED` (default off, eval-first come D-118): Haiku **mai** ammesso quando la riga target ha `mode=autopilot` (§0quater) → rifiutato esplicitamente a flag ON, solo log dry-run a flag OFF; `cost_notice` (mai bloccante) su upgrade di tier verso un modello più costoso. `requested_model` resta free-text pass-through (nessun registro alias canonico — scelta DBA, vedi D-101) — niente normalizzazione, niente validazione di esistenza.
 
 **Enum `request`:**
 | Valore | Significato |

@@ -8,7 +8,7 @@ import {
   DB_ITEM_TYPES,
   DB_DOC_ITEM_LINK_TYPES,
 } from "./docTypes.js";
-import { rwGuardsEnabled } from "./flags.js";
+import { rwGuardsEnabled, modelGuardsEnabled } from "./flags.js";
 
 const TABLE = "board_messages";
 const OVERVIEW_VIEW = "board_overview";
@@ -48,6 +48,55 @@ export function buildColdRecipientHint(params: {
     `potrebbe restare invisibile finche' non lo controlla attivamente. Valuta wake_priority='normal' o ` +
     `ping(target_agent='${toAgent}', ...) (D-118 c2, hint-only — il send e' comunque andato a buon fine).`
   );
+}
+
+// D-118 (GTD 41853607): model-switch contract guards on runtime_request.
+// Pure — unit-testable without a DB, same pattern as buildColdRecipientHint.
+// Ordinal tiers are a heuristic only (board-mcp owns no canonical model-cost
+// registry — see DECISIONS D-118-model-switch-contract for why).
+const MODEL_TIER: Record<string, number> = { haiku: 0, sonnet: 1, fable: 1, opus: 2 };
+
+function modelTier(modelSlug: string | null | undefined): number | null {
+  if (!modelSlug) return null;
+  const lower = modelSlug.toLowerCase();
+  for (const [alias, tier] of Object.entries(MODEL_TIER)) {
+    if (lower.includes(alias)) return tier;
+  }
+  return null;
+}
+
+export function isHaikuModelSlug(modelSlug: string): boolean {
+  return /haiku/i.test(modelSlug);
+}
+
+// AGENT-STANDARD §0quater: "MAI Haiku in autopilot — verificato che non regge
+// la governance." Returns the rejection message, or undefined if the switch
+// is allowed (any mode other than autopilot, or a non-Haiku model).
+export function buildHaikuAutopilotBlock(params: {
+  requestedModel: string;
+  targetMode: string | null;
+}): string | undefined {
+  const { requestedModel, targetMode } = params;
+  if (!isHaikuModelSlug(requestedModel)) return undefined;
+  if (targetMode !== "autopilot") return undefined;
+  return (
+    `Haiku non e' ammesso in mode=autopilot (AGENT-STANDARD §0quater — non regge la governance). ` +
+    `Richiedi sonnet (default) o opus per task pesanti.`
+  );
+}
+
+// E2E-MODEL-08 cost-consent: never blocks, only flags — no silent cost
+// increase when a switch moves to a strictly more expensive tier.
+export function buildModelCostNotice(params: {
+  currentModel: string | null;
+  requestedModel: string;
+}): string | undefined {
+  const { currentModel, requestedModel } = params;
+  const currentTier = modelTier(currentModel);
+  const requestedTier = modelTier(requestedModel);
+  if (currentTier === null || requestedTier === null) return undefined;
+  if (requestedTier <= currentTier) return undefined;
+  return `cost-consent: switch ${currentModel} -> ${requestedModel} e' un upgrade di tier (D-118, nessun aumento di costo silenzioso).`;
 }
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -257,11 +306,14 @@ export function registerTools(
       wake_priority: WakePrioritySchema.optional().describe(
         "Cold-start wake marker (D-093/D-099): normal|high|urgent. ANY value (including normal) asks the reconciler to cold-wake a sleeping recipient — the priority only orders the wake queue (urgent>high>normal), it does not decide whether to wake. Omit (leave unset) for a regular message with no wake."
       ),
+      requested_model: z.string().optional().describe(
+        "D-098: model to launch the recipient with on this ping's cold-wake (e.g. 'sonnet', 'opus', 'fable'). Only meaningful together with wake_priority — ignored on a message with no wake. Omit = no preference (reconciler falls back to Sonnet; never Haiku in autopilot, §0quater)."
+      ),
       auto_gtd: z.boolean().optional().describe(
         "GTD 994b3bbc: also create a GTD item (owner=recipient, source='board', source_ref=this message's id) so the recipient sees it in gtd_inbox without relying on manual triage. Default false (unchanged behavior). Deduped against re-sends of the same message."
       ),
     },
-    async ({ to_agent, type, subject, body, summary, tags, ref_id, wake_priority, auto_gtd }) => {
+    async ({ to_agent, type, subject, body, summary, tags, ref_id, wake_priority, requested_model, auto_gtd }) => {
       const validationError = await validateRecipientSlug(to_agent);
       if (validationError) {
         return {
@@ -286,6 +338,7 @@ export function registerTools(
           ref_id: ref_id ?? null,
           status: "pending",
           ...(wake_priority !== undefined ? { wake_priority } : {}),
+          ...(requested_model !== undefined ? { requested_model } : {}),
         })
         .select("id, created_at")
         .maybeSingle();
@@ -2859,10 +2912,59 @@ export function registerTools(
         targetSlug = agent_slug;
       }
 
+      const db = getSupabaseClient();
+
+      // D-118 (GTD 41853607) model-switch contract guards — gated behind
+      // LOOMX_MODEL_GUARDS_ENABLED (eval-first, same discipline as the
+      // reply-wake guards). OFF by default: computed and logged, never
+      // blocking or added to the response, until the E2E-MODEL suite is
+      // green. Needs the pre-write row (mode + model_current) to decide.
+      let costNotice: string | undefined;
+      if (request === "model" && requested_model) {
+        const { data: preRow, error: preErr } = await db
+          .from(RUNTIME_TABLE)
+          .select("mode, model_current")
+          .eq("owner_slug", targetSlug)
+          .maybeSingle();
+        if (preErr) {
+          return {
+            content: [{ type: "text", text: `Error reading runtime row for '${targetSlug}': ${preErr.message}` }],
+            isError: true,
+          };
+        }
+        if (!preRow) {
+          return {
+            content: [{
+              type: "text",
+              text: `No runtime row found for agent '${targetSlug}'. The agent must register a heartbeat before runtime_request can be used. Check loomx_agent_runtime to verify the row exists.`,
+            }],
+            isError: true,
+          };
+        }
+        const preMode = (preRow as Record<string, unknown>).mode as string | null;
+        const preModelCurrent = (preRow as Record<string, unknown>).model_current as string | null;
+
+        const haikuBlock = buildHaikuAutopilotBlock({ requestedModel: requested_model, targetMode: preMode });
+        if (haikuBlock) {
+          if (modelGuardsEnabled()) {
+            return { content: [{ type: "text", text: `Error: ${haikuBlock}` }], isError: true };
+          }
+          process.stderr.write(`[runtime_request][dry-run] would-reject: ${haikuBlock}\n`);
+        }
+
+        const notice = buildModelCostNotice({ currentModel: preModelCurrent, requestedModel: requested_model });
+        if (notice) {
+          if (modelGuardsEnabled()) {
+            costNotice = notice;
+          } else {
+            process.stderr.write(`[runtime_request][dry-run] would-notice: ${notice}\n`);
+          }
+        }
+      }
+
       const payload: Record<string, unknown> = { request };
       payload.requested_model = request === "model" ? requested_model! : null;
 
-      const db = getSupabaseClient();
       const { data, error } = await db
         .from(RUNTIME_TABLE)
         .update(payload)
@@ -2871,8 +2973,15 @@ export function registerTools(
         .maybeSingle();
 
       if (error) {
+        // E2E-MODEL-02/10: never surface a raw DB constraint violation —
+        // wrap it so the caller gets an actionable message even if the
+        // allowed request/requested_model set drifts from this tool's enum.
+        const isConstraintViolation = /constraint/i.test(error.message);
+        const text = isConstraintViolation
+          ? `Error: valore non ammesso per la scrittura su loomx_agent_runtime (constraint violation) — ${error.message}`
+          : `Error writing runtime request: ${error.message}`;
         return {
-          content: [{ type: "text", text: `Error writing runtime request: ${error.message}` }],
+          content: [{ type: "text", text }],
           isError: true,
         };
       }
@@ -2891,6 +3000,7 @@ export function registerTools(
           type: "text",
           text: JSON.stringify({
             ok: true,
+            ...(costNotice ? { cost_notice: costNotice } : {}),
             agent: targetSlug,
             request: (data as Record<string, unknown>).request,
             requested_model: (data as Record<string, unknown>).requested_model ?? null,
@@ -2975,8 +3085,11 @@ export function registerTools(
       target_agent: z.string().min(1).describe("Recipient agent slug"),
       message: z.string().min(1).describe("Ping message"),
       priority: WakePrioritySchema.optional().describe("Wake priority (default: normal). Any priority cold-wakes the target via the reconciler — priority only orders the wake queue (urgent>high>normal), it doesn't gate whether the wake happens (D-099)."),
+      requested_model: z.string().optional().describe(
+        "D-098: model to launch the target with on this cold-wake (e.g. 'sonnet', 'opus', 'fable'). Omit = no preference (reconciler falls back to Sonnet; never Haiku in autopilot, §0quater)."
+      ),
     },
-    async ({ target_agent, message, priority }) => {
+    async ({ target_agent, message, priority, requested_model }) => {
       const validationError = await validateRecipientSlug(target_agent);
       if (validationError) {
         return { content: [{ type: "text", text: `Error: ${validationError}` }], isError: true };
@@ -2997,6 +3110,7 @@ export function registerTools(
           ref_id: null,
           status: "pending",
           wake_priority: priority ?? "normal",
+          ...(requested_model !== undefined ? { requested_model } : {}),
         })
         .select("id, created_at")
         .maybeSingle();

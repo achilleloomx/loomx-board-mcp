@@ -4,6 +4,37 @@
 
 ---
 
+## Sessione #66 — 2026-08-10 (D-118/eval: contratto cambio-modello — fix bug 69f39997 + guard Haiku/cost-consent + requested_model su board_send/ping)
+
+**Autopilot dispatch** (GTD `41853607`, high, [D-118/eval]). **WI** `9ee67c79-4a7e-47a9-bc32-73e25b4891e2`. Modello: sonnet.
+
+Mandato Achille: i casi in cui un agente chiede di cambiare modello devono essere testati con eval/dry-run come il pacchetto D-118 (sessione #65). Punto di partenza: bug aperto da 5 settimane, GTD `69f39997` (`runtime_request(model→opus)` viola check constraint fuori da `mode=autopilot`).
+
+**Root cause chiarita — bug GIA' RISOLTO a livello DB:** il constraint `loomx_agent_runtime_request_check` non ha mai avuto un vincolo su `mode` — bloccava il letterale `'model'` scritto da `tools.ts` in QUALSIASI mode, perché l'enum CHECK aveva solo `'model_change'`. Fix già applicato dal DBA il 2026-07-21 (`20260721100000_loomx_agent_runtime_request_add_model.sql`, aggiunge `'model'`). Verificato **live** oggi via query diretta `pg_get_constraintdef` (LOOMX_DB_URL, read-only) + test reale `runtime_request(request='model', requested_model='sonnet')` sulla propria riga in `mode=interactive` → successo, poi ripristinato a `none`. Nessuna migration ulteriore necessaria.
+
+**Contratto deciso** (Achille, opzione i): cambio modello legittimo in ogni mode, non solo autopilot. Documentato in **D-101** (DECISIONS board-mcp, doc_item_upsert).
+
+**Implementato** (`src/tools.ts`, nuovo flag in `src/flags.ts`):
+- **Mai più violazione di constraint grezza** (E2E-MODEL-02): `runtime_request` intercetta errori DB con `constraint` nel messaggio e li riscrive comprensibili — sempre attivo, non gated.
+- **Haiku mai in autopilot** (E2E-MODEL-06, §0quater): `buildHaikuAutopilotBlock` rifiuta `request=model` con modello Haiku quando la riga target ha `mode=autopilot`.
+- **Cost-consent notice** (E2E-MODEL-08): `buildModelCostNotice`, tier ordinale euristico (`haiku<sonnet≈fable<opus`), notice mai bloccante su upgrade.
+- Entrambi gated `LOOMX_MODEL_GUARDS_ENABLED` (default off, stessa disciplina eval-first di `LOOMX_RW_GUARDS_ENABLED`): a flag spento solo log `[runtime_request][dry-run] would-reject/would-notice`.
+- **`requested_model` esposto su `board_send`/`ping`** (E2E-MODEL-05): la colonna `board_messages.requested_model` esisteva da tre settimane (migration DBA `20260720100000`, msg `fde28b07` pending dal 2026-07-21) ma nessun tool la scriveva — colmato, ungated (additivo, NULL se omesso).
+
+**Fuori scope, documentato in D-101 (nessun registro canonico board-mcp):**
+- E2E-MODEL-03 (alias↔ID) ed E2E-MODEL-10 (modello inesistente/deprecato) — `requested_model` resta free-text pass-through per scelta esplicita DBA (commento migration `20260720100000`). Serve una decisione fleet-wide su chi possiede il roster (board-mcp o reconciler/dev-hq) prima di poter validare — proposta a loomy, non implementata unilateralmente.
+- Registrazione run via `eval_run_add` per `E2E-MODEL-*`: bloccata, `loomx_evals` non ha righe seminate per questi codici (stesso gap noto E2E-RW-*, sessione #65). Richiesta seeding a DBA/it-manager.
+
+**Test:** nuovo `tests/model-switch-guards.test.ts` (+13, pure/unit su `isHaikuModelSlug`/`buildHaikuAutopilotBlock`/`buildModelCostNotice`, nessun mock DB). Suite completa 118/118 verde, `npm run build` (tsc) pulito.
+
+**Versione:** 0.15.0 → 0.16.0. `CLAUDE.md` aggiornato (righe `board_send`/`ping`/Runtime Tools).
+
+**Deploy:** codice committato, non ancora restartato in produzione — `LOOMX_MODEL_GUARDS_ENABLED` resta OFF al deploy (stesso mandato eval-first di D-118), nessun cambio di comportamento per la flotta finché non si flippa.
+
+**Prossima sessione:** coordinare con it-manager la parte E2E-MODEL-01/04/07/09 (di sua competenza, come da GTD); a catalogo `loomx_evals` E2E-MODEL-* seminato, registrare i run reali ed eventualmente proporre a loomy la decisione su ownership del roster modelli (alias/validazione).
+
+---
+
 ## Sessione #65 — 2026-08-10 (D-118: guard inbox-pending + auto waiting_on + hint board_send, eval-first)
 
 **Autopilot dispatch** (GTD `1aa130da`, high, [D-118]). **WI** `0be43ea4-5328-4e81-bda3-0a69120b071b`. Modello: sonnet.
