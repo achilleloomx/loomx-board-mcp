@@ -2,7 +2,7 @@
 // Implements only the subset of methods used by src/tools.ts so the backend
 // can be swapped via DATABASE_URL without rewriting tool code.
 //
-// Supported: from().select/insert/update/upsert/eq/is/in/not/contains/or/order/limit/single/maybeSingle,
+// Supported: from().select/insert/update/upsert/eq/gte/lte/gt/lt/is/in/not/contains/or/order/limit/single/maybeSingle,
 // and rpc(). Awaiting any chain returns { data, error } like supabase-js.
 
 import pg from "pg";
@@ -18,7 +18,7 @@ type DbResult<T> = { data: T | null; error: { message: string } | null };
 export type PgExecutor = (sql: string, params: unknown[]) => Promise<{ rows: Row[] }>;
 
 interface Filter {
-  type: "eq" | "is" | "in" | "not" | "contains" | "or";
+  type: "eq" | "is" | "in" | "not" | "contains" | "or" | "gte" | "lte" | "gt" | "lt";
   col?: string;
   op?: string;
   val?: unknown;
@@ -108,6 +108,26 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
     return this;
   }
 
+  gte(col: string, val: unknown): this {
+    this._filters.push({ type: "gte", col, val });
+    return this;
+  }
+
+  lte(col: string, val: unknown): this {
+    this._filters.push({ type: "lte", col, val });
+    return this;
+  }
+
+  gt(col: string, val: unknown): this {
+    this._filters.push({ type: "gt", col, val });
+    return this;
+  }
+
+  lt(col: string, val: unknown): this {
+    this._filters.push({ type: "lt", col, val });
+    return this;
+  }
+
   is(col: string, val: unknown): this {
     this._filters.push({ type: "is", col, val });
     return this;
@@ -177,6 +197,26 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
         case "eq": {
           params.push(f.val);
           clauses.push(`${ident(f.col!)} = $${params.length}`);
+          break;
+        }
+        case "gte": {
+          params.push(f.val);
+          clauses.push(`${ident(f.col!)} >= $${params.length}`);
+          break;
+        }
+        case "lte": {
+          params.push(f.val);
+          clauses.push(`${ident(f.col!)} <= $${params.length}`);
+          break;
+        }
+        case "gt": {
+          params.push(f.val);
+          clauses.push(`${ident(f.col!)} > $${params.length}`);
+          break;
+        }
+        case "lt": {
+          params.push(f.val);
+          clauses.push(`${ident(f.col!)} < $${params.length}`);
           break;
         }
         case "is": {
