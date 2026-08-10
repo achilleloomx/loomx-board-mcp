@@ -4,6 +4,37 @@
 
 ---
 
+## Sessione #65 — 2026-08-10 (D-118: guard inbox-pending + auto waiting_on + hint board_send, eval-first)
+
+**Autopilot dispatch** (GTD `1aa130da`, high, [D-118]). **WI** `0be43ea4-5328-4e81-bda3-0a69120b071b`. Modello: sonnet.
+
+Contesto: proposta strutturale it-manager (msg `49a4177c`) post-incidente deadlock it-manager↔board-mcp (2h22' di stallo, 2026-08-10 mattina — due messaggi incrociati, entrambi `ref_id=null`, nessuno dei due lati con wait dichiarato). GO Achille su pacchetto (a)+(a+)+(c2), un ciclo build+restart, **eval-first** ("niente flip senza suite verde").
+
+**Implementato** (`src/wi.ts`, `src/tools.ts`, nuovo `src/flags.ts`):
+- **(a+) guard inbox-pending** in `wi_end`: warning (mai bloccante) se il proprietario del WI ha `task`/`question`/`blocker` `pending` in inbox alla chiusura — l'unica rete che avrebbe intercettato esattamente il caso di stamattina.
+- **(a) auto-set `waiting_on`/`block_scope='reply-wake'`** in `wi_end(status='waiting')`: se c'è un outbound `question`/`task` senza reply nel thread dal `started_at` del WI e il GTD non ha già un `waiting_on` esplicito, il server lo setta da solo. Euristica multi-destinatario: il più recente; un pareggio esatto di timestamp → warning invece di un auto-set indovinato (mai clobbera un `waiting_on` già dichiarato).
+- **(c2) hint cold-recipient** in `board_send`: se `type∈{task,question,blocker}`, `wake_priority` omesso e il destinatario ha `loomx_agent_runtime.heartbeat_at` stale/assente (soglia 10', stesso cutoff di `fleet_status`), la risposta include `hint` — mai un errore.
+- Tutti e tre gated da `LOOMX_RW_GUARDS_ENABLED` (`src/flags.ts`, default OFF): a flag spento i tre guard **calcolano** comunque il risultato ma non toccano risposta/DB, solo log stderr `[wi_end|board_send][dry-run] would-warn/would-set/would-hint` — mandato eval-first, zero side-effect finché non si flippa.
+
+**Test** (`tests/wi.test.ts` +18, nuovo `tests/board-send-hint.test.ts` +6 — 111/111 verdi, `npx tsc --noEmit` pulito): coperti i casi E2E-RW della GTD —
+- RW-06: warning con pending presente / assente (no falsi positivi) / filtrato per tipo-status-destinatario
+- RW-07: messaggi incrociati senza `ref_id` → guard scatta comunque (classe di bug del deadlock)
+- RW-05: auto-set su outbound senza reply + regressione "reply già in thread → niente auto-set"
+- RW-04: regressione "non clobbera un `waiting_on` già dichiarato"
+- ambiguità: pareggio esatto timestamp → warning, non guess
+- RW-13: flag OFF → nessun side-effect su risposta/DB, log dry-run presenti
+- RW-11: WI già chiuso → `post_runtime_request` ancora postato (regressione fix `e0c5b0d`, invariata dai guard D-118)
+
+**Gap scoperto (non risolvibile da qui):** `eval_run_add` con `eval_code` prefisso `E2E-RW-*` (come richiesto nel body GTD) fallisce — `loomx_evals` non ha ancora righe per questi codici (probe verificato live, 2 tentativi). Non ho un tool per crearle (schema DBA-owned). Segnalato a loomy/it-manager via board_send — l'evidenza di verifica per D-118 resta quindi la suite unit sopra (111/111, deterministica, 0 token — stesso pattern del gate `skill-library-rollout.sh`), non un run registrato in DB.
+
+**Versione:** 0.14.0 → 0.15.0. `CLAUDE.md` aggiornato (righe `board_send`/`wi_end`, WI Tools).
+
+**Deploy:** build+restart coordinato con it-manager via `restart-reconciler.sh` (mai systemctl nudo) — flag `LOOMX_RW_GUARDS_ENABLED` resta OFF al deploy: il codice è live ma dormiente finché il gap eval sopra non è chiuso e Achille non dà GO al flip.
+
+**Prossima sessione:** a catalogo `loomx_evals` E2E-RW-* seminato (DBA/loomy), registrare i run reali via `eval_run_add` e, a suite verde, flippare `LOOMX_RW_GUARDS_ENABLED=1` (coordinato, non unilaterale).
+
+---
+
 ## Sessione #64 — 2026-08-10 (chiusura loop: it-manager conferma restart 7 istanze, GTD c482017c → done)
 
 **Autopilot dispatch** (GTD `c482017c`, high). **WI** `b346dbcd`. Modello: sonnet.

@@ -8,6 +8,7 @@ import {
   DB_ITEM_TYPES,
   DB_DOC_ITEM_LINK_TYPES,
 } from "./docTypes.js";
+import { rwGuardsEnabled } from "./flags.js";
 
 const TABLE = "board_messages";
 const OVERVIEW_VIEW = "board_overview";
@@ -20,6 +21,34 @@ const ROLE_CARDS_TABLE = "loomx_role_cards";
 const ORG_EDGES_TABLE = "loomx_org_edges";
 const SOW_RACI_TABLE = "loomx_sow_raci";
 const BOARD_AGENTS_TABLE = "board_agents";
+
+// D-118 (c2, it-manager msg 49a4177c): board_send cold-recipient hint.
+// Matches the "live" threshold humanTools.ts fleet_status already uses for
+// heartbeat freshness — same signal, same cutoff, no new convention.
+const COLD_HINT_THRESHOLD_MS = 10 * 60 * 1000;
+const ACTIONABLE_HINT_TYPES = new Set(["task", "question", "blocker"]);
+
+// Pure — extracted so it's unit-testable without a DB (D-118 c2). Never an
+// error path: returns undefined whenever no hint applies.
+export function buildColdRecipientHint(params: {
+  toAgent: string;
+  messageType: string;
+  wakePriorityOmitted: boolean;
+  heartbeatAt: string | null;
+  nowMs: number;
+}): string | undefined {
+  const { toAgent, messageType, wakePriorityOmitted, heartbeatAt, nowMs } = params;
+  if (!wakePriorityOmitted) return undefined;
+  if (!ACTIONABLE_HINT_TYPES.has(messageType)) return undefined;
+  const ageMs = heartbeatAt ? nowMs - new Date(heartbeatAt).getTime() : Infinity;
+  if (ageMs <= COLD_HINT_THRESHOLD_MS) return undefined;
+  const ageDesc = heartbeatAt ? `${Math.round(ageMs / 60000)}m senza heartbeat` : "nessun heartbeat registrato";
+  return (
+    `Destinatario '${toAgent}' sembra cold (${ageDesc}) e wake_priority non e' impostato — il messaggio ` +
+    `potrebbe restare invisibile finche' non lo controlla attivamente. Valuta wake_priority='normal' o ` +
+    `ping(target_agent='${toAgent}', ...) (D-118 c2, hint-only — il send e' comunque andato a buon fine).`
+  );
+}
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -281,12 +310,45 @@ export function registerTools(
         });
       }
 
+      // D-118 (c2): hint (never an error) when an actionable message is sent
+      // to a recipient whose heartbeat looks stale and no wake_priority was
+      // set — the sender can't otherwise tell the message might sit unseen.
+      let coldHint: string | undefined;
+      if (wake_priority === undefined && ACTIONABLE_HINT_TYPES.has(type)) {
+        const { data: rtRow } = await db
+          .from(RUNTIME_TABLE)
+          .select("heartbeat_at")
+          .eq("owner_slug", to_agent)
+          .maybeSingle();
+        const heartbeatAt = (rtRow as { heartbeat_at?: string | null } | null)?.heartbeat_at ?? null;
+        const msg = buildColdRecipientHint({
+          toAgent: to_agent,
+          messageType: type,
+          wakePriorityOmitted: true,
+          heartbeatAt,
+          nowMs: Date.now(),
+        });
+        if (msg) {
+          if (rwGuardsEnabled()) {
+            coldHint = msg;
+          } else {
+            process.stderr.write(`[board_send][dry-run] would-hint: ${msg}\n`);
+          }
+        }
+      }
+
       return {
         content: [
           {
             type: "text",
             text: JSON.stringify(
-              { ok: true, id: data.id, created_at: data.created_at, ...(gtdError ? { gtd_creation_error: gtdError } : {}) },
+              {
+                ok: true,
+                id: data.id,
+                created_at: data.created_at,
+                ...(gtdError ? { gtd_creation_error: gtdError } : {}),
+                ...(coldHint ? { hint: coldHint } : {}),
+              },
               null,
               2
             ),
@@ -2542,7 +2604,10 @@ export function registerTools(
     };
   };
 
-  const wiCtx = { selfSlug, isLoomy };
+  // D-118: slugToCode/codeToSlug let wi.ts's inbox-pending guard (a+) and
+  // auto-set waiting_on heuristic (a) query board_messages (keyed by agent
+  // code) without duplicating the registry lookup.
+  const wiCtx = { selfSlug, isLoomy, slugToCode, codeToSlug };
 
   // --- wi_start ---
   server.tool(

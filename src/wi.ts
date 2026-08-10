@@ -8,12 +8,21 @@ import type { SupabaseClient } from "@supabase/supabase-js";
 import type { WiStatus, WiEndStatus, WiTemplateLayer } from "./types.js";
 import { checkTemplateName } from "./wiTemplates.js";
 import { runDocRw, type DocRwDb } from "./docDb.js";
+import { rwGuardsEnabled } from "./flags.js";
 
 const WI_TABLE = "loomx_work_items";
 const GTD_TABLE = "loomx_items";
 const DOC_ITEM_WI_LINKS_TABLE = "doc_item_wi_links";
 const DOC_ITEMS_TABLE = "doc_items";
 const AGENT_RUNTIME_TABLE = "loomx_agent_runtime";
+const BOARD_MESSAGES_TABLE = "board_messages";
+
+// D-118 (a+): message types that count as "actionable" for the inbox-pending
+// guard and (a) the auto-set waiting_on heuristic.
+const ACTIONABLE_INBOX_TYPES = new Set(["task", "question", "blocker"]);
+// D-118 (a): only question/task can be "the blocker" the WI is waiting on —
+// narrower than the inbox guard (a blocker report isn't something *we* sent).
+const OUTBOUND_WAIT_TYPES = new Set(["question", "task"]);
 
 // Phase 1 D-074 (REQ-033): WIs with these template names are always ephemeral
 // and skip the durable gate. on-the-fly WIs (template_name=null) are also ephemeral.
@@ -89,6 +98,135 @@ async function checkDurableGate(
   });
 }
 
+// --- D-118 reply-wake structural guards -----------------------------------
+// Proposal it-manager msg 49a4177c, GO Achille 2026-08-10 (GTD 1aa130da).
+// Both guards are gated behind rwGuardsEnabled() (src/flags.ts): while OFF
+// (default) they compute their result and log it to stderr ("would-warn" /
+// "would-set") instead of touching the response or the DB — eval-first
+// rollout, "niente flip senza suite verde".
+
+interface BoardMsgRow {
+  id: string;
+  from_agent: string;
+  to_agent: string;
+  type: string;
+  subject?: string;
+  ref_id?: string | null;
+  status?: string;
+  created_at: string;
+}
+
+// (a+) At wi_end, warn (never block) if the WI owner has actionable
+// (task/question/blocker) pending messages sitting in their board inbox —
+// the class of bug behind the 2026-08-10 it-manager/board-mcp deadlock: two
+// crossed messages, neither side declared a wait, nobody woke up. This is
+// the one guard that would have caught exactly that case: at close time the
+// agent is still alive and gets to decide with the information in front of it.
+async function checkInboxPendingGuard(
+  db: SupabaseClient,
+  ctx: WiContext,
+  ownerSlug: string,
+  now: string
+): Promise<string | undefined> {
+  if (!ctx.slugToCode || !ctx.codeToSlug) return undefined;
+  const ownerCode = ctx.slugToCode.get(ownerSlug);
+  if (!ownerCode) return undefined;
+
+  const { data } = await db
+    .from(BOARD_MESSAGES_TABLE)
+    .select("id, from_agent, to_agent, type, subject, status, created_at")
+    .eq("to_agent", ownerCode)
+    .eq("status", "pending");
+
+  const rows = (Array.isArray(data) ? data : []) as BoardMsgRow[];
+  const actionable = rows
+    .filter((m) => ACTIONABLE_INBOX_TYPES.has(m.type))
+    .sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0));
+
+  if (actionable.length === 0) return undefined;
+
+  const oldest = actionable[0];
+  const fromSlug = ctx.codeToSlug.get(oldest.from_agent) ?? oldest.from_agent;
+  const ageMin = Math.max(0, Math.round((Date.parse(now) - Date.parse(oldest.created_at)) / 60000));
+  const plural = actionable.length > 1 ? `${actionable.length} pending actionable messages` : "1 pending actionable message";
+  const msg =
+    `${plural} in inbox — oldest: "${oldest.subject ?? "(no subject)"}" (${oldest.type}) from ${fromSlug}, ${ageMin}m ago. ` +
+    `Process it (board_get/board_ack) or declare waiting before closing (D-118 a+).`;
+
+  if (!rwGuardsEnabled()) {
+    process.stderr.write(`[wi_end][dry-run] would-warn (inbox-pending, D-118): ${msg}\n`);
+    return undefined;
+  }
+  return msg;
+}
+
+export interface AutoWaitingOnResult {
+  waiting_on?: string;
+  block_scope?: string;
+  warning?: string;
+}
+
+// (a) At wi_end(status=waiting), if the WI owner has an outbound question/task
+// still without a reply in-thread since the WI started, auto-set
+// waiting_on=<recipient> + block_scope='reply-wake' on the linked GTD instead
+// of relying on the agent to remember to declare it. Heuristic for multiple
+// candidates: pick the most-recent unanswered outbound; a genuine tie (same
+// created_at) is reported as a warning instead of an auto-set (ambiguous —
+// D-118 explicitly prefers a warning over a wrong guess). Never overrides an
+// already-declared waiting_on (explicit beats inferred).
+export async function resolveAutoWaitingOn(
+  db: SupabaseClient,
+  ctx: WiContext,
+  ownerSlug: string,
+  wiStartedAt: string | undefined,
+  currentWaitingOn: unknown
+): Promise<AutoWaitingOnResult> {
+  if (currentWaitingOn) return {};
+  if (!ctx.slugToCode || !ctx.codeToSlug) return {};
+  if (!wiStartedAt) return {};
+  const ownerCode = ctx.slugToCode.get(ownerSlug);
+  if (!ownerCode) return {};
+
+  const { data: outboundData } = await db
+    .from(BOARD_MESSAGES_TABLE)
+    .select("id, to_agent, type, created_at")
+    .eq("from_agent", ownerCode)
+    .gte("created_at", wiStartedAt);
+
+  const outbound = (Array.isArray(outboundData) ? outboundData : []) as BoardMsgRow[];
+  const actionable = outbound.filter((m) => OUTBOUND_WAIT_TYPES.has(m.type));
+  if (actionable.length === 0) return {};
+
+  const ids = actionable.map((m) => m.id);
+  const { data: repliesData } = await db
+    .from(BOARD_MESSAGES_TABLE)
+    .select("ref_id")
+    .in("ref_id", ids);
+  const repliedIds = new Set(
+    (Array.isArray(repliesData) ? repliesData : [])
+      .map((r) => (r as { ref_id?: string | null }).ref_id)
+      .filter((v): v is string => typeof v === "string")
+  );
+
+  const unanswered = actionable.filter((m) => !repliedIds.has(m.id));
+  if (unanswered.length === 0) return {};
+
+  unanswered.sort((a, b) => (a.created_at > b.created_at ? -1 : a.created_at < b.created_at ? 1 : 0));
+  const top = unanswered[0];
+  const tiedForTop = unanswered.filter((m) => m.created_at === top.created_at);
+
+  if (tiedForTop.length > 1) {
+    return {
+      warning:
+        `${tiedForTop.length} outbound question/task without reply tie at the same timestamp (${top.created_at}) — ` +
+        `ambiguous which one is the blocker. Declare waiting_on manually via gtd_update (D-118 a).`,
+    };
+  }
+
+  const targetSlug = ctx.codeToSlug.get(top.to_agent) ?? top.to_agent;
+  return { waiting_on: targetSlug, block_scope: "reply-wake" };
+}
+
 export type WiResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string; runtime_request_posted?: boolean };
@@ -96,6 +234,12 @@ export type WiResult<T> =
 interface WiContext {
   selfSlug: string;
   isLoomy: boolean;
+  // D-118: agent code<->slug maps, needed to query board_messages (keyed by
+  // agent_code, not slug) for the (a+) inbox-pending guard and (a) auto-set
+  // waiting_on heuristic. Optional — callers that omit them (existing tests,
+  // any future non-board-aware caller) simply skip both features (no-op).
+  slugToCode?: Map<string, string>;
+  codeToSlug?: Map<string, string>;
 }
 
 // --- helpers -------------------------------------------------------------
@@ -275,6 +419,10 @@ export interface WiEndData {
   arm_warnings?: string[];           // soft-warns from arm_gtd_ids
   platform_contribution_pending?: string; // content for pull enabler (caller must send)
   runtime_request_warning?: string;  // post_runtime_request write failed (see writeRuntimeRequest)
+  // D-118 reply-wake structural guards (see resolveAutoWaitingOn / checkInboxPendingGuard):
+  inbox_pending_warning?: string;              // (a+) actionable messages left unprocessed in inbox
+  waiting_on_auto_set?: { waiting_on: string; block_scope: string }; // (a) auto-detected blocker
+  waiting_on_warning?: string;                 // (a) ambiguous — caller must declare manually
 }
 
 // Bug fix (GTD ba022585/c29d6143, dev-hq 2026-08-09, board msg f5fcd912): the
@@ -306,7 +454,7 @@ export async function wiEnd(
 ): Promise<WiResult<WiEndData>> {
   const { data: wi, error: findErr } = await db
     .from(WI_TABLE)
-    .select("id, agent_slug, gtd_item_id, status, side_effects_log, template_name, template_layer")
+    .select("id, agent_slug, gtd_item_id, status, side_effects_log, template_name, template_layer, started_at")
     .eq("id", args.wi_id)
     .maybeSingle();
 
@@ -322,6 +470,7 @@ export async function wiEnd(
     side_effects_log: unknown[] | null;
     template_name: string | null;
     template_layer: string | null;
+    started_at?: string;
   };
 
   if (row.agent_slug !== ctx.selfSlug && !ctx.isLoomy) {
@@ -415,6 +564,38 @@ export async function wiEnd(
   }
   if (args.resume_hint !== undefined) gtdUpdate.resume_hint = args.resume_hint;
 
+  // D-118 (a): auto-set waiting_on/block_scope on wi_end(status=waiting) when
+  // the session has an outbound question/task without reply and the agent
+  // hasn't already declared a wait. See resolveAutoWaitingOn for the heuristic.
+  let waitingOnAutoSet: { waiting_on: string; block_scope: string } | undefined;
+  let waitingOnWarning: string | undefined;
+  if (args.status === "waiting") {
+    const { data: gtdWaitRow } = await db
+      .from(GTD_TABLE)
+      .select("waiting_on")
+      .eq("id", row.gtd_item_id)
+      .maybeSingle();
+    const currentWaitingOn = (gtdWaitRow as { waiting_on?: unknown } | null)?.waiting_on;
+    const auto = await resolveAutoWaitingOn(db, ctx, row.agent_slug, row.started_at, currentWaitingOn);
+    if (auto.waiting_on && auto.block_scope) {
+      if (rwGuardsEnabled()) {
+        gtdUpdate.waiting_on = auto.waiting_on;
+        gtdUpdate.block_scope = auto.block_scope;
+        waitingOnAutoSet = { waiting_on: auto.waiting_on, block_scope: auto.block_scope };
+      } else {
+        process.stderr.write(
+          `[wi_end][dry-run] would-set (D-118 a): waiting_on=${auto.waiting_on} block_scope=${auto.block_scope} on GTD ${row.gtd_item_id}\n`
+        );
+      }
+    } else if (auto.warning) {
+      if (rwGuardsEnabled()) {
+        waitingOnWarning = auto.warning;
+      } else {
+        process.stderr.write(`[wi_end][dry-run] would-warn (D-118 a, ambiguous): ${auto.warning}\n`);
+      }
+    }
+  }
+
   const { error: gtdErr } = await db
     .from(GTD_TABLE)
     .update(gtdUpdate)
@@ -464,6 +645,9 @@ export async function wiEnd(
     if (!rr.ok) runtimeRequestWarning = `runtime_request not posted: ${rr.error}`;
   }
 
+  // D-118 (a+): guard-inbox-pending — informational only, never blocks close.
+  const inboxPendingWarning = await checkInboxPendingGuard(db, ctx, row.agent_slug, now);
+
   return {
     ok: true,
     data: {
@@ -475,6 +659,9 @@ export async function wiEnd(
       ...(armWarnings.length > 0 ? { arm_warnings: armWarnings } : {}),
       ...(args.platform_contribution ? { platform_contribution_pending: args.platform_contribution } : {}),
       ...(runtimeRequestWarning ? { runtime_request_warning: runtimeRequestWarning } : {}),
+      ...(inboxPendingWarning ? { inbox_pending_warning: inboxPendingWarning } : {}),
+      ...(waitingOnAutoSet ? { waiting_on_auto_set: waitingOnAutoSet } : {}),
+      ...(waitingOnWarning ? { waiting_on_warning: waitingOnWarning } : {}),
     },
   };
 }
