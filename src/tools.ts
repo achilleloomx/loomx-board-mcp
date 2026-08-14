@@ -1965,6 +1965,19 @@ export function registerTools(
       const agentSlug = agent as string;
       const mode = question ?? "card";
 
+      // D-118/F7: the reporting/escalation chain always terminates on a human
+      // (loomx_role_cards.human_ref, migration 20260814180000) — never on an
+      // agent. Shared by chain/escalation below.
+      const fetchHumanRef = async (slug: string): Promise<{ humanRef: string | null; error: string | null }> => {
+        const { data, error } = await db
+          .from(ROLE_CARDS_TABLE)
+          .select("human_ref")
+          .eq("agent_slug", slug)
+          .maybeSingle();
+        if (error) return { humanRef: null, error: error.message };
+        return { humanRef: (data as { human_ref: string } | null)?.human_ref ?? null, error: null };
+      };
+
       if (mode === "chain") {
         const chain: string[] = [agentSlug];
         const visited = new Set<string>([agentSlug]);
@@ -1991,6 +2004,11 @@ export function registerTools(
           visited.add(next);
           current = next;
         }
+        const { humanRef, error: humanErr } = await fetchHumanRef(current);
+        if (humanErr) {
+          return { content: [{ type: "text", text: `Error resolving terminal human_ref for "${current}": ${humanErr}` }], isError: true };
+        }
+        if (humanRef) chain.push(`human:${humanRef}`);
         return { content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, chain }, null, 2) }] };
       }
 
@@ -2009,8 +2027,12 @@ export function registerTools(
         if (domain) {
           const match = (edges ?? [])[0] as { to_agent: string; domain: string | null; note: string | null } | undefined;
           if (match) {
+            const { humanRef, error: humanErr } = await fetchHumanRef(match.to_agent);
+            if (humanErr) {
+              return { content: [{ type: "text", text: `Error resolving target human_ref for "${match.to_agent}": ${humanErr}` }], isError: true };
+            }
             return {
-              content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, domain, target: match.to_agent, source: "explicit", note: match.note }, null, 2) }],
+              content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, domain, target: match.to_agent, source: "explicit", note: match.note, target_human_ref: humanRef }, null, 2) }],
             };
           }
           // Fallback: immediate reports_to.
@@ -2029,12 +2051,33 @@ export function registerTools(
               isError: true,
             };
           }
+          const fallbackTarget = (reportsTo as { to_agent: string }).to_agent;
+          const { humanRef, error: humanErr } = await fetchHumanRef(fallbackTarget);
+          if (humanErr) {
+            return { content: [{ type: "text", text: `Error resolving target human_ref for "${fallbackTarget}": ${humanErr}` }], isError: true };
+          }
           return {
-            content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, domain, target: (reportsTo as { to_agent: string }).to_agent, source: "fallback_reports_to" }, null, 2) }],
+            content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, domain, target: fallbackTarget, source: "fallback_reports_to", target_human_ref: humanRef }, null, 2) }],
           };
         }
 
-        return { content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, escalation_edges: edges ?? [] }, null, 2) }] };
+        const edgeList = (edges ?? []) as { to_agent: string; domain: string | null; note: string | null }[];
+        const toAgents = [...new Set(edgeList.map((e) => e.to_agent))];
+        const humanRefBySlug = new Map<string, string | null>();
+        if (toAgents.length > 0) {
+          const { data: cardsData, error: cardsErr } = await db
+            .from(ROLE_CARDS_TABLE)
+            .select("agent_slug, human_ref")
+            .in("agent_slug", toAgents);
+          if (cardsErr) {
+            return { content: [{ type: "text", text: `Error resolving target human_ref: ${cardsErr.message}` }], isError: true };
+          }
+          for (const c of (cardsData ?? []) as { agent_slug: string; human_ref: string }[]) {
+            humanRefBySlug.set(c.agent_slug, c.human_ref);
+          }
+        }
+        const enrichedEdges = edgeList.map((e) => ({ ...e, target_human_ref: humanRefBySlug.get(e.to_agent) ?? null }));
+        return { content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, escalation_edges: enrichedEdges }, null, 2) }] };
       }
 
       if (mode === "help") {
@@ -2054,7 +2097,7 @@ export function registerTools(
       // mode === "card" (default)
       const { data: card, error: cardErr } = await db
         .from(ROLE_CARDS_TABLE)
-        .select("mission, does, does_not, scope_notes, updated_at")
+        .select("mission, does, does_not, scope_notes, human_ref, updated_at")
         .eq("agent_slug", agentSlug)
         .maybeSingle();
       if (cardErr) {
@@ -2073,13 +2116,14 @@ export function registerTools(
       const reportsTo = edgeRows.find((e) => e.edge_type === "reports_to")?.to_agent ?? null;
       const escalatesTo = edgeRows.filter((e) => e.edge_type === "escalates_to");
       const asksHelpFrom = edgeRows.filter((e) => e.edge_type === "asks_help_from");
+      const cardHumanRef = card ? (card as { human_ref: string }).human_ref : null;
 
       if (!card && edgeRows.length === 0) {
         return {
           content: [
             {
               type: "text",
-              text: JSON.stringify({ agent: agentSlug, role_card: null, reports_to: null, escalates_to: [], asks_help_from: [], note: "no org-registry data for this agent yet (F2 seed pending?)" }, null, 2),
+              text: JSON.stringify({ agent: agentSlug, role_card: null, reports_to: null, human_ref: null, escalates_to: [], asks_help_from: [], note: "no org-registry data for this agent yet (F2 seed pending?)" }, null, 2),
             },
           ],
         };
@@ -2094,6 +2138,7 @@ export function registerTools(
                 agent: agentSlug,
                 role_card: card ?? null,
                 reports_to: reportsTo,
+                human_ref: cardHumanRef,
                 escalates_to: escalatesTo,
                 asks_help_from: asksHelpFrom,
               },
