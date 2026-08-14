@@ -4,6 +4,29 @@
 
 ---
 
+## Sessione #69 — 2026-08-14 (org_lookup espone human_ref — card/chain/escalation, D-118/F7)
+
+**Wake cold-start** (D-093, msg `1543e0ae`, high, da loomy). **WI** `e09ae3c4`. Modello: sonnet.
+
+dba ha aggiunto `human_ref` a `loomx_role_cards` (migration `20260814180000`, 38 righe, default `'achille'`) ma `org_lookup` non lo esponeva — prerequisito F7 decision-enforcement (progetto `669fd07b`): il controllore legge l'organigramma per determinare a chi va una disputa, e il terminale della catena dev'essere sempre umano.
+
+**Cosa:** `src/tools.ts` (commit `4b02290`) — nessun rename, solo campi additivi:
+- `question="card"` (default): `human_ref` top-level accanto a `reports_to` (letto dal DB, nessun default hardcoded lato codice).
+- `question="chain"`: al termine della risalita `reports_to`, appende `human:<ref>` come nodo terminale (pattern coerente col `person:<uuid>` già usato in RACI).
+- `question="escalation"`: `target_human_ref` sia sul match esplicito/fallback `reports_to` sia su ciascuna riga della lista edges senza filtro dominio.
+
+**Verifica (D-132, evidenza osservabile):** build in `dist.staging/` (mai diretta su `dist/` live), smoke con processo separato via stdio MCP reale (`DATABASE_URL` D-084, stessa config della sessione live) — 3 chiamate:
+- `card` su `loomy` → `human_ref: "achille"` accanto a `reports_to: null`.
+- `chain` su `board-mcp` → `["board-mcp","it-manager","loomy","human:achille"]`.
+- `escalation` su `app` (domain `infra`, esplicito) e lista senza dominio → `target_human_ref: "achille"` in entrambi i rami.
+`tsc --noEmit` pulito, 120/120 test esistenti verdi, poi `mv` atomico staging→dist.
+
+**Decisioni prese:** nessuna nuova (fix additivo, nessun D-NNN necessario).
+**Blocchi / note:** nessuno.
+**Prossima sessione:** nessun follow-on pianificato — GTD `5eb74a53` chiuso, msg `1543e0ae` ackato, done inviato a loomy.
+
+---
+
 ## Sessione #68 — 2026-08-10 (coordina restart pg-shim gte fix, cbbb8ac — con it-manager)
 
 **Autopilot dispatch** (GTD `ba843f39`, high, follow-on sessione #67). **WI** `cd70a9b3`. Modello: sonnet.
