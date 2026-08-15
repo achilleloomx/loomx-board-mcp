@@ -4,6 +4,26 @@
 
 ---
 
+## Sessione #71 — 2026-08-15 ([Stream B] gtd_add: project_id opzionale, link a loomx_item_projects nella stessa chiamata, D-102)
+
+**Autopilot dispatch** (D-052). **WI** `df1dc777-3527-49c7-b59b-f0a13a22da52` su GTD `03c38a0b` (high). Modello: sonnet.
+
+Achille aveva misurato 35/35 GTD letti in sessione senza `project_id` — non un problema di disciplina degli agenti ma uno strumento mancante: `gtd_add` non aveva un parametro progetto, il legame passava solo da `item_project_link` (chiamata separata, mai fatta perché la RLS su `loomx_item_projects` bloccava le scritture fino a stamattina, migration `20260815120000`).
+
+**Cosa:** `src/tools.ts` — `gtd_add` accetta `project_id?: uuid` opzionale (mai obbligatorio in questa fase, mai derivato dal WI attivo per decisione esplicita di Achille). Se presente: valida l'esistenza in `loomx_projects` **prima** dell'INSERT su `loomx_items` (errore esplicito, niente GTD orfano su id inesistente), poi esegue lo stesso upsert idempotente di `item_project_link` su `loomx_item_projects` e ritorna `project_link: {item_id, project_id}` in risposta. Path senza `project_id` invariato.
+
+**Verifica (gate G1/G2/G3 richiesti da Achille — righe reali, non `ok:true`):** `tsc --noEmit` pulito, build, 103/103 test esistenti verdi. La connessione board-mcp della sessione corrente girava ancora sul build precedente (i processi MCP non ricaricano `dist/` a caldo) — smoke live spawnando una seconda istanza via client MCP separato (stesso `DATABASE_URL` nativo `board-mcp`, D-084):
+- **G1**: `gtd_add(project_id=<board-mcp>)` → riga `loomx_items` (id `01fe6b30…`) + riga `loomx_item_projects` in risposta, **e** ri-confermate entrambe con una `gtd_query(project_id=...)` separata (join reale sulla tabella, non l'echo dell'insert).
+- **G2**: `gtd_add(project_id=<uuid random>)` → errore esplicito; `gtd_query(source_ref=...)` conferma zero righe create.
+- **G3**: `gtd_add` senza `project_id` → risposta identica a prima (nessun `project_link`).
+Item di test trashati a fine verifica (owner board-mcp, entrambi i batch — quello sul processo stale e quello sul processo fresco).
+
+**Decisioni prese:** D-102 (`doc_item_upsert`, documento progetto board-mcp).
+**Blocchi / note:** **Redeploy pendente per le altre sessioni** — chi ha già una connessione board-mcp aperta (loomy, it-manager, dba, …) vede `project_id` solo dopo il prossimo restart della propria connessione MCP; `dist/` è aggiornato ma i processi in memoria no. L'obbligatorietà di `project_id` resta esplicitamente fuori scope (prossimo passo separato, soft-warn con grace period).
+**Prossima sessione:** nessuna pianificata da questo GTD — chiusura WI in corso. L'altro GTD assegnato (`c82a33d8`, D-135) resta `waiting`, non toccato.
+
+---
+
 ## Sessione #70 — 2026-08-15 (org_lookup human_ref: chiudere il gap su question=help, D-118/F7)
 
 **Wake cold-start** (D-093, msg `1b70e337`, normal, da loomy — status-check sulla sessione #69). **WI** `6cbf77f9`. Modello: sonnet.

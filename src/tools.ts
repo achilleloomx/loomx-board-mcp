@@ -1050,8 +1050,9 @@ export function registerTools(
       block_scope: z.string().optional().describe("Scope tag constraining autopilot dispatch (e.g. 'dns', 'grocery') — agent manager only evokes for matching scope"),
       resume_hint: z.string().optional().describe("Free-text hint for the agent on how/where to resume this item"),
       no_auto_arm: z.boolean().optional().describe("D-100: permanently park this item from autopilot re-arming — the reconciler/broker will not flip autopilot back to true while this is set, even after autopilot=false. Set false to unpark."),
+      project_id: z.string().uuid().optional().describe("Project ID (loomx_projects) — links the new item via loomx_item_projects in the same call. Optional. Validates the project exists (errors otherwise, no orphan GTD created). Never derived from the active WI — pass explicitly."),
     },
-    async ({ title, body, gtd_status, owner, priority, deadline, source, source_ref, autopilot, autopilot_model, recurrence_days, block_scope, resume_hint, no_auto_arm }) => {
+    async ({ title, body, gtd_status, owner, priority, deadline, source, source_ref, autopilot, autopilot_model, recurrence_days, block_scope, resume_hint, no_auto_arm, project_id }) => {
       const targetOwner = owner ?? selfSlug;
 
       // Only loomy/broker can create items for other agents
@@ -1084,6 +1085,24 @@ export function registerTools(
       if (autopilot === true) {
         const guardError = await checkAutopilotArmGuard(db, targetOwner);
         if (guardError) return guardError;
+      }
+
+      // Validate project_id BEFORE inserting the GTD item (G2: no half-created
+      // orphan on a bad project_id) — mirrors item_project_link's FK expectations.
+      if (project_id !== undefined) {
+        const { data: project, error: projectErr } = await db
+          .from(PROJECTS_TABLE)
+          .select("id")
+          .eq("id", project_id)
+          .maybeSingle();
+        if (projectErr || !project) {
+          return {
+            content: [
+              { type: "text", text: `Error: project_id='${project_id}' not found in loomx_projects. Use project_list to discover a valid id.` },
+            ],
+            isError: true,
+          };
+        }
       }
 
       // D-066 dedup: if source_ref given, return existing GTD (owner+source_ref) instead of inserting
@@ -1160,11 +1179,29 @@ export function registerTools(
         };
       }
 
+      let project_link: { item_id: string; project_id: string } | undefined;
+      if (project_id !== undefined) {
+        const { data: linkData, error: linkErr } = await db
+          .from(GTD_ITEM_PROJECTS_TABLE)
+          .upsert({ item_id: data.id, project_id }, { onConflict: "item_id,project_id" })
+          .select("item_id, project_id")
+          .maybeSingle();
+        if (linkErr || !linkData) {
+          return {
+            content: [
+              { type: "text", text: `GTD item created (id=${data.id}) but project link failed: ${linkErr?.message ?? "no row returned"}. Retry with item_project_link(item_id="${data.id}", project_id="${project_id}").` },
+            ],
+            isError: true,
+          };
+        }
+        project_link = linkData;
+      }
+
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ ok: true, ...data }, null, 2),
+            text: JSON.stringify({ ok: true, ...data, ...(project_link ? { project_link } : {}) }, null, 2),
           },
         ],
       };
