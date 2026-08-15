@@ -4,6 +4,25 @@
 
 ---
 
+## Sessione #70 — 2026-08-15 (org_lookup human_ref: chiudere il gap su question=help, D-118/F7)
+
+**Wake cold-start** (D-093, msg `1b70e337`, normal, da loomy — status-check sulla sessione #69). **WI** `6cbf77f9`. Modello: sonnet.
+
+Loomy chiedeva conferma esplicita di parità: `human_ref` su **tutte** le forme di `org_lookup` (`card`/`chain`/`escalation`/`help`), non solo sulla card — il controllore F7 legge gli archi, non solo la card. Rileggendo `src/tools.ts` prima di rispondere: `card`/`chain`/`escalation` erano arricchiti (sessione #69, commit `4b02290`), **`help` no** — `help_edges` ritornava gli archi `asks_help_from` grezzi, senza `target_human_ref`.
+
+**Cosa:** `src/tools.ts` (commit `a2f9a7d`) — stessa enrichment di `escalation` applicata 1:1 a `help` (batch lookup su `loomx_role_cards` per gli `to_agent` distinti, poi merge `target_human_ref` su ogni edge). Additivo, nessun rename.
+
+**Verifica (D-132, evidenza osservabile):** build `dist.staging/`, `tsc --noEmit` pulito, 120/120 test esistenti verdi (nessun test dedicato a `help` in suite — nessuno lo copriva nemmeno prima), poi smoke con processo separato via stdio MCP reale (stessa `DATABASE_URL`/`.mcp.json` della sessione live):
+- `help` su `forge` (unico agente con arco `asks_help_from` seedato, → `atlas`) → `target_human_ref: "achille"`.
+- `card` su `loomy` e `chain` su `board-mcp` rilanciati come regressione — invariati, coerenti con sessione #69.
+`mv` atomico staging→dist.
+
+**Decisioni prese:** nessuna nuova (fix additivo, stesso pattern #69).
+**Blocchi / note:** nessuno. Nota per loomy: `asks_help_from` ha oggi un solo arco seedato in tutto l'org-registry (`forge→atlas`) — il campo è arricchito ma la copertura dati è minima, non un limite del codice.
+**Prossima sessione:** nessun follow-on pianificato — GTD `2e5531d4` chiuso, msg `1b70e337` ackato, risposta inviata a loomy con lo stato completo (incl. il gap trovato e chiuso).
+
+---
+
 ## Sessione #69 — 2026-08-14 (org_lookup espone human_ref — card/chain/escalation, D-118/F7)
 
 **Wake cold-start** (D-093, msg `1543e0ae`, high, da loomy). **WI** `e09ae3c4`. Modello: sonnet.
