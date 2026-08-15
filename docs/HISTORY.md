@@ -4,6 +4,27 @@
 
 ---
 
+## Sessione #76 — 2026-08-16 (Wake loomy: doc_item_links mutabili? — trovato bug live in doc_supersede, stopgap shippato)
+
+**Autopilot dispatch (cold-wake, D-093).** Msg `40ef3e30` (loomy, wake normal). **WI** `1303b581` (force_ephemeral: nessun REQ/SDES pre-esistente, gap scoperto durante la stessa WI). Modello: sonnet.
+
+**Cosa:** loomy chiedeva se `doc_item_links` è mutabile — dba aveva misurato che la tabella non ha alcuna policy `UPDATE` (solo select/insert/delete), quindi sotto `doc_rw`/`authenticated` ogni UPDATE tocca 0 righe in silenzio; funziona solo da `service_role` (rolbypassrls). Chiedeva: `doc_link` fa mai update/upsert su un link esistente? Se sì, l'immutabilità (delete+insert, mai update in place) romperebbe qualcosa?
+
+**Risposta (letto il codice, non a memoria):**
+1. `doc_link`/`doc_link_by_code`: **INSERT-only**, sempre. Chiave duplicata → errore esplicito, mai un no-op silenzioso. Nessuna superficie da rompere.
+2. Eccezione reale: `docSupersede` FA `.update()` su `doc_item_links`/`doc_item_gtd_links`/`doc_item_wi_links`/`doc_item_xproject_links` — ma solo per ri-puntare `from_item`/`to_item`/`doc_item_id` dal vecchio UUID al nuovo quando l'item collegato viene superseded, **mai** `relation_type`. Esiste dal commit iniziale (40a4e4d), voluto. Un divieto rumoroso blanket romperebbe questa superficie — proposto scoping: trigger che blocca solo su `relation_type`/`project_id` diverso, lascia passare il repoint endpoint.
+3. `amends` (relation_type che spec-F4 userà) non è ancora nel registry locale (`DB_DOC_ITEM_LINK_TYPES`) — segnalato, il capability-parity gate (§16) andrà comunque rosso in automatico quando serve, non rischio di drift silenzioso.
+
+**Finding non richiesto, il più importante:** verificando il codice di `docSupersede` ho trovato che il transfer link non controllava MAI il rowcount dell'UPDATE — solo `error`. Sotto `doc_rw` (F4.5, v0.8.0+, NOBYPASSRLS) questo significa che il gap RLS misurato da loomy fa fallire **in silenzio** anche questo update legittimo: 0 righe toccate, nessun errore, `docSupersede` ritornava comunque `ok:true` mentre i link restavano agganciati all'item superseded (ormai immutabile) — lo stesso identico gap di traceability che pilot-e2e aveva segnalato mesi fa (GTD `6637405b`, allora "someday", mai collegato alla causa RLS).
+
+**Fix shippato (commit `9e3b025`):** `assertLinkTransferred()` in `src/docs.ts` ri-verifica dopo ogni update che non restino righe puntate al vecchio id; se restano, `doc_supersede` fallisce esplicitamente invece di mentire con `ok:true`. Nuovo test di regressione in `tests/docs.test.ts` (wrapper che simula l'esatto gap RLS — update swallowed, select ancora attivo). Build + 124 test verdi. Questo non ripara il transfer (serve la policy scoped dal DBA) — lo rende rumoroso invece che silenzioso.
+
+**Decisioni prese:** nessuna nuova decisione cross/locale — proposta di scoping girata a loomy, non ratificata qui.
+**Blocchi / note:** `doc_supersede` su item con link in entrata/uscita fallirà esplicitamente finché il DBA non aggiunge una policy UPDATE scoped (o una funzione SECURITY DEFINER dedicata) su `doc_item_links` (e verificare gtd/wi/xproject). GTD `6637405b` riaperto/aggiornato: someday→high, `waiting_on=dba`.
+**Prossima sessione:** attendere risposta loomy/dba sullo scoping della policy; una volta live, verificare che `doc_supersede` con link reali torni a `ok:true` (oggi fallirebbe correttamente finché manca).
+
+---
+
 ## Sessione #75 — 2026-08-15 (Wake loomy: ragionamento sui 4 casi D-084/D-101/D-050/D-018 — scoperta collisione di numerazione D-101/D-018)
 
 **Autopilot dispatch (cold-wake, D-093).** Msg `bd8de1f3` (loomy, wake normal). **WI** `ccee917d`. Modello: sonnet (verifica/lettura, non richiedeva design).
