@@ -4,6 +4,28 @@
 
 ---
 
+## Sessione #75 — 2026-08-15 (Wake loomy: ragionamento sui 4 casi D-084/D-101/D-050/D-018 — scoperta collisione di numerazione D-101/D-018)
+
+**Autopilot dispatch (cold-wake, D-093).** Msg `bd8de1f3` (loomy, wake normal). **WI** `ccee917d`. Modello: sonnet (verifica/lettura, non richiedeva design).
+
+**Cosa:** loomy ha contestato l'esito della sessione #74 (42/42 `active`, zero `superseded`) chiedendo il ragionamento su 4 casi puntuali prima del seed: D-084, D-101, D-050, e una a scelta fra D-001..D-022. Riletti i body completi locali + cross corrispondenti (dove esistono) più un campione di controllo (D-043/D-047/D-048/D-018 cross).
+
+**Risultato — le 4 risposte reggono, ma la premessa "14 recepimenti simmetrici" no:**
+1. **D-084**: recepimento solido — la riga locale aggiunge dettagli (`resolveSelfSlug()`, `docRwMode()==="native"`, test file) assenti nella cross. `active` confermato.
+2. **D-050**: nessun mistero — confermato via query che non esiste alcuna cross D-050 (0 righe); è una decisione locale al 100%, mai stata un recepimento.
+3. **D-101**: **non è un recepimento**. La cross D-101 parla di tutt'altro (trigger `doc_item_history`, audit trail anti-overwrite, dba). Stesso numero per collisione di allocazione, non per copia — la sequenza locale board-mcp evidentemente alloca D-NNN senza controllare il registro cross.
+4. **D-018** (scelta per Q4): il caso più debole dei 42 — evento di rename one-shot, già eseguito, zero footprint in `src/` (verificato con grep), nessuna azione futura violabile. Tenuta `active` solo per il criterio dei recepimenti (unico posto che spiega perché lo slug corrente è `loomx-tracker`) — uso improprio dello status per assenza di un valore "historical" nello schema decisioni.
+
+**Scoperta non richiesta:** controllando D-018 come campione ho trovato la STESSA collisione di D-101 — cross D-018 è "GTD RLS ownership" (proposta da loomy), scollegata dal rename slug locale. 2 collisioni su ~10 controllate (contro 3 recepimenti genuini on-topic: D-043/D-047/D-048). Non è pericoloso a livello tool (`doc_item_upsert`/`resolve` sono scoped per `(project_id, code)`, mai ambigui), ma è un rischio di lettura umano/agente. Non ho rinumerato nulla unilateralmente — girata a loomy la scelta (annotare vs rinumerare) via board_send `97dcb876` + GTD follow-on `e5c9a7c5` (planned, `waiting_on=loomy`, non armato).
+
+**Bonus segnalato, non investigato:** D-048 locale `active` ma la cross D-048 corrispondente è già `superseded` — possibile stesso tipo di drift, fuori scope dei 4 casi richiesti.
+
+**Decisioni prese:** nessuna — task di verifica/risposta, nessuna nuova decisione scritta.
+**Blocchi / note:** nessuno per questa sessione. Il follow-on sulla rinumerazione resta bloccato sulla decisione di loomy.
+**Prossima sessione:** GTD `e5c9a7c5` (collisione D-101/D-018) in coda, `waiting_on=loomy`, non armato.
+
+---
+
 ## Sessione #74 — 2026-08-15 ([F3 bloccante] Sanamento status delle 42 decisioni — 40 draft/proposed → active, gap D-010 trovato)
 
 **Autopilot dispatch.** GTD `d13ff8e0` (owner board-mcp, priorità high). **WI** `12247a98`. Modello: sonnet (task di lettura/verifica, non richiedeva design/architettura).
