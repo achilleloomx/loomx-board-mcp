@@ -564,6 +564,23 @@ test("wi_checkpoint (error): cannot checkpoint another agent's WI", async () => 
   assert.equal(res.ok, false);
 });
 
+test("wi_checkpoint (error): fails loud on a WI already closed done/failed instead of silent ok:true", async () => {
+  for (const status of ["done", "failed"] as const) {
+    const store: Store = {
+      loomx_work_items: [
+        { id: "wi-1", agent_slug: "app", status, in_flight_state: { files_touched: [], tool_uses: 5 } },
+      ],
+    };
+    const db = makeDb(store);
+    const res = await wiCheckpoint(db, { wi_id: "wi-1", tool_use_count: 1 }, ctxOwn);
+    assert.equal(res.ok, false);
+    if (res.ok) continue;
+    assert.match(res.error, new RegExp(`status=${status}`));
+    // No silent write: in_flight_state must stay untouched.
+    assert.equal((store.loomx_work_items[0].in_flight_state as any).tool_uses, 5);
+  }
+});
+
 // ---- wi_link_template ---------------------------------------------------
 
 test("wi_link_template (happy): derives layer when not provided", async () => {

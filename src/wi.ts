@@ -764,6 +764,14 @@ export async function wiCheckpoint(
     return { ok: false, error: `Cannot checkpoint WI owned by ${row.agent_slug}.` };
   }
 
+  if (row.status === "done" || row.status === "failed") {
+    // Silent ok:true here is the false positive nottolini escalated (df43c4c6,
+    // 2026-08-09): the caller believes it is tracking progress on a WI the
+    // reconciler already closed underneath it. Fail loud and name the real
+    // status instead of writing a checkpoint nobody will read.
+    return { ok: false, error: `WI already closed (status=${row.status}) — checkpoint not recorded. Use wi_status to check your active WI.` };
+  }
+
   const state = row.in_flight_state ?? { files_touched: [], tool_uses: 0 };
   const filesPrev: string[] = Array.isArray(state.files_touched) ? state.files_touched : [];
   const filesSet = new Set(filesPrev);
