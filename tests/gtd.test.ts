@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 
-import { buildGtdUpdatePayload, brokerAutopilotArmBlocked, resolveBoardActorFilterCode, buildAutoGtdInsertPayload } from "../src/tools.ts";
+import { buildGtdUpdatePayload, brokerAutopilotArmBlocked, resolveBoardActorFilterCode, buildAutoGtdInsertPayload, buildProjectWarning } from "../src/tools.ts";
 
 test("buildGtdUpdatePayload: body-only leaves gtd_status untouched (footgun regression)", () => {
   const updates = buildGtdUpdatePayload({ body: "just a note" });
@@ -182,4 +182,15 @@ test("buildAutoGtdInsertPayload: priority passthrough for wake-marked messages",
     priority: "urgent",
   });
   assert.equal(payload.priority, "urgent");
+});
+
+// Stream B-4 (GTD 3acb2328): gtd_add soft-warn when project_id is omitted.
+test("buildProjectWarning: warns when project_id is omitted (G1)", () => {
+  const warning = buildProjectWarning(undefined);
+  assert.ok(warning && warning.length > 0);
+  assert.match(warning, /project_id/);
+});
+
+test("buildProjectWarning: silent when project_id is given (G2)", () => {
+  assert.equal(buildProjectWarning("11111111-1111-1111-1111-111111111111"), undefined);
 });

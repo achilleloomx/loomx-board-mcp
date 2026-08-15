@@ -232,6 +232,16 @@ export function buildAutoGtdInsertPayload(params: {
   };
 }
 
+// Stream B-4 (GTD 3acb2328, D-136 §5): soft-warn only, gtd_add creates the
+// item either way. A GTD with no project is an established valid state
+// (AGENT-STANDARD §5 — cross-project or personal item), not an omission to
+// punish — the warning offers that reading explicitly instead of just
+// flagging the absence. Never derives a project from the active WI.
+export function buildProjectWarning(project_id: string | undefined): string | undefined {
+  if (project_id !== undefined) return undefined;
+  return `No project_id given. If this GTD is cross-project or personal (coordination, meta-task, stall-triage), that's a valid state — no action needed. If it belongs to a project, add project_id (see project_list for the id).`;
+}
+
 const MessageTypeSchema = z.enum(MESSAGE_TYPES);
 const StatusFilterSchema = z.enum(MESSAGE_STATUSES);
 const WakePrioritySchema = z.enum(WAKE_PRIORITIES);
@@ -1028,7 +1038,7 @@ export function registerTools(
   // --- gtd_add ---
   server.tool(
     "gtd_add",
-    "Create a new GTD item",
+    "Create a new GTD item. Omitting project_id returns a soft-warn (project_warning in response) — never blocks, item is created either way; a GTD with no project is a valid state (cross-project/personal).",
     {
       title: z.string().min(1).describe("Item title"),
       body: z.string().optional().describe("Item body/details"),
@@ -1197,11 +1207,13 @@ export function registerTools(
         project_link = linkData;
       }
 
+      const project_warning = buildProjectWarning(project_id);
+
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ ok: true, ...data, ...(project_link ? { project_link } : {}) }, null, 2),
+            text: JSON.stringify({ ok: true, ...data, ...(project_link ? { project_link } : {}), ...(project_warning ? { project_warning } : {}) }, null, 2),
           },
         ],
       };

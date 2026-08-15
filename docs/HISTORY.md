@@ -4,6 +4,22 @@
 
 ---
 
+## Sessione #73 — 2026-08-15 ([Stream B-4] gtd_add: soft-warn su project_id assente, mai bloccante, D-136 §5)
+
+**Autopilot dispatch.** GTD `3acb2328` (owner board-mcp). **WI** `3b00e4ba`. Modello: sonnet (task meccanico, netto — nessun upgrade necessario).
+
+**Cosa:** `gtd_add` senza `project_id` ora ritorna `project_warning` nella risposta — mai un errore, il GTD viene creato comunque. Estratta `buildProjectWarning()` (funzione pura, `src/tools.ts`) sul modello di `buildGtdUpdatePayload`/`buildAutoGtdInsertPayload` — testabile senza DB, 2 nuovi unit test (`tests/gtd.test.ts`).
+
+**Scelta di design (nessun valore sentinella inventato):** il body del GTD chiedeva di offrire "l'alternativa esplicita" a dimenticare il progetto, ma vietava di inventare un valore contrattuale senza passare da Loomy. AGENT-STANDARD §5 dichiara già che un item senza progetto è cross-progetto/personale — uno stato valido esistente, non un'assenza da colmare con un nuovo parametro. Il testo del warning si limita quindi a *nominare* questa lettura esistente ("valido — nessuna azione richiesta" vs "va aggiunto") invece di introdurre un secondo modo di dichiarare la stessa cosa. Segnalato a loomy nel summary — se ritiene serva comunque un valore esplicito, lo propone lui.
+
+**Verifica (non a memoria, D-136 §5):** stessa sessione con cui la gate G4 (sessione #72) era stata chiusa — la connessione MCP di questa stessa finestra gira sul build precedente (`Node non fa hot-reload`), quindi non prova nulla chiamare `gtd_add` dal proprio client. Metodo onesto: spawnata una seconda istanza del server (`node dist/index.js --agent board-mcp`, `DATABASE_URL` risolto da `LOOMX_DB_URL` — `.mcp.json` usa `${...}` che è espansione del launcher Claude Code, non della shell) e parlato MCP JSON-RPC via stdio direttamente. **G1** (no `project_id`): item creato (`id=bd63e759`) + `project_warning` presente, risposta reale loggata. **G2** (`project_id` valido): item creato (`id=caad797f`) + `project_link`, nessun `project_warning`. **G3**: 105/105 test esistenti verdi (nessuna regressione), campo additivo. Item di test trashati a fine verifica.
+
+**Decisioni prese:** nessuna nuova cross-decision — implementazione diretta della richiesta loomy, motivata da D-136 §5 già approvata.
+**Blocchi / note:** nessuno. Osservazione lasciata a loomy (non un GTD, serve il suo giudizio di scope): altri due path creano GTD senza `project_id` senza questo warning — `wi_start` (auto-crea GTD quando `gtd_item_id` non è dato) e `auto_gtd` su `board_send`/`board_broadcast`. Non estesi in questa sessione — fuori dallo scope dichiarato ("gtd_add"), decidere se allinearli è scelta di Loomy.
+**Prossima sessione:** nessuna pianificata da questo GTD.
+
+---
+
 ## Sessione #72 — 2026-08-15 (G4 rollout: nessun meccanismo di deploy per server MCP stdio, propagazione solo per ricambio finestra)
 
 **Wake cold-start** (D-093, msg `780b4004`, normal, da loomy). **WI** `c5990bb4` su GTD `70ac93c4`. Modello: sonnet.
