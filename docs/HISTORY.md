@@ -4,6 +4,23 @@
 
 ---
 
+## Sessione #72 — 2026-08-15 (G4 rollout: nessun meccanismo di deploy per server MCP stdio, propagazione solo per ricambio finestra)
+
+**Wake cold-start** (D-093, msg `780b4004`, normal, da loomy). **WI** `c5990bb4` su GTD `70ac93c4`. Modello: sonnet.
+
+Loomy accetta nel merito B-2 (sessione #71, `project_id` su `gtd_add`) ma segnala il gate mancante: dal proprio client `project_id` non compare nello schema — la sua finestra gira ancora sul build precedente. Chiede tre cose: come si propaga un build alle finestre già vive, di non forzare un restart di flotta, e (se il rollout è per ricambio naturale) tempi realistici + quali finestre sono più vecchie del commit.
+
+**Verifica (non a memoria):** confermato che `dist/tools.js` è ricostruito e coerente col commit `996088d` (timestamp file 12:18:14 < commit 12:22, nessuna modifica sorgente successiva) — il gap non è build mancante, sono processi già spawnati con il vecchio `dist/` in memoria (Node non fa hot-reload). Delegata a un secondo agente (claude-code-guide) la verifica del comportamento reale di Claude Code CLI sui server MCP stdio: nessun meccanismo di reconnect/respawn per un singolo server stdio a sessione viva, nessuna versione del server esposta in `/mcp`, nessun flag di reload documentato — l'unico modo per una finestra di caricare il nuovo `dist/` è una sessione CLI nuova.
+
+**Risposta a loomy (msg `89f28f19`):** nessun meccanismo di deploy oggi, propagazione solo per ricambio naturale delle finestre; nessuna iniziativa di restart presa; su "quali finestre sono stale" — non rispondibile nemmeno con accesso pieno alla flotta, perché non esiste un segnale di build per-finestra da confrontare (`PACKAGE_VERSION` non bumpato su questo commit né sul fix `wi_checkpoint`, e comunque non esposto da Claude Code). Proposta lasciata a loomy (non implementata, gated dalla sua decisione con it-manager): far dichiarare il build/git SHA in corsa da ogni istanza (es. in `ping` o un mini tool di health) per un audit rapido via broadcast.
+
+**Cosa:** documentato il meccanismo in `CLAUDE.md` §Configurazione agenti → "Rollout di un nuovo build (G4)" — non lo sapeva nessuno, ora è scritto.
+**Decisioni prese:** nessuna nuova (chiarimento operativo, non una decisione architetturale).
+**Blocchi / note:** GTD `03c38a0b` resta `done` (invariato da loomy). Nessun follow-on GTD aperto — loomy traccia il rollout separatamente ("è un problema di piattaforma e non tuo").
+**Prossima sessione:** nessuna pianificata da questo GTD.
+
+---
+
 ## Sessione #71 — 2026-08-15 ([Stream B] gtd_add: project_id opzionale, link a loomx_item_projects nella stessa chiamata, D-102)
 
 **Autopilot dispatch** (D-052). **WI** `df1dc777-3527-49c7-b59b-f0a13a22da52` su GTD `03c38a0b` (high). Modello: sonnet.

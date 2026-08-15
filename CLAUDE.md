@@ -353,6 +353,14 @@ Per agenti con accesso ai dati famiglia (es. assistant/Evaristo), aggiungere:
 
 > `HOME_USER_ID` deve essere un `auth.users(id)` valido (vedi D-017). Valore corretto per Evaristo: `5a2df80b-aa01-4b68-976e-192d6ca4227e`.
 
+### Rollout di un nuovo build (G4, verificato 2026-08-15)
+
+`dist/` è gitignored — build **unica condivisa** sul filesystem (`npm run build`). Ogni `.mcp.json` lancia `node dist/index.js --agent <id>` come processo stdio **una sola volta all'avvio della finestra**. Node non fa hot-reload: un processo già vivo continua a eseguire il codice caricato al proprio avvio anche dopo che `dist/` viene rigenerato su disco.
+
+**Non esiste un meccanismo di deploy/push.** Claude Code CLI non riconnette/rispawna un singolo server MCP stdio a sessione viva (nessun `/mcp reconnect` per stdio — *"Stdio servers are local processes and are not reconnected automatically"*), non espone la versione del server in `/mcp`, nessun flag di reload. L'unico modo per una finestra di caricare il `dist/` aggiornato è un **processo CLI nuovo** (nuova sessione — es. dopo `wi_end`+`runtime_request kill`, D-052).
+
+**Implicazione:** dopo un commit, ogni finestra già aperta resta sul build precedente finché non viene riavviata. Nessun segnale di build per-finestra è oggi disponibile per un audit ("quali finestre sono stale") — `PACKAGE_VERSION` (package.json) non viene bumpato ad ogni commit e comunque non è esposto da Claude Code. Non forzare restart di flotta di propria iniziativa: segnalare a Loomy/it-manager, che decidono se e quando coordinare i restart (pattern usato in sessioni #63/#64/#68).
+
 ---
 
 ## Documenti governance (DB-first, D-a5) §6bis
