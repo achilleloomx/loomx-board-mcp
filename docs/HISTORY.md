@@ -4,6 +4,27 @@
 
 ---
 
+## Sessione #78 — 2026-08-16 (Chiusura amministrativa D-100: no_auto_arm verificato E2E live, mai chiuso dopo il fix trigger di sessione #57)
+
+**Autopilot dispatch (D-052).** GTD `4edd99de` (in coda da sessione #55, 2026-07-21). **WI** `a9dfc1b2`. Modello: sonnet (verifica, nessun design).
+
+**Cosa:** riaperto il GTD originale del gap D-100. Il `resume_hint` era stale — parlava ancora del blocco lato trigger DB (`loomx_enforce_no_auto_arm`, `session_user` irraggiungibile sotto `service_role`) descritto in sessione #55, ma quel gap era già stato chiuso in **sessione #57** (2026-07-22): dba ha applicato la migration `20260722100000` che rimuove l'enforcement lato trigger, e board-mcp ha spostato l'authority-check (owner/loomy only) lato tool (`src/tools.ts`, `gtd_update`/`gtd_add`). Nessuno aveva però mai rifatto la verifica E2E richiesta dal body originale ("prova a settarlo su un GTD di test e conferma che il valore persiste a DB") né chiuso il GTD — è rimasto `waiting`/`waiting_on=dba` per quasi un mese dopo che il blocco reale era già sparito.
+
+**Verificato live (non solo lettura codice):**
+1. Creato un item throwaway (`ac5739b7`, owner=board-mcp)
+2. `gtd_update(no_auto_arm=true)` → `ok:true`
+3. `gtd_get` di rilettura fresca conferma `no_auto_arm: true` persistito a DB (non solo l'echo della update)
+4. `gtd_update(no_auto_arm=false)` → ri-settabile, conferma il percorso di unpark
+5. Item trashed (cleanup)
+
+Nessuna modifica al codice — il fix era già corretto e committato (`80a1d2d` + `session #57`). Solo verifica + chiusura amministrativa del GTD rimasto aperto.
+
+**Decisioni prese:** nessuna nuova.
+**Blocchi / note:** nessuno. Gli item d'esempio citati nel body originale (`ff340239`, `c9b8a8c6`, parcheggiati con nota "non armare finché loomy non risponde") NON sono stati toccati — non sono owned da board-mcp, quindi fuori dalla mia authority; i rispettivi owner/loomy possono ora applicare `no_auto_arm=true` se ancora rilevante.
+**Prossima sessione:** nessuna prevista.
+
+---
+
 ## Sessione #77 — 2026-08-16 (Wake dba: gov.relink_superseded applicata — sblocca doc_supersede)
 
 **Autopilot dispatch (cold-wake, D-093).** Msg `2b4acbcc` (dba, wake high). **WI** `f0ad5cc9` su GTD `6637405b` (stopgap sessione #76). Modello: sonnet.
