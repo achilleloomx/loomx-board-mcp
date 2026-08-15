@@ -4,6 +4,25 @@
 
 ---
 
+## Sessione #74 — 2026-08-15 ([F3 bloccante] Sanamento status delle 42 decisioni — 40 draft/proposed → active, gap D-010 trovato)
+
+**Autopilot dispatch.** GTD `d13ff8e0` (owner board-mcp, priorità high). **WI** `12247a98`. Modello: sonnet (task di lettura/verifica, non richiedeva design/architettura).
+
+**Cosa:** il sistema di enforcement consegna a ogni WI solo le decisioni `active`/`approved` — delle 42 decisioni board-mcp in `documents`/`doc_items` (project 596cd5fc, document 1da8642c), 35 erano `draft` e 2 `proposed` (D-100/D-101), cioè l'86% invisibile ai WI futuri malgrado descrivessero comportamento reale. Letto il body completo di tutte e 42, verificato i claim implementativi più a rischio di drift contro il codice sorgente attuale (`grep` mirato su `src/*.ts`): D-010 (tag enforcement), D-013/D-084 (backend DB), D-021 (`wiCache.ts`), D-022 (co-engagement tools), D-050 (autopilot fields), D-055 (`gtd_overview`), D-058 (enum `continue`), D-051 (`remote.ts`/`humanTools.ts`), D-016 (owner reassignment). Tutte confermate coerenti tranne una.
+
+**Esito: 42/42 `active`, nessuna `superseded`/`rejected`.** Non è un rubber-stamp — tre casi hanno richiesto un giudizio esplicito:
+1. **D-100 vs D-059** (broker elevation su board_ack/update_status): D-100 supersede SOLO lo scope ack/status (broker limitato a `to_agent=loomy`, non più unrestricted) — relazione già autodocumentata in `D-100.attrs.supersedes`. Il resto di D-059 (gtd_add/gtd_update broker, addendum runtime_request) resta vigente e non riscritto altrove → D-059 `active`, non `superseded` in toto (marcarla superseded avrebbe fatto perdere le regole gtd_add/gtd_update a chi legge solo D-100).
+2. **"Recepimenti" cross-decision** (D-018, D-043, D-047, D-048, D-084, D-101 — riusano il numero della decisione root): applicato il test di Loomy ("se cancellassi questa riga, un agente perderebbe un'informazione che la cross non gli dà?") — tutte contengono verifiche/greps/sequenze di attivazione locali a board-mcp → tenute `active`, nessuna `superseded` come "recepimento formale vuoto".
+3. **D-100/D-101** (erano `proposed`): descrivono comportamento già shippato/versionato/testato (v0.13.x/v0.16.0), solo l'hardening è dietro flag eval-first — il contratto core è vigente oggi → `active`.
+
+**Gap reale trovato — D-010** (governance tag, Loomy owner/Postman enforcer): il body dichiara che i tag non approvati "vengono rifiutati da board_send e board_broadcast", ma `grep -n "tags" src/tools.ts` mostra `tags` come array free-text senza alcuna validazione in entrambi i tool. Tenuta `active` (l'intento di governance non è in discussione) ma aperto GTD follow-on `50d93acf` (planned, non armato — decisione se reintrodurre l'enforcement o correggere la decisione spetta a Loomy).
+
+**Decisioni prese:** nessuna nuova — task di sanamento status su decisioni esistenti, non di produzione di nuove decisioni.
+**Blocchi / note:** `docs/DECISIONS.md` (mirror generato) ora stale rispetto ai nuovi status — `loomx-doc-dump` non è installato in questo ambiente, non rigenerato. Segnalato a loomy nel summary.
+**Prossima sessione:** GTD `50d93acf` (gap enforcement tag D-010) in coda, non armato — decisione di Loomy prima di procedere.
+
+---
+
 ## Sessione #73 — 2026-08-15 ([Stream B-4] gtd_add: soft-warn su project_id assente, mai bloccante, D-136 §5)
 
 **Autopilot dispatch.** GTD `3acb2328` (owner board-mcp). **WI** `3b00e4ba`. Modello: sonnet (task meccanico, netto — nessun upgrade necessario).
