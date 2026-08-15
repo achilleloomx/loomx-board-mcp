@@ -170,6 +170,39 @@ function makeDb(store: Store): SupabaseClient {
   return { from: (table: string) => query(table), __docRw: true, resolveDocItem } as unknown as SupabaseClient;
 }
 
+// Simulates the RLS gap loomy flagged (msg 40ef3e30, 2026-08-15): a table with no
+// UPDATE policy for the executing role silently affects 0 rows, no error. Wraps a
+// normal fake db so any .update() call against `blockedTable` is swallowed (never
+// reaches the store), while .select() against the same table still reads it —
+// exactly what a real "UPDATE grant missing, SELECT grant present" split looks like.
+function makeDbSilentlyBlockUpdates(store: Store, blockedTable: string): SupabaseClient {
+  const real = makeDb(store) as any;
+  return {
+    from(table: string) {
+      const rb = real.from(table);
+      if (table !== blockedTable) return rb;
+      let blocked = false;
+      const wrapped: any = {
+        select(...a: any[]) { rb.select(...a); return wrapped; },
+        eq(...a: any[]) { rb.eq(...a); return wrapped; },
+        in(...a: any[]) { rb.in(...a); return wrapped; },
+        limit(...a: any[]) { rb.limit(...a); return wrapped; },
+        insert(...a: any[]) { rb.insert(...a); return wrapped; },
+        delete(...a: any[]) { rb.delete(...a); return wrapped; },
+        update(data: Row) { blocked = true; return wrapped; }, // swallowed: never applied
+        maybeSingle() { return blocked ? Promise.resolve({ data: null, error: null }) : rb.maybeSingle(); },
+        single() { return blocked ? Promise.resolve({ data: null, error: { message: "No rows returned" } }) : rb.single(); },
+        then(onF: any, onR: any) {
+          return (blocked ? Promise.resolve({ data: null, error: null }) : rb).then(onF, onR);
+        },
+      };
+      return wrapped;
+    },
+    __docRw: true,
+    resolveDocItem: real.resolveDocItem,
+  } as unknown as SupabaseClient;
+}
+
 const ctx = { selfSlug: "board-mcp", isLoomy: false };
 const PROJ_A = "00000000-0000-4000-9000-0000000000aa";
 const PROJ_B = "00000000-0000-4000-9000-0000000000bb";
@@ -366,6 +399,35 @@ test("doc_supersede: transfers doc_item_links (forward + reverse) and doc_item_g
   assert.ok(gtdLink, "doc_item_gtd_link transferred from old → new item");
   const gtdOnOld = store.doc_item_gtd_links.find((l: any) => l.doc_item_id === oldId);
   assert.equal(gtdOnOld, undefined, "no doc_item_gtd_link left on old item");
+});
+
+test("doc_supersede: fails loud (not ok:true) when doc_item_links UPDATE is silently blocked (RLS-gap regression, msg 40ef3e30)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDbSilentlyBlockUpdates(store, "doc_item_links");
+
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "sdes", title: "Sdes" }, ctx);
+  const docId = (doc as any).data.document_id;
+  const upOld = await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "sdes_entry", code: "SDES-020", body: "v1" }, ctx);
+  const oldId = (upOld as any).data.item_id;
+
+  const reqDoc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const upTarget = await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-020" }, ctx);
+  const targetId = (upTarget as any).data.item_id;
+
+  // A real link that MUST survive the version bump — the exact traceability edge
+  // (SDES→satisfies→REQ) the GTD 6637405b finding is about.
+  await docLink(db, { target_kind: "doc", from_id: oldId, to_id: targetId, relation_type: "satisfies" }, ctx);
+
+  const sup = await docSupersede(db, { old_item_id: oldId, body: "v2" }, ctx);
+  assert.equal(sup.ok, false, "must fail loud, not silently succeed with an orphaned link");
+  assert.match((sup as any).error, /did not transfer/i);
+  assert.match((sup as any).error, /UPDATE grant|RLS/i);
+
+  // The link is still on the (now immutable, superseded) old item — orphaned, but
+  // at least the caller was told, instead of getting a false ok:true.
+  const stillOnOld = store.doc_item_links.find((l) => l.from_item === oldId && l.relation_type === "satisfies");
+  assert.ok(stillOnOld, "link left dangling on the superseded item, as the blocked UPDATE predicts");
 });
 
 test("doc_query traceability: req_without_sdes flags uncovered REQ then clears after link", async () => {
