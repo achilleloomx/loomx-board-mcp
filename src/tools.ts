@@ -2091,7 +2091,23 @@ export function registerTools(
         if (error) {
           return { content: [{ type: "text", text: `Error reading asks_help_from edges: ${error.message}` }], isError: true };
         }
-        return { content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, domain: domain ?? null, help_edges: edges ?? [] }, null, 2) }] };
+        const edgeList = (edges ?? []) as { to_agent: string; domain: string | null; note: string | null }[];
+        const toAgents = [...new Set(edgeList.map((e) => e.to_agent))];
+        const humanRefBySlug = new Map<string, string | null>();
+        if (toAgents.length > 0) {
+          const { data: cardsData, error: cardsErr } = await db
+            .from(ROLE_CARDS_TABLE)
+            .select("agent_slug, human_ref")
+            .in("agent_slug", toAgents);
+          if (cardsErr) {
+            return { content: [{ type: "text", text: `Error resolving target human_ref: ${cardsErr.message}` }], isError: true };
+          }
+          for (const c of (cardsData ?? []) as { agent_slug: string; human_ref: string }[]) {
+            humanRefBySlug.set(c.agent_slug, c.human_ref);
+          }
+        }
+        const enrichedEdges = edgeList.map((e) => ({ ...e, target_human_ref: humanRefBySlug.get(e.to_agent) ?? null }));
+        return { content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, domain: domain ?? null, help_edges: enrichedEdges }, null, 2) }] };
       }
 
       // mode === "card" (default)
