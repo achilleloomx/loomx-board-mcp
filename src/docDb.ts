@@ -46,6 +46,12 @@ export interface DocRwDb {
   from: (table: string) => PgQuery;
   // RLS-aware code→uuid via the DB function (audited, raises 42501/P0002/22004).
   resolveDocItem: (projectId: string, code: string) => Promise<string>;
+  // Atomic link repoint for doc_supersede (D-133, dba msg 2b4acbcc, migration
+  // 20260816100000). SECURITY DEFINER — bypasses the RLS gap where doc_rw has no
+  // UPDATE policy on doc_item_links/doc_item_gtd_links/doc_item_wi_links/
+  // doc_item_xproject_links. Rejects (23514) unless old.status='superseded'.
+  // Returns the total row count touched across all six directions.
+  relinkSuperseded: (oldItemId: string, newItemId: string) => Promise<number>;
 }
 
 export function assertSlug(slug: string): void {
@@ -206,6 +212,11 @@ function makeDb(exec: PgExecutor): DocRwDb {
         throw e;
       }
       return id as string;
+    },
+    relinkSuperseded: async (oldItemId: string, newItemId: string) => {
+      const { rows } = await exec("SELECT gov.relink_superseded($1::uuid, $2::uuid) AS n", [oldItemId, newItemId]);
+      const n = rows[0] && (rows[0] as Row).n;
+      return typeof n === "number" ? n : Number(n ?? 0);
     },
   };
 }

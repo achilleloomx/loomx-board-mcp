@@ -567,34 +567,11 @@ export interface DocSupersedeArgs {
   code?: string;          // default: carry the old code (only if old row is detached from it first)
 }
 
-// Link-transfer UPDATEs below run with no .select() (doc_rw noReturning mode never
-// executes RETURNING on UPDATE — see pg-shim.ts), so a row-count is not directly
-// observable. If the target table lacks an UPDATE policy for the executing role
-// (e.g. doc_rw, no RLS bypass — the exact gap flagged for doc_item_links), the
-// UPDATE silently affects 0 rows with no error. Verify by re-querying for rows
-// still pointing at the old id: any leftover means the transfer did NOT happen,
-// and doc_supersede must fail loud rather than return ok:true over an orphaned link.
-async function assertLinkTransferred(
-  db: SupabaseClient,
-  table: string,
-  col: string,
-  oldId: string,
-  label: string
-): Promise<string | null> {
-  const { data, error } = await db.from(table).select("id").eq(col, oldId).limit(1);
-  if (error) return `Failed to verify ${label} transfer: ${error.message}`;
-  if (data && (data as { id: string }[]).length > 0) {
-    return `${label} did not transfer — row(s) still reference the superseded item ${oldId} ` +
-      `(likely a missing UPDATE grant/RLS policy on ${table} for the executing role).`;
-  }
-  return null;
-}
-
 export async function docSupersede(
   db: SupabaseClient,
   args: DocSupersedeArgs,
   ctx: DocContext
-): Promise<DocResult<{ new_item_id: string; old_item_id: string; link_id: string; code: string | null }>> {
+): Promise<DocResult<{ new_item_id: string; old_item_id: string; link_id: string; code: string | null; relinked_rows: number }>> {
   const { data: oldRow, error: oldErr } = await db
     .from(DOC_ITEMS)
     .select("id, document_id, project_id, item_type, code, status, owner, sort_order, body, priority, attrs")
@@ -662,59 +639,32 @@ export async function docSupersede(
   if (insErr || !newRow) return err(`Failed to insert new version: ${insErr?.message ?? "no row"}`);
   const created = newRow as { id: string; code: string | null };
 
-  // Transfer doc_item_links: update rows where from_item = old → new (forward direction).
-  const { error: fwdErr } = await db
-    .from(DOC_ITEM_LINKS)
-    .update({ from_item: created.id })
-    .eq("from_item", old.id);
-  if (fwdErr) return err(`Failed to transfer forward doc_item_links to new version: ${fwdErr.message}`);
-  const fwdLeftover = await assertLinkTransferred(db, DOC_ITEM_LINKS, "from_item", old.id, "forward doc_item_links");
-  if (fwdLeftover) return err(`New version created (${created.id}) but ${fwdLeftover}`);
-
-  // Transfer doc_item_links: update rows where to_item = old → new (reverse direction).
-  const { error: bwdErr } = await db
-    .from(DOC_ITEM_LINKS)
-    .update({ to_item: created.id })
-    .eq("to_item", old.id);
-  if (bwdErr) return err(`Failed to transfer reverse doc_item_links to new version: ${bwdErr.message}`);
-  const bwdLeftover = await assertLinkTransferred(db, DOC_ITEM_LINKS, "to_item", old.id, "reverse doc_item_links");
-  if (bwdLeftover) return err(`New version created (${created.id}) but ${bwdLeftover}`);
-
-  // Transfer doc_item_gtd_links (D-070 new table).
-  const { error: gtdLinkErr } = await db
-    .from(DOC_ITEM_GTD_LINKS)
-    .update({ doc_item_id: created.id })
-    .eq("doc_item_id", old.id);
-  if (gtdLinkErr) return err(`Failed to transfer doc_item_gtd_links to new version: ${gtdLinkErr.message}`);
-  const gtdLeftover = await assertLinkTransferred(db, DOC_ITEM_GTD_LINKS, "doc_item_id", old.id, "doc_item_gtd_links");
-  if (gtdLeftover) return err(`New version created (${created.id}) but ${gtdLeftover}`);
-
-  // Transfer doc_item_wi_links (D-070 new table).
-  const { error: wiLinkErr } = await db
-    .from(DOC_ITEM_WI_LINKS)
-    .update({ doc_item_id: created.id })
-    .eq("doc_item_id", old.id);
-  if (wiLinkErr) return err(`Failed to transfer doc_item_wi_links to new version: ${wiLinkErr.message}`);
-  const wiLeftover = await assertLinkTransferred(db, DOC_ITEM_WI_LINKS, "doc_item_id", old.id, "doc_item_wi_links");
-  if (wiLeftover) return err(`New version created (${created.id}) but ${wiLeftover}`);
-
-  // Transfer doc_item_xproject_links: forward direction (from_item = old → new) — D-074.
-  const { error: xprojFwdErr } = await db
-    .from(DOC_ITEM_XPROJECT_LINKS)
-    .update({ from_item: created.id })
-    .eq("from_item", old.id);
-  if (xprojFwdErr) return err(`Failed to transfer forward doc_item_xproject_links: ${xprojFwdErr.message}`);
-  const xprojFwdLeftover = await assertLinkTransferred(db, DOC_ITEM_XPROJECT_LINKS, "from_item", old.id, "forward doc_item_xproject_links");
-  if (xprojFwdLeftover) return err(`New version created (${created.id}) but ${xprojFwdLeftover}`);
-
-  // Transfer doc_item_xproject_links: reverse direction (to_item = old → new) — D-074.
-  const { error: xprojBwdErr } = await db
-    .from(DOC_ITEM_XPROJECT_LINKS)
-    .update({ to_item: created.id })
-    .eq("to_item", old.id);
-  if (xprojBwdErr) return err(`Failed to transfer reverse doc_item_xproject_links: ${xprojBwdErr.message}`);
-  const xprojBwdLeftover = await assertLinkTransferred(db, DOC_ITEM_XPROJECT_LINKS, "to_item", old.id, "reverse doc_item_xproject_links");
-  if (xprojBwdLeftover) return err(`New version created (${created.id}) but ${xprojBwdLeftover}`);
+  // Repoint every link direction (doc_item_links from/to, doc_item_gtd_links,
+  // doc_item_wi_links, doc_item_xproject_links from/to) atomically via
+  // gov.relink_superseded (D-133, dba msg 2b4acbcc, migration 20260816100000).
+  // SECURITY DEFINER — bypasses the RLS gap where doc_rw has no UPDATE policy on
+  // these tables (a direct .update() used to silently affect 0 rows, no error).
+  // MUST run after old is marked superseded and new is inserted: the function
+  // REJECTS (23514) unless old.status='superseded' — the "occasion" constraint
+  // (a repoint outside a supersede has no meaning, loomy-decided).
+  const relinkDb = db as unknown as {
+    __docRw?: boolean;
+    relinkSuperseded?: (oldItemId: string, newItemId: string) => Promise<number>;
+  };
+  if (!relinkDb.__docRw || !relinkDb.relinkSuperseded) {
+    return err(
+      `New version created (${created.id}) but link transfer could not run: db is not a DocRwDb. ` +
+      `gov.relink_superseded lives in the gov schema and is only reachable via the doc_rw direct-pg ` +
+      `path (runDocRw) — route doc_supersede through it. Test fakes must implement relinkSuperseded.`
+    );
+  }
+  let relinkedRows: number;
+  try {
+    relinkedRows = await relinkDb.relinkSuperseded(old.id, created.id);
+  } catch (ex) {
+    const msg = ex instanceof Error ? ex.message : String(ex);
+    return err(`New version created (${created.id}) but link transfer (gov.relink_superseded) failed: ${msg}`);
+  }
 
   // Edge: new --supersedes--> old (same project → FK satisfied).
   const { data: linkRow, error: linkErr } = await db
@@ -724,7 +674,7 @@ export async function docSupersede(
     .maybeSingle();
   if (linkErr || !linkRow) return err(`New version created (${created.id}) but supersede edge failed: ${linkErr?.message ?? "no row"}`);
 
-  return { ok: true, data: { new_item_id: created.id, old_item_id: old.id, link_id: (linkRow as any).id, code: created.code } };
+  return { ok: true, data: { new_item_id: created.id, old_item_id: old.id, link_id: (linkRow as any).id, code: created.code, relinked_rows: relinkedRows } };
 }
 
 // ---------------------------------------------------------------------------

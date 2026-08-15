@@ -4,6 +4,28 @@
 
 ---
 
+## Sessione #77 — 2026-08-16 (Wake dba: gov.relink_superseded applicata — sblocca doc_supersede)
+
+**Autopilot dispatch (cold-wake, D-093).** Msg `2b4acbcc` (dba, wake high). **WI** `f0ad5cc9` su GTD `6637405b` (stopgap sessione #76). Modello: sonnet.
+
+**Cosa:** dba ha applicato `gov.relink_superseded(p_old_item, p_new_item) RETURNS integer` (migration `20260816100000`, `SECURITY DEFINER`, `EXECUTE` a `doc_rw`+`service_role`, non esposta via PostgREST — solo via connessione diretta doc_rw). Ripunta atomicamente tutte e sei le direzioni (`doc_item_links.from_item`/`.to_item`, `doc_item_gtd_links.doc_item_id`, `doc_item_wi_links.doc_item_id`, `doc_item_xproject_links.from_item`/`.to_item`) e ritorna il rowcount. Rifiuta (`23514`) se `old.status <> 'superseded'` — vincolo di "occasione": un repoint fuori da un supersede non ha significato.
+
+**Fatto:**
+- `src/docDb.ts`: aggiunto `relinkSuperseded(oldItemId, newItemId): Promise<number>` a `DocRwDb`, stesso pattern di `resolveDocItem` (`exec("SELECT gov.relink_superseded($1::uuid, $2::uuid) AS n", ...)`)
+- `src/docs.ts`: `docSupersede` — rimossi i 6 `.update()`+`assertLinkTransferred()` (righe ~665-717, stopgap sessione #76) sostituiti con UNA chiamata a `relinkSuperseded` dopo che il vecchio è marcato superseded e il nuovo inserito (stesso ordine richiesto dalla funzione). Se `db` non è una `DocRwDb` (niente `relinkSuperseded`), `doc_supersede` rifiuta esplicitamente invece di silenziosamente saltare il transfer — non reintroduce il vecchio gap come fallback. Risposta arricchita con `relinked_rows` (il rowcount della funzione, niente più da dedurre — D-133).
+- `assertLinkTransferred()` rimossa (dead code, sostituita dalla garanzia atomica della funzione).
+- `tests/docs.test.ts`: fake `DocRwDb` aggiorna `relinkSuperseded` (ripunta le 4 tabelle nello store in-memory); riscritto il test di regressione RLS-gap (simulava `.update()` bloccato — non più applicabile, `docSupersede` non fa più `.update()` diretto sui link) per simulare invece un fallimento di `relinkSuperseded` (es. `23514`); aggiunto un test per il refusal quando `db` non è `DocRwDb`.
+- `npx tsc` pulito, 125/125 test verdi (`npm test`).
+- Non eseguito uno smoke test live contro la function reale (DOC_RW_DATABASE_URL presente in `.mcp.json` ma nessun path di cleanup via DELETE disponibile sotto `doc_rw` — avrebbe lasciato dati di test permanenti nel progetto board-mcp). Copertura: 9 asserzioni comportamentali già verificate dal dba sotto `doc_rw` reale + unit test locali sullo stesso pattern di wiring di `resolveDocItem` (già in produzione).
+
+**Secondo passo (dba, non azionabile da qui):** `REVOKE UPDATE` sulle 4 tabelle + `DROP` delle 2 policy `UPDATE` superstiti (`doc_item_gtd_links_update`, `doc_item_wi_links_update`) — dba aspetta conferma che il commit sia shippato prima di applicarlo (altrimenti un `doc_supersede` di item con SOLO link gtd/wi, oggi ancora funzionante via quelle 2 policy, si romperebbe).
+
+**Decisioni prese:** nessuna nuova.
+**Blocchi / note:** nessuno — GTD `6637405b` chiuso done. `board_send` a dba (done, ref `2b4acbcc`) per sbloccare il secondo passo (REVOKE).
+**Prossima sessione:** nessuna prevista — verificare a distanza se dba conferma il REVOKE applicato.
+
+---
+
 ## Sessione #76 — 2026-08-16 (Wake loomy: doc_item_links mutabili? — trovato bug live in doc_supersede, stopgap shippato)
 
 **Autopilot dispatch (cold-wake, D-093).** Msg `40ef3e30` (loomy, wake normal). **WI** `1303b581` (force_ephemeral: nessun REQ/SDES pre-esistente, gap scoperto durante la stessa WI). Modello: sonnet.

@@ -36,6 +36,8 @@ function makeDb(store: Store): SupabaseClient {
   store.doc_items ??= [];
   store.doc_item_links ??= [];
   store.doc_item_gtd_links ??= [];
+  store.doc_item_wi_links ??= [];
+  store.doc_item_xproject_links ??= [];
   store.loomx_projects ??= [];
 
   function query(table: string) {
@@ -167,39 +169,39 @@ function makeDb(store: Store): SupabaseClient {
     return item.id as string;
   };
 
-  return { from: (table: string) => query(table), __docRw: true, resolveDocItem } as unknown as SupabaseClient;
+  // Mimics gov.relink_superseded (D-133): repoint every link direction across all
+  // four tables from oldItemId → newItemId, return the total rows touched. The real
+  // function is SECURITY DEFINER, so unlike a plain doc_rw .update() it can never
+  // silently affect 0 rows on a missing RLS policy.
+  const relinkSuperseded = async (oldItemId: string, newItemId: string): Promise<number> => {
+    let n = 0;
+    const repoint = (rows: Row[], col: string) => {
+      for (const r of rows) {
+        if (r[col] === oldItemId) { r[col] = newItemId; n++; }
+      }
+    };
+    repoint(store.doc_item_links, "from_item");
+    repoint(store.doc_item_links, "to_item");
+    repoint(store.doc_item_gtd_links, "doc_item_id");
+    repoint(store.doc_item_wi_links, "doc_item_id");
+    repoint(store.doc_item_xproject_links, "from_item");
+    repoint(store.doc_item_xproject_links, "to_item");
+    return n;
+  };
+
+  return { from: (table: string) => query(table), __docRw: true, resolveDocItem, relinkSuperseded } as unknown as SupabaseClient;
 }
 
-// Simulates the RLS gap loomy flagged (msg 40ef3e30, 2026-08-15): a table with no
-// UPDATE policy for the executing role silently affects 0 rows, no error. Wraps a
-// normal fake db so any .update() call against `blockedTable` is swallowed (never
-// reaches the store), while .select() against the same table still reads it —
-// exactly what a real "UPDATE grant missing, SELECT grant present" split looks like.
-function makeDbSilentlyBlockUpdates(store: Store, blockedTable: string): SupabaseClient {
+// Simulates gov.relink_superseded raising an error (e.g. the SECURITY DEFINER
+// function's own guards, or a transient failure) — docSupersede must fail loud
+// (not ok:true) rather than leave the new version's links untransferred.
+function makeDbWithFailingRelink(store: Store, errorMessage: string): SupabaseClient {
   const real = makeDb(store) as any;
   return {
-    from(table: string) {
-      const rb = real.from(table);
-      if (table !== blockedTable) return rb;
-      let blocked = false;
-      const wrapped: any = {
-        select(...a: any[]) { rb.select(...a); return wrapped; },
-        eq(...a: any[]) { rb.eq(...a); return wrapped; },
-        in(...a: any[]) { rb.in(...a); return wrapped; },
-        limit(...a: any[]) { rb.limit(...a); return wrapped; },
-        insert(...a: any[]) { rb.insert(...a); return wrapped; },
-        delete(...a: any[]) { rb.delete(...a); return wrapped; },
-        update(data: Row) { blocked = true; return wrapped; }, // swallowed: never applied
-        maybeSingle() { return blocked ? Promise.resolve({ data: null, error: null }) : rb.maybeSingle(); },
-        single() { return blocked ? Promise.resolve({ data: null, error: { message: "No rows returned" } }) : rb.single(); },
-        then(onF: any, onR: any) {
-          return (blocked ? Promise.resolve({ data: null, error: null }) : rb).then(onF, onR);
-        },
-      };
-      return wrapped;
-    },
+    from: (table: string) => real.from(table),
     __docRw: true,
     resolveDocItem: real.resolveDocItem,
+    relinkSuperseded: async () => { throw new Error(errorMessage); },
   } as unknown as SupabaseClient;
 }
 
@@ -401,10 +403,10 @@ test("doc_supersede: transfers doc_item_links (forward + reverse) and doc_item_g
   assert.equal(gtdOnOld, undefined, "no doc_item_gtd_link left on old item");
 });
 
-test("doc_supersede: fails loud (not ok:true) when doc_item_links UPDATE is silently blocked (RLS-gap regression, msg 40ef3e30)", async () => {
+test("doc_supersede: fails loud (not ok:true) when gov.relink_superseded fails (D-133 regression of msg 40ef3e30's RLS-gap finding)", async () => {
   const store: Store = {};
   seedProjects(store);
-  const db = makeDbSilentlyBlockUpdates(store, "doc_item_links");
+  const db = makeDbWithFailingRelink(store, "old.status <> 'superseded' (23514)");
 
   const doc = await docCreate(db, { project_id: PROJ_A, document_type: "sdes", title: "Sdes" }, ctx);
   const docId = (doc as any).data.document_id;
@@ -421,13 +423,30 @@ test("doc_supersede: fails loud (not ok:true) when doc_item_links UPDATE is sile
 
   const sup = await docSupersede(db, { old_item_id: oldId, body: "v2" }, ctx);
   assert.equal(sup.ok, false, "must fail loud, not silently succeed with an orphaned link");
-  assert.match((sup as any).error, /did not transfer/i);
-  assert.match((sup as any).error, /UPDATE grant|RLS/i);
+  assert.match((sup as any).error, /link transfer .*gov\.relink_superseded.* failed/i);
 
   // The link is still on the (now immutable, superseded) old item — orphaned, but
   // at least the caller was told, instead of getting a false ok:true.
   const stillOnOld = store.doc_item_links.find((l) => l.from_item === oldId && l.relation_type === "satisfies");
-  assert.ok(stillOnOld, "link left dangling on the superseded item, as the blocked UPDATE predicts");
+  assert.ok(stillOnOld, "link left dangling on the superseded item when relink fails");
+});
+
+test("doc_supersede: refuses (not ok:true) when db is not a DocRwDb — no silent fallback to the old direct-update gap", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const real = makeDb(store) as any;
+  // A plain (non-doc_rw) client: same query surface, but no __docRw/relinkSuperseded —
+  // exactly what a service_role client looks like. Must not silently reintroduce the
+  // 6-.update() pattern the RPC replaced.
+  const db = { from: (table: string) => real.from(table) } as unknown as SupabaseClient;
+
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "sdes", title: "Sdes" }, ctx);
+  const upOld = await docItemUpsert(db, { project_id: PROJ_A, document_id: (doc as any).data.document_id, item_type: "sdes_entry", code: "SDES-021", body: "v1" }, ctx);
+  const oldId = (upOld as any).data.item_id;
+
+  const sup = await docSupersede(db, { old_item_id: oldId, body: "v2" }, ctx);
+  assert.equal(sup.ok, false, "must refuse, not silently skip the link transfer");
+  assert.match((sup as any).error, /not a DocRwDb/i);
 });
 
 test("doc_query traceability: req_without_sdes flags uncovered REQ then clears after link", async () => {
