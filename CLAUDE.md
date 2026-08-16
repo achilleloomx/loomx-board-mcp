@@ -202,7 +202,7 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 - **Gate rollout (`LOOMX_RW_GUARDS_ENABLED`, default off, `src/flags.ts`):** con flag OFF entrambi i guard **calcolano** il risultato ma non toccano risposta né DB — solo log stderr `[wi_end][dry-run] would-warn/would-set`. Stesso gate su `board_send` (hint c2, vedi Board Tools). Mandato Achille D-118: "niente flip senza suite verde" — vedi HISTORY per lo stato del catalogo eval `E2E-RW-*` (loomx_evals, gap DBA-side alla release v0.15.0).
 
 **Gate durable (D-074):** `wi_end(status='done')` su WI con `template_name` NON in `EPHEMERAL_TEMPLATES` e layer ≠ `on-the-fly` richiede ≥1 link `doc_item_wi_links` verso un `requirement`, `sdes_entry` o `decision`. Fallisce con errore se il gate non passa. **`decision` accettato (v0.16.2, msg loomy 3fb74e48, GTD f5562c40):** D-074 stesso descrive la catena come `Decisione → REQ → SDES → Config/Schema` — un WI di governance/coordinamento il cui artefatto durevole È la decisione (non un REQ/SDES a valle) può linkarla direttamente invece di dichiarare `force_ephemeral=true` (che affermerebbe il falso: "nessun artefatto durevole").
-`EPHEMERAL_TEMPLATES = ['session-meta', 'triage', 'conversation']` — questi WI e quelli on-the-fly bypassano automaticamente il gate.
+`EPHEMERAL_TEMPLATES = ['session-meta', 'triage', 'conversation', 'audit-agent-alignment']` — questi WI e quelli on-the-fly bypassano automaticamente il gate. (`audit-agent-alignment`: report interno, nessun REQ/SDES a valle — loomy-approved, msg f7447db6.)
 
 **Derivazione `template_layer`:** se non fornito esplicitamente (`wi_start` / `wi_link_template`), viene derivato da `template_name`:
 - ≤2 segmenti (`fix-bug`, `menu-plan`) → `L1`
@@ -269,8 +269,6 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 > **Fallback RACI:** se il progetto non ha righe in `loomx_sow_raci`, la risposta ritorna `raci: null` + `fallback.owner = loomx_projects.agent_id` (comportamento attuale, D-091).
 >
 > **Nota persone in RACI:** `loomx_sow_raci.person_id` non ha ancora FK verso `loomx_people` (tabella non esiste, D-084 pending) — i soggetti persona vengono ritornati come `person:<uuid>` finché la tabella non atterra.
->
-> **Gap noto (bloccante per `project=`):** il ruolo nativo `board-mcp` (backend `DATABASE_URL`, D-084) non ha GRANT SELECT su `loomx_projects` — stesso stesso gap di `loomx_item_projects` risolto ieri, ma esteso a `loomx_projects` stessa. `project_list` e `org_lookup(project=...)` falliscono con `permission denied for table loomx_projects` per qualunque agente diverso da loomy. Segnalato a DBA (GTD + board_send), non risolvibile lato board-mcp.
 
 ### Document Model Tools (documents / doc_items — D-a5 F1)
 
