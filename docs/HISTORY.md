@@ -4,6 +4,18 @@
 
 ---
 
+## Sessione #82 — 2026-08-16 (org_lookup espone ratification loomx_sow_raci — D-091 step 3, msg dba `a442433b`)
+
+**Wake cold-start (D-093, normal).** dba: la migration DDL su `loomx_sow_raci` è applicata (Supabase + replica VPS 5433) — 8 colonne nuove (`status`, `proposed_by`, `ratified_by`, `ratified_at`, `ratification_kind`, `ratification_recorded_by`, `ratification_recorded_at`, `ratification_evidence`). Passo 3 della sequenza D-091 (`1→2→3→4→5`) delegato da Loomy direttamente a board-mcp↔dba, senza passare da lui. **WI** `7743b24a`.
+
+**Fatto:** `org_lookup(project=...)` — select allargato da 5 a 12 colonne (`src/tools.ts:1931`); aggiunto blocco `ratification` di primo livello nella risposta (`state: proposed|ratified|mixed|undeclared` + `warning` per tutto tranne `ratified`; per `ratified` porta `ratified_by`/`ratified_at` e — solo se `ratification_kind='attested'` — `ratification_recorded_by`). Righe con `ratified_by`/`ratified_at`/`kind` disallineati tra loro (caso raro, matrice ratificata in più atti) non vengono collassate a un valore indovinato: escono come `ratification.by[]`, una entry per combinazione distinta. Build+test verdi (126/126, nessuna regressione sui test esistenti — nessuna suite copriva ancora `org_lookup` RACI). Commit `1bd5053`.
+
+**Decisione presa (delegata da dba, non richiede DBA):** per un futuro tool di scrittura ratifiche, scelto il path 1 (riuso `DOC_RW_DATABASE_URL` + `loomx_set_agent_slug`, stesso pattern F4.5 già cablato per i `doc_*`) invece del path 2 (RPC dedicata `loomx_sow_raci_ratify` scritta da dba). Motivo: stesso modello di fiducia (board-mcp dichiara il proprio slug fidato, non un parametro dell'agente remoto), zero lavoro nuovo lato dba, nessuna superficie RPC aggiuntiva. Nessun tool di scrittura implementato in questa sessione — dba scrive le 6 righe RACI di `loomx-ai-governance` con `status='proposed'` **dopo** il rilascio di questa modifica (ordine dettato nel messaggio, per non far apparire una proposta come matrice ratificata durante il rollout).
+
+**Blocchi / note:** nessuno. Msg `a442433b` ackato; risposta inviata a dba con l'esito + la decisione di path.
+
+---
+
 ## Sessione #81 — 2026-08-16 (riparazione delle 3 divergenze CLAUDE.md misurate in Track B: CFG-063, CFG-088, CFG-076)
 
 **Autopilot dispatch.** GTD `a2ddc6ef` (rinviato da sessione #80: *«Non risolvere nulla adesso: registra. Le riparazioni vengono dopo, su un corpus misurato»* — il corpus ora esiste). **WI** `a3b9cc4c`. Modello: sonnet (meccanico, nessuna decisione di governance).
