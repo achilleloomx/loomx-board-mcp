@@ -790,6 +790,30 @@ test("wi_end (D-074 gate): durable WI with REQ link passes gate", async () => {
   assert.equal(res.ok, true, "durable WI with linked REQ must pass gate");
 });
 
+test("wi_end (D-074 gate): durable WI with decision link passes gate (loomy msg 3fb74e48)", async () => {
+  const decId = "decision-uuid-001";
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      {
+        id: "wi-1",
+        agent_slug: "app",
+        gtd_item_id: "gtd-1",
+        status: "active",
+        side_effects_log: [],
+        template_name: "decision-enforcement",
+        template_layer: "L1",
+      },
+    ],
+    doc_item_wi_links: [{ id: "link-1", wi_id: "wi-1", doc_item_id: decId }],
+    doc_items: [{ id: decId, item_type: "decision" }],
+  };
+  const db = makeDb(store);
+  const fakeRunDoc = async (_slug: string, fn: (db: SupabaseClient) => Promise<unknown>) => fn(db);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxOwn, fakeRunDoc as never);
+  assert.equal(res.ok, true, "durable WI with linked decision must pass gate — a governance WI's durable output is a decision, not a REQ/SDES");
+});
+
 test("wi_end (D-074 gate): gate reads go through runDoc keyed on the WI owner's slug, not the plain db", async () => {
   // Regression for the bug where checkDurableGate queried doc_item_wi_links/doc_items
   // with the plain board client — under RLS (D-015) that silently returns 0 rows even

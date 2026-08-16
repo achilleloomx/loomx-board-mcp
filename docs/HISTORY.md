@@ -4,6 +4,22 @@
 
 ---
 
+## Sessione #79 — 2026-08-16 (Wake loomy: gate D-074 accetta ora `decision` — force_ephemeral non è più l'unica uscita per un WI di governance)
+
+**Autopilot dispatch (cold-wake, D-093).** Msg `3fb74e48` (loomy, wake normal). **WI** `a6cc2321` su GTD `f5562c40`. Modello: sonnet (bug fix mirato, nessun design nuovo).
+
+**Cosa:** loomy ha segnalato un difetto trovato usando il gate, non ispezionandolo: chiudendo il WI `40d191a7` (coordinamento decision-enforcement), `checkDurableGate` (`src/wi.ts`) accettava solo doc item di tipo `requirement`/`sdes_entry` via `doc_item_wi_links` — ma gli artefatti di quel WI erano **decisioni** (D-147, D-148 nuove + D-145/D-146 aggiornate). Linkate via `doc_link`, il gate le ha rifiutate per tipo. L'unica uscita era `force_ephemeral=true`, che dichiara "questo WI non ha artefatti durevoli" — l'opposto del vero. Stessa classe dei difetti "risposta comoda al posto di quella vera" censiti in sessione #76/#78 (`doc_supersede` 0 righe silenziose, `wi_checkpoint` ok:true su WI chiuso).
+
+**Verifica prima del fix:** D-074 stessa (letta da doc_query sul progetto hub) descrive la catena come `Decisione → Requisito (REQ) → Design (SDES) → Config/Schema → Implementazione` — la Decisione è il capo della catena, non un tipo escluso. Il codice era quindi più restrittivo del testo della decisione che doveva applicare: non serviva una nuova decisione, serviva allineare il gate a D-074 così com'è scritta.
+
+**Fix (`src/wi.ts`, `checkDurableGate`):** `item_type === "decision"` ora accettato accanto a `requirement`/`sdes_entry`, sia nel check "0 link" sia nel check "link presenti ma nessuno tracciabile". Messaggi d'errore aggiornati per menzionare `decision` come opzione valida. Descrizione tool `wi_end` (`src/tools.ts`) e sezione Gate durable in CLAUDE.md aggiornate di conseguenza. Test di regressione aggiunto (`tests/wi.test.ts`): WI con link a un doc_item `decision` passa il gate. Suite 126/126 verde, build pulita.
+
+**Decisioni prese:** nessuna nuova — allineamento codice↔D-074 esistente, non una decisione nuova.
+**Blocchi / note:** fix non ancora live sulle finestre già aperte (nessun meccanismo di reload per MCP stdio, vedi CLAUDE.md "Rollout di un nuovo build") — richiede un nuovo processo CLI per essere caricato. Segnalato a loomy via board_send, nessun restart forzato di flotta di mia iniziativa.
+**Prossima sessione:** nessuna prevista — loomy può ri-collegare D-147/D-148 al WI `40d191a7` con `doc_link` una volta che la sua finestra carica il build aggiornato (o farlo un'altra finestra già fresca).
+
+---
+
 ## Sessione #78 — 2026-08-16 (Chiusura amministrativa D-100: no_auto_arm verificato E2E live, mai chiuso dopo il fix trigger di sessione #57)
 
 **Autopilot dispatch (D-052).** GTD `4edd99de` (in coda da sessione #55, 2026-07-21). **WI** `a9dfc1b2`. Modello: sonnet (verifica, nessun design).

@@ -68,9 +68,11 @@ async function checkDurableGate(
 
     if (!Array.isArray(wiLinks) || wiLinks.length === 0) {
       return (
-        `Durable WI '${wiId}' must have ≥1 requirement or sdes_entry linked via doc_item_wi_links. ` +
+        `Durable WI '${wiId}' must have ≥1 requirement, sdes_entry, or decision linked via doc_item_wi_links. ` +
         `Use doc_link(target_kind="wi", from_id=<req_uuid>, to_id="${wiId}") or ` +
         `doc_link_by_code(from_code="REQ-NNN", to_id="${wiId}", project_id=...). ` +
+        `A governance/coordination WI whose durable output is a decision (D-074: Decisione is the top of the ` +
+        `Decisione→REQ→SDES chain) may link the decision item directly instead. ` +
         `Bypass with force_ephemeral=true + force_reason if this WI has no durable artifacts.`
       );
     }
@@ -83,14 +85,17 @@ async function checkDurableGate(
 
     const traced = Array.isArray(docItems)
       ? (docItems as { item_type: string }[]).filter(
-          (d) => d.item_type === "requirement" || d.item_type === "sdes_entry"
+          (d) =>
+            d.item_type === "requirement" ||
+            d.item_type === "sdes_entry" ||
+            d.item_type === "decision"
         )
       : [];
 
     if (traced.length === 0) {
       return (
-        `Durable WI '${wiId}' has ${ids.length} linked doc item(s) but none are requirement or sdes_entry. ` +
-        `Ensure the linked items are typed correctly or link a proper REQ/SDES.`
+        `Durable WI '${wiId}' has ${ids.length} linked doc item(s) but none are requirement, sdes_entry, or decision. ` +
+        `Ensure the linked items are typed correctly or link a proper REQ/SDES/decision.`
       );
     }
 

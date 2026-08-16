@@ -2803,7 +2803,7 @@ export function registerTools(
     [
       "Close a Work Item. status='done'|'failed'|'waiting'. GTD status cascades (done→done, waiting→waiting, failed→next_action).",
       "'waiting' maps to WI.status='paused' (DB CHECK constraint — see CLAUDE.md WI section).",
-      "Phase 1 D-074 gate (REQ-033): durable WIs (non-ephemeral template) closing as 'done' require ≥1 REQ/SDES linked via doc_item_wi_links.",
+      "Phase 1 D-074 gate (REQ-033): durable WIs (non-ephemeral template) closing as 'done' require ≥1 REQ/SDES/decision linked via doc_item_wi_links (decision covers governance/coordination WIs whose durable output is itself a decision).",
       "Use force_ephemeral=true to bypass (audit-logged). Phase 1 D-074: arm_gtd_ids arms follow-on GTDs post-close (soft-warn). platform_contribution triggers pull enabler D-045.",
     ].join(" "),
     {
