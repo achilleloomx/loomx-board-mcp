@@ -4,6 +4,21 @@
 
 ---
 
+## Sessione #81 — 2026-08-16 (riparazione delle 3 divergenze CLAUDE.md misurate in Track B: CFG-063, CFG-088, CFG-076)
+
+**Autopilot dispatch.** GTD `a2ddc6ef` (rinviato da sessione #80: *«Non risolvere nulla adesso: registra. Le riparazioni vengono dopo, su un corpus misurato»* — il corpus ora esiste). **WI** `a3b9cc4c`. Modello: sonnet (meccanico, nessuna decisione di governance).
+
+**Le 3 riparazioni:**
+1. `EPHEMERAL_TEMPLATES` (CFG-063): CLAUDE.md dichiarava 3 voci, il build (`src/wi.ts`) ne ha 4 — mancava `audit-agent-alignment` (loomy-approved, msg `f7447db6`). Riga aggiornata con la voce mancante + nota inline.
+2. Gap `loomx_projects`/`project_list` (CFG-088): riverificato live (`project_list` → 5 righe, nessun `permission denied`) — il GRANT è stato applicato. Rimosso il blocco «Gap noto (bloccante per `project=`)» in CLAUDE.md, ormai falso.
+3. `package.json` version (CFG-076): `0.16.1` → `0.16.2` per allinearsi alle feature già documentate a quella versione (D-074 decision-link, sessione #79). Nessuna decisione presa sul release-process (bump-ad-ogni-commit resta di loomy/it-manager, vedi CFG-076).
+
+**Codice:** `CLAUDE.md` (2 righe), `package.json` (1 riga). Commit `8c6629c`. Nessun impatto su `src/` — solo drift documentazione↔build. `package-lock.json` resta a `0.5.0` (stale, fuori scope: non uno dei 3 item del GTD).
+
+**Blocchi / note:** nessuno. GTD `a2ddc6ef` chiuso done.
+
+---
+
 ## Sessione #80 — 2026-08-16 (Track B: riconciliazione configurazioni board-mcp → 30 `config_pattern` CFG-061..090, misurate sul build che gira)
 
 **Autopilot dispatch (cold-wake, D-093).** Msg `d3c12d86` (loomy, wake normal, requested_model opus). **WI** `a0cf88e8` su GTD `38462ecb`. Ordine di Achille: *«ogni agente che ha configurato qualcosa deve verificarlo rispetto a quanto ha configurato e scrivere le config»* — riconciliazione, non documentazione. F3 congelato finché il piano non è in DB.
