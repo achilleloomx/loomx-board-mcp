@@ -4,6 +4,30 @@
 
 ---
 
+## Sessione #80 — 2026-08-16 (Track B: riconciliazione configurazioni board-mcp → 30 `config_pattern` CFG-061..090, misurate sul build che gira)
+
+**Autopilot dispatch (cold-wake, D-093).** Msg `d3c12d86` (loomy, wake normal, requested_model opus). **WI** `a0cf88e8` su GTD `38462ecb`. Ordine di Achille: *«ogni agente che ha configurato qualcosa deve verificarlo rispetto a quanto ha configurato e scrivere le config»* — riconciliazione, non documentazione. F3 congelato finché il piano non è in DB.
+
+**Regola di misura applicata:** misurato **dal build che gira** (`dist/`, rigenerato 2026-08-16 08:19:14 +0200, allineato a HEAD `b23cd04`), non dal sorgente su disco; e dove possibile con **probe live** invece che per lettura del codice.
+
+**Le 5 divergenze contratto↔reale trovate:**
+
+1. **`doc_supersede` NON è bloccato** (CFG-068) — il brief lo dava per «impatto vivo, bloccato finché non arriva la policy UPDATE scoped». Probe live: creati 2 item + link, superseduto il target → `ok: true, relinked_rows: 1`. Il link è stato ri-puntato. Il brief descriveva lo stato fra `9e3b025` (00:10) e `34cbc0a` (00:50) + migration DBA `20260816100000`/`110000`; alle 07:xxZ il percorso è sano. Scrivere la config ordinata avrebbe dichiarato rotto un percorso funzionante.
+2. **`EPHEMERAL_TEMPLATES` ha 4 voci, CLAUDE.md ne dichiara 3** (CFG-063) — `audit-agent-alignment` bypassa il gate D-074 in produzione, tracciato solo in un commento inline che cita un'approvazione via messaggio (`f7447db6`).
+3. **`project_list` funziona** (CFG-088) — CLAUDE.md lo dà per `permission denied for table loomx_projects`. Chiamata live dal ruolo nativo: 5 righe. Il GRANT è stato applicato senza aggiornare la documentazione. Divergenza «a favore», ma è lavoro non fatto perché creduto impossibile.
+4. **`PACKAGE_VERSION` è `0.16.1`** (CFG-076) mentre il build contiene feature documentate v0.16.2 — l'unico candidato a segnale di build è falso, non solo assente. E comunque `/mcp` non lo espone.
+5. **QUARTA OCCORRENZA D-133** (CFG-083) — `WI_TEMPLATES_PATH` non è settata in **0 su 22** `.mcp.json` di flotta: la validazione `template_name` è un **no-op silenzioso su tutta la flotta dal rilascio v0.10.2**. Prova diretta: ho aperto il WI di questa sessione con `template_name: "config-reconciliation"`, nome inventato, e la risposta non ha alcun `template_warning`. Non è un rowcount — è la stessa patologia: l'assenza del campo significa indistinguibilmente «valido» e «non ho controllato». Il periodo di grazia prima dell'hard-fail è stato dimensionato assumendo soft-warn che non sono mai arrivati a nessuno.
+
+**Rollout (CFG-074..077), misurato live con `ps -eo lstart`:** 5 processi MCP vivi, **2 stale (40%)**. La window di `loomy` è nata 15/08 alle 10:16:55 — **7 commit funzionali indietro**, 16'20" prima del commit `fb12b19` che ripara `wi_checkpoint`. Quindi: il fix D-074 `decision` che loomy ha ringraziato stamattina **non è disponibile alla window da cui ha scritto**, e sul suo processo `wi_checkpoint` risponde ancora `ok:true` su WI chiuso. Conseguenza generalizzata (CFG-077, D-136 §5): *la data di un commit non è la data in cui una capacità è disponibile alla flotta* — un obbligo su tool nuovo non è verificabile alla data in cui viene emesso, perché «non conforme» e «non ce l'ha» sono indistinguibili dall'esterno.
+
+**Blocco sulla destinazione (CFG-090):** il documento prescritto dal brief (`794e873c…`, progetto hub) **non esiste**, e board-mcp **non può crearlo** — `doc_create` sull'hub → `new row violates row-level security policy for table "documents"`. Discriminato da un problema di visibilità: `doc_query(hub, item_type=decision)` risponde 5 righe, quindi il progetto è leggibile. È il confine D-005/D-015 che funziona. Non bloccato (autopilot): creato il documento `de6879a4-4d1e-4905-8cae-2bf4be81ebb8` nel progetto board-mcp `596cd5fc`, scritte tutte e 30 le righe nel range assegnato senza sconfinare. I codici sono unici *per progetto*, quindi nessun conflitto con l'hub; la migrazione è meccanica quando il documento esisterà.
+
+**Ritrovamento a margine — il gate D-074 non accetta `config_pattern`:** il WI di questa sessione produce 30 righe durevoli di un tipo che il gate rifiuta. Stessa identica forma del gap `decision` chiuso stamattina con `b23cd04`. Non riparato di iniziativa (ordine: registrare, non riparare); proposto a loomy.
+
+**Codice:** nessuna modifica a `src/`. Sessione di sola misura, come da ordine («Non risolvere nulla adesso: registra»). 126/126 test verdi, misurati non ricordati.
+
+---
+
 ## Sessione #79 — 2026-08-16 (Wake loomy: gate D-074 accetta ora `decision` — force_ephemeral non è più l'unica uscita per un WI di governance)
 
 **Autopilot dispatch (cold-wake, D-093).** Msg `3fb74e48` (loomy, wake normal). **WI** `a6cc2321` su GTD `f5562c40`. Modello: sonnet (bug fix mirato, nessun design nuovo).
