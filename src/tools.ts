@@ -1930,7 +1930,9 @@ export function registerTools(
 
         let raciQuery = db
           .from(SOW_RACI_TABLE)
-          .select("agent_slug, person_id, raci, scope_note, sow_id")
+          .select(
+            "agent_slug, person_id, raci, scope_note, sow_id, status, ratified_by, ratified_at, ratification_kind, ratification_recorded_by, ratification_recorded_at, ratification_evidence"
+          )
           .eq("project_id", projectRow.id);
         if (sow) raciQuery = raciQuery.eq("sow_id", sow);
         if (raci) raciQuery = raciQuery.eq("raci", raci);
@@ -1993,6 +1995,53 @@ export function registerTools(
           matrix[r.raci].push(entry);
         }
 
+        // D-091 step 3 (dba msg a442433b): first-level ratification marker —
+        // consumers read `raci`/print it, not row-by-row status.
+        const statuses = new Set(rows.map((r) => r.status ?? null));
+        let state: "proposed" | "ratified" | "mixed" | "undeclared";
+        if (statuses.size === 1) {
+          const only = [...statuses][0];
+          state = only === "proposed" ? "proposed" : only === "ratified" ? "ratified" : "undeclared";
+        } else {
+          state = "mixed";
+        }
+
+        const ratification: Record<string, unknown> = { state };
+        if (state === "proposed" || state === "mixed" || state === "undeclared") {
+          ratification.warning =
+            state === "undeclared"
+              ? "Matrice NON ratificata: nessuna dichiarazione di stato registrata."
+              : state === "mixed"
+                ? "Matrice PARZIALMENTE ratificata: righe con stato eterogeneo — verificare riga per riga."
+                : "Matrice NON ratificata: proposta in attesa di ratifica.";
+        }
+        if (state === "ratified") {
+          const ratifiedRows = rows.filter((r) => r.status === "ratified");
+          const distinctBy = [
+            ...new Set(
+              ratifiedRows.map((r) =>
+                JSON.stringify([r.ratified_by, r.ratified_at, r.ratification_kind, r.ratification_recorded_by])
+              )
+            ),
+          ];
+          if (distinctBy.length === 1) {
+            const first = ratifiedRows[0];
+            ratification.ratified_by = first.ratified_by;
+            ratification.ratified_at = first.ratified_at;
+            if (first.ratification_kind === "attested") {
+              ratification.ratification_recorded_by = first.ratification_recorded_by;
+            }
+          } else {
+            // Rows disagree on who/when — surface honestly instead of guessing one.
+            ratification.by = ratifiedRows.map((r) => ({
+              ratified_by: r.ratified_by,
+              ratified_at: r.ratified_at,
+              ratification_kind: r.ratification_kind,
+              ...(r.ratification_kind === "attested" ? { ratification_recorded_by: r.ratification_recorded_by } : {}),
+            }));
+          }
+        }
+
         return {
           content: [
             {
@@ -2000,6 +2049,7 @@ export function registerTools(
               text: JSON.stringify(
                 {
                   project: { id: projectRow.id, name: projectRow.name, short_name: projectRow.short_name },
+                  ratification,
                   raci: matrix,
                 },
                 null,
