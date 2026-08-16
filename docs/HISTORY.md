@@ -4,6 +4,30 @@
 
 ---
 
+## Sessione #83 — 2026-08-16 (doc_item_upsert: l'omissione smette di cancellare — v0.16.3, D-a5-upsert-patch-semantics)
+
+**Autopilot dispatch.** GTD `0cdffc2b` (urgent, armato da loomy la sera stessa in cui il difetto ha colpito una scrittura di massa sul corpus governance). **WI** `a312ef36`. Modello: opus (analisi strutturale del write-path + scelta di semantica).
+
+**Il difetto.** `docItemUpsert` scriveva `attrs` e `status` **incondizionatamente** da valori defaultati (`args.attrs ?? {}`, `args.status ?? spec.default_status`), mentre `body`/`priority`/`owner`/`sort_order` erano già condizionali (`!== undefined`). Un upsert del solo `status` azzerava quindi gli `attrs` rispondendo `ok:true` — il 16/08 ha tolto a `REQ-GOV-037` gli `acceptance_criteria` (2085 caratteri → 2) durante la ratifica di ~240 item, recuperati solo perché `doc_item_history` conserva la pre-immagine.
+
+**Misurato prima di progettare (punto 1 del GTD).** Passati in rassegna tutti i 23 write-path del server: `buildGtdUpdatePayload`, `wi_checkpoint`, `wi_end`, `wi_switch`, `runtime_request`, `home_grocery_update`, `home_menu_write` sono già patch o merge, e `doc_supersede` riportava già `args.attrs ?? old.attrs`. **Difetto di un singolo tool, non convenzione del layer** — quindi fix locale, nessuna riscrittura. La misura ha però trovato un **secondo campo con la stessa asimmetria, assente dalla segnalazione: `status`** — un upsert del solo `body` riportava un item `committed` al default del tipo (`draft`), sempre in silenzio.
+
+**Fatto (`src/docs.ts`, `src/tools.ts`):**
+- **PATCH dichiarato:** ogni campo opzionale omesso è conservato, `attrs` e `status` inclusi. `spec.default_status` resta un default di INSERT.
+- **`attrs:{}` esplicito continua a svuotare** (punto 3 del GTD: senza una via esplicita il problema si sposta e basta). Nessun valore sentinella nuovo — l'omissione era già lo stato valido.
+- **Niente più silenzio nell'altra direzione:** `warnings` quando una sostituzione di `attrs` scarta chiavi memorizzate (le nomina) o quando un `item_type` cambia in place; risposta con `fields_written`/`fields_preserved`.
+- **`_client_token` trasportato** attraverso una sostituzione di `attrs` — perderlo avrebbe spezzato in silenzio l'idempotenza `(document_id, client_token)`, sdoppiando l'item.
+- **Rilettura e confronto della riga prima di rispondere `ok`** (punto 4 / D-132), su INSERT e UPDATE. Chiude anche la variante D-133: sotto `doc_rw` in no-RETURNING mode un UPDATE negato da RLS tocca 0 righe **senza errore**, e la SELECT di follow-up restituiva comunque una riga → `ok:true` su una scrittura mai avvenuta. Ora è `ok:false` con il diff.
+- Descrizione del tool e parametri riscritti: l'asimmetria era «non documentata», ora la semantica è nel testo che l'agente legge prima di chiamare.
+
+**Verifica.** 134/134 unit (8 nuovi test di regressione, tutti falsificati contro il codice pre-fix) + `tests/verify-upsert-patch.ts`: 14 check sul **path di produzione reale** (direct-pg, ruolo `doc_rw`, RLS e JSONB veri) dentro una singola transazione chiusa con un rollback deliberato — zero residui nel corpus. La verifica live ha trovato un bug che i test non potevano vedere: **Postgres restituisce il JSONB con le chiavi riordinate**, quindi il confronto in rilettura segnalava un mismatch fantasma a ogni scrittura di `attrs`. Confronto reso canonico (chiavi ordinate ricorsivamente, ordine degli array preservato perché significativo).
+
+**Decisione registrata in DB:** `D-a5-upsert-patch-semantics` (project-local, `active`), linkata a WI e GTD. Codice **nominale** e non un `D-NNN`: i numeri locali collidono con i cross e la policy di loomy (msg `df951215`) è annotare, mai rinumerare — la famiglia `D-a5-*` è la convenzione già in uso per il document model.
+
+**Da sapere (rollout G4):** le finestre già aperte girano sul build precedente finché non ripartono — incluso chi sta scrivendo sul corpus adesso. Segnalato a loomy, nessun restart di flotta forzato di iniziativa propria.
+
+---
+
 ## Sessione #82 — 2026-08-16 (org_lookup espone ratification loomx_sow_raci — D-091 step 3, msg dba `a442433b`)
 
 **Wake cold-start (D-093, normal).** dba: la migration DDL su `loomx_sow_raci` è applicata (Supabase + replica VPS 5433) — 8 colonne nuove (`status`, `proposed_by`, `ratified_by`, `ratified_at`, `ratification_kind`, `ratification_recorded_by`, `ratification_recorded_at`, `ratification_evidence`). Passo 3 della sequenza D-091 (`1→2→3→4→5`) delegato da Loomy direttamente a board-mcp↔dba, senza passare da lui. **WI** `7743b24a`.

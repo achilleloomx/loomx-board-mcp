@@ -3434,20 +3434,24 @@ export function registerTools(
     "doc_item_upsert",
     `Insert or update a typed row of a document. IDEMPOTENT and RETURNS the item UUID. ` +
       `Idempotency key: (project_id, code) for coded items; else (document_id, client_token) or (document_id, sort_order). ` +
+      `UPDATE IS A PATCH: every optional field you OMIT is left untouched — attrs and status included. ` +
+      `A field you DO pass is written, and attrs is REPLACED wholesale (never merged), so re-pass every key you want to keep; ` +
+      `pass attrs:{} to empty it on purpose. Dropped attrs keys and in-place item_type changes come back in 'warnings'; ` +
+      `the response also reports fields_written / fields_preserved, and the row is re-read and compared before answering ok. ` +
       `attrs is validated against the item_type's JSON-Schema (call doc_item_types('<item_type>') for schema + example). ` +
-      `Defaults: status=type default (usually draft), sort_order=append. item_type ∈ {${ITEM_TYPES_LIST}}. ` +
+      `Insert-only defaults: status=type default (usually draft), sort_order=append. item_type ∈ {${ITEM_TYPES_LIST}}. ` +
       `Example: doc_item_upsert({project_id:"<uuid>", document_id:"<uuid>", item_type:"requirement", code:"REQ-001", body:"The system must…", attrs:{moscow:"must", acceptance_criteria:["x"]}}).`,
     {
       project_id: z.string().uuid().describe("Must equal the document's project (anti-divergence FK)"),
       document_id: z.string().uuid().describe("Parent document (from doc_create)"),
       item_type: z.string().describe(`Item type: ${ITEM_TYPES_LIST}`),
       code: z.string().optional().describe("Per-project code (e.g. REQ-001). Omit for prose/exec items. Idempotency key when present."),
-      body: z.string().optional().describe("Markdown content of the item"),
-      status: z.string().optional().describe("Per-item_type status (default: type default). doc_item_types shows allowed values."),
-      owner: z.string().optional().describe(`Owner slug (default: ${selfSlug})`),
-      priority: z.string().optional().describe("Free-text priority tag"),
-      sort_order: z.number().int().optional().describe("Position in the document (default: append). Idempotency key for code-less items."),
-      attrs: z.record(z.any()).optional().describe("Type-specific structured fields — validated vs JSON-Schema (see doc_item_types)"),
+      body: z.string().optional().describe("Markdown content of the item. Omit on update = keep the stored body."),
+      status: z.string().optional().describe("Per-item_type status. Omit on update = keep the stored status (the type default applies to INSERT only). doc_item_types shows allowed values."),
+      owner: z.string().optional().describe(`Owner slug (insert default: ${selfSlug}). Omit on update = keep the stored owner.`),
+      priority: z.string().optional().describe("Free-text priority tag. Omit on update = keep the stored priority."),
+      sort_order: z.number().int().optional().describe("Position in the document (insert default: append). Omit on update = keep the stored position. Idempotency key for code-less items."),
+      attrs: z.record(z.any()).optional().describe("Type-specific structured fields — validated vs JSON-Schema (see doc_item_types). Omit on update = keep the stored attrs UNTOUCHED; pass it and it REPLACES the stored object wholesale (dropped keys are reported in warnings); pass {} to empty it deliberately."),
       client_token: z.string().optional().describe("Idempotency token for code-less items (stored in attrs._client_token)"),
     },
     async (args) => {

@@ -244,6 +244,208 @@ test("doc_create → doc_item_upsert returns a UUID, idempotent on (project_id, 
   assert.equal(store.doc_items.filter((r) => r.code === "REQ-001").length, 1, "no duplicate");
 });
 
+// ---------------------------------------------------------------------------
+// GTD 0cdffc2b — omitted fields are PRESERVED, destructive effects are REPORTED.
+// The incident: a status-only upsert during a ~240-item ratification run wiped
+// REQ-GOV-037's acceptance_criteria (2085 chars → 2) and answered ok:true.
+// ---------------------------------------------------------------------------
+
+async function seedReq(store: Store, attrs: Record<string, unknown>, body = "v1") {
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const docId = (doc as any).data.document_id;
+  const up = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    code: "REQ-GOV-037", body, status: "approved", attrs,
+  }, ctx);
+  assert.ok(up.ok, `seed upsert ok: ${JSON.stringify(up)}`);
+  return { db, docId, itemId: (up as any).data.item_id };
+}
+
+test("doc_item_upsert: omitting attrs PRESERVES them (REQ-GOV-037 regression — status-only upsert must not wipe acceptance_criteria)", async () => {
+  const store: Store = {};
+  const criteria = ["message persisted", "recipient sees it in inbox"];
+  const { db, docId, itemId } = await seedReq(store, { moscow: "must", acceptance_criteria: criteria });
+
+  const up = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    code: "REQ-GOV-037", status: "committed",   // the "most banal operation there is"
+  }, ctx);
+
+  assert.ok(up.ok, `upsert ok: ${JSON.stringify(up)}`);
+  const row = store.doc_items.find((r) => r.id === itemId)!;
+  assert.deepEqual(row.attrs.acceptance_criteria, criteria, "acceptance_criteria survived a status-only upsert");
+  assert.equal(row.attrs.moscow, "must", "every other attr survived too");
+  assert.equal(row.status, "committed", "the field that WAS passed did change");
+  assert.equal(row.body, "v1", "body untouched, as before");
+  assert.ok((up as any).data.fields_preserved.includes("attrs"), "response states attrs was preserved");
+  assert.ok((up as any).data.fields_written.includes("status"), "response states status was written");
+});
+
+test("doc_item_upsert: omitting status PRESERVES it (a body edit must not reset a committed item to the type default)", async () => {
+  const store: Store = {};
+  const { db, docId, itemId } = await seedReq(store, { moscow: "must" });
+
+  const up = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    code: "REQ-GOV-037", body: "v2 — clarified",
+  }, ctx);
+
+  assert.ok(up.ok);
+  const row = store.doc_items.find((r) => r.id === itemId)!;
+  assert.equal(row.status, "approved", "status NOT reset to spec.default_status ('draft')");
+  assert.equal(row.body, "v2 — clarified");
+  assert.equal((up as any).data.status, "approved", "response reports the row's real status");
+  assert.ok((up as any).data.fields_preserved.includes("status"));
+});
+
+test("doc_item_upsert: attrs:{} passed on purpose still CLEARS, and says which keys it dropped", async () => {
+  const store: Store = {};
+  const { db, docId, itemId } = await seedReq(store, { moscow: "must", rationale: "because" });
+
+  const up = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    code: "REQ-GOV-037", attrs: {},
+  }, ctx);
+
+  assert.ok(up.ok, "emptying attrs is a legitimate operation, not an error");
+  const row = store.doc_items.find((r) => r.id === itemId)!;
+  assert.deepEqual(row.attrs, {}, "explicit {} clears — omission is the no-op, not {}");
+  const warnings: string[] = (up as any).data.warnings ?? [];
+  assert.equal(warnings.length, 1, `one warning expected, got ${JSON.stringify(warnings)}`);
+  assert.match(warnings[0], /moscow/);
+  assert.match(warnings[0], /rationale/);
+});
+
+test("doc_item_upsert: a partial attrs replacement names the keys it drops (attrs is replaced, never merged)", async () => {
+  const store: Store = {};
+  const { db, docId } = await seedReq(store, { moscow: "must", acceptance_criteria: ["a", "b"], rationale: "why" });
+
+  const up = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    code: "REQ-GOV-037", attrs: { moscow: "should" },
+  }, ctx);
+
+  assert.ok(up.ok);
+  const warnings: string[] = (up as any).data.warnings ?? [];
+  assert.match(warnings.join("\n"), /acceptance_criteria/, "the dropped key is named");
+  assert.match(warnings.join("\n"), /rationale/);
+  assert.doesNotMatch(warnings.join("\n"), /\bmoscow\b/, "a key that was re-passed is not reported as dropped");
+});
+
+test("doc_item_upsert: replacing attrs carries _client_token forward (dropping it would split one item in two)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const docId = (doc as any).data.document_id;
+
+  const first = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    body: "prose row", client_token: "tok-1", attrs: { moscow: "must" },
+  }, ctx);
+  assert.ok(first.ok);
+  const itemId = (first as any).data.item_id;
+
+  // Re-upsert by the SAME token but with a fresh attrs payload that omits it.
+  const second = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    client_token: "tok-1", attrs: { moscow: "should" },
+  }, ctx);
+  assert.ok(second.ok);
+  assert.equal((second as any).data.created, false, "matched the existing row by token");
+  assert.equal((second as any).data.item_id, itemId);
+
+  const row = store.doc_items.find((r) => r.id === itemId)!;
+  assert.equal(row.attrs._client_token, "tok-1", "token survives an attrs replacement");
+  assert.equal(store.doc_items.filter((r) => r.document_id === docId).length, 1, "no split row");
+});
+
+test("doc_item_upsert: retyping an item in place is allowed but never silent", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "sow", title: "SoW" }, ctx);
+  const docId = (doc as any).data.document_id;
+  const seeded = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "objective", code: "OBJ-001", body: "ship it",
+  }, ctx);
+  assert.ok(seeded.ok, `seed ok: ${JSON.stringify(seeded)}`);
+
+  const up = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "deliverable",
+    code: "OBJ-001", body: "ship it",
+  }, ctx);
+
+  assert.ok(up.ok, `retype allowed: ${JSON.stringify(up)}`);
+  assert.match(((up as any).data.warnings ?? []).join("\n"), /item_type changed in place/);
+});
+
+test("doc_item_upsert: the read-back tolerates JSONB key REORDER (real doc_rw round-trip) but not a changed value", async () => {
+  const store: Store = {};
+  const { db, docId } = await seedReq(store, { moscow: "must" });
+
+  // Postgres hands JSONB back with its keys in its own order. A naive compare
+  // would report a phantom mismatch on every attrs write — caught live, not in
+  // this fake, which is why the fake has to reproduce it.
+  const reordering = {
+    from: (table: string) => {
+      const q = (db as any).from(table);
+      if (table !== "doc_items") return q;
+      const origSelect = q.select.bind(q);
+      q.select = (cols: string) => {
+        const chain = origSelect(cols);
+        const origMaybe = chain.maybeSingle.bind(chain);
+        chain.maybeSingle = async () => {
+          const res = await origMaybe();
+          const row = (res as any).data;
+          if (row?.attrs) {
+            (res as any).data = { ...row, attrs: Object.fromEntries(Object.entries(row.attrs).reverse()) };
+          }
+          return res;
+        };
+        return chain;
+      };
+      return q;
+    },
+    __docRw: true,
+  } as unknown as SupabaseClient;
+
+  const up = await docItemUpsert(reordering, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    code: "REQ-GOV-037", attrs: { moscow: "should", rationale: "r", acceptance_criteria: ["x"] },
+  }, ctx);
+  assert.ok(up.ok, `key reorder is not a mismatch: ${JSON.stringify(up)}`);
+});
+
+test("doc_item_upsert: a write that silently affects 0 rows fails LOUD (D-132 read-back, not the response)", async () => {
+  const store: Store = {};
+  const { db, docId } = await seedReq(store, { moscow: "must" });
+
+  // A DB that accepts the UPDATE, raises nothing, and changes nothing — the
+  // exact shape of an RLS denial under doc_rw (v0.8.1 no-RETURNING mode).
+  const swallowing = {
+    from: (table: string) => {
+      const q = (db as any).from(table);
+      if (table !== "doc_items") return q;
+      const origUpdate = q.update.bind(q);
+      q.update = (_data: any) => origUpdate({});  // drop every column, keep the chain
+      return q;
+    },
+    __docRw: true,
+  } as unknown as SupabaseClient;
+
+  const up = await docItemUpsert(swallowing, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    code: "REQ-GOV-037", body: "this never lands",
+  }, ctx);
+
+  assert.equal(up.ok, false, "must not answer ok:true on a write that did not happen");
+  assert.match((up as any).error, /Write NOT applied/);
+  assert.match((up as any).error, /body/);
+});
+
 test("doc_item_upsert rejects invalid attrs against JSON-Schema (actionable)", async () => {
   const store: Store = {};
   seedProjects(store);

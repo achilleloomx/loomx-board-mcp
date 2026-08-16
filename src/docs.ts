@@ -126,6 +126,25 @@ export async function docCreate(
 // doc_item_upsert — idempotent. Returns the item UUID (§16).
 //   key WITH code:    (project_id, code)
 //   key WITHOUT code: (document_id, client_token) else (document_id, sort_order)
+//
+// UPDATE semantics = PATCH, declared (GTD 0cdffc2b, 2026-08-16). Until v0.16.2
+// the update path wrote `attrs` and `status` UNCONDITIONALLY from defaulted
+// values (`args.attrs ?? {}`, `args.status ?? spec.default_status`) while body /
+// priority / owner / sort_order were patch-conditional. An upsert of "just the
+// status" therefore wiped attrs to `{}` and answered ok:true — it cost
+// REQ-GOV-037 its acceptance_criteria (2085 chars → 2) during a ~240-item
+// ratification run, recovered only because doc_item_history keeps a pre-image.
+// Same shape observed on UAT-GOV-104/213/215. Measured before designing (GTD
+// point 1): every other write path in this server is already patch or merge
+// (buildGtdUpdatePayload, wiCheckpoint, wiEnd, home_*) and doc_supersede already
+// carries attrs over (`args.attrs ?? old.attrs`), so this was one tool's defect,
+// not a layer convention — which is why the fix is here and not a layer rewrite.
+//
+// The rule now, for every optional field including attrs and status:
+//   omitted  → PRESERVED (column not written at all)
+//   supplied → written, and any destructive effect is REPORTED, never silent
+// `attrs: {}` passed on purpose still clears — omission is the no-op, not `{}`
+// (GTD point 3: an explicit way to empty must exist, or the problem just moves).
 // ---------------------------------------------------------------------------
 
 export interface DocItemUpsertArgs {
@@ -142,11 +161,67 @@ export interface DocItemUpsertArgs {
   client_token?: string;
 }
 
+export interface DocItemUpsertResult {
+  item_id: string;
+  code: string | null;
+  created: boolean;
+  status: string;
+  /** Columns this call actually wrote (update path). */
+  fields_written?: string[];
+  /** Optional columns omitted by the caller and therefore left untouched (update path). */
+  fields_preserved?: string[];
+  /** Destructive-but-requested effects, stated out loud. Never blocking. */
+  warnings?: string[];
+}
+
+// Canonical JSON: object keys sorted recursively, array order preserved (it is
+// meaningful — acceptance_criteria is a list). JSONB round-trips an object with
+// its keys REORDERED, so a plain JSON.stringify compare reports a phantom
+// mismatch on every attrs write; verified live against the doc_rw path.
+function canonical(v: unknown): string {
+  if (v === null || v === undefined) return "null";
+  if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
+  if (typeof v === "object") {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`).join(",")}}`;
+  }
+  return JSON.stringify(v);
+}
+
+// Cell-level comparison for the post-write read-back. Normalised so JSONB
+// (attrs) and scalars go through the same path; null and undefined are the same
+// absence as far as "did the write land" is concerned.
+function sameCell(a: unknown, b: unknown): boolean {
+  if (a === null || a === undefined) return b === null || b === undefined;
+  return canonical(a) === canonical(b);
+}
+
+// D-132 applied to this tool: verify on the ROW, not on the response.
+// Under doc_rw the write runs in no-RETURNING mode (F4.5 / v0.8.1), so an
+// RLS-denied UPDATE affects 0 rows WITHOUT raising — the follow-up SELECT still
+// hands back a row and the call would answer ok:true on a write that never
+// happened. That is the D-133 class this tool exists to stop producing.
+function diffAgainstRow(intended: Record<string, unknown>, row: Record<string, unknown>): string[] {
+  const out: string[] = [];
+  for (const [col, want] of Object.entries(intended)) {
+    if (col === "updated_at") continue; // server clock / trigger may legitimately differ
+    if (!(col in row)) continue;        // outside the read-back projection — nothing to compare
+    if (!sameCell(want, row[col])) {
+      const show = (v: unknown) => {
+        const s = JSON.stringify(v ?? null) ?? "null";
+        return s.length > 200 ? `${s.slice(0, 200)}… (${s.length} chars)` : s;
+      };
+      out.push(`${col}: wrote ${show(want)} but the row reads ${show(row[col])}`);
+    }
+  }
+  return out;
+}
+
 export async function docItemUpsert(
   db: SupabaseClient,
   args: DocItemUpsertArgs,
   ctx: DocContext
-): Promise<DocResult<{ item_id: string; code: string | null; created: boolean; status: string }>> {
+): Promise<DocResult<DocItemUpsertResult>> {
   const spec = DOC_ITEM_TYPE_REGISTRY[args.item_type as ItemType];
   if (!spec) {
     return err(
@@ -178,32 +253,39 @@ export async function docItemUpsert(
     );
   }
 
-  // Status (tool-floor: per item_type) — default sensible.
-  const status = args.status ?? spec.default_status;
-  if (!spec.statuses.includes(status)) {
+  // Status (tool-floor: per item_type). Validated ONLY when supplied —
+  // spec.default_status is an INSERT default, never an "unset" value to write
+  // back over an existing row (that is how a plain body edit used to reset a
+  // committed requirement to draft).
+  if (args.status !== undefined && !spec.statuses.includes(args.status)) {
     return err(
-      `Invalid status '${status}' for item_type '${args.item_type}'. Allowed: ${spec.statuses.join(", ")} (default: ${spec.default_status}).`
+      `Invalid status '${args.status}' for item_type '${args.item_type}'. Allowed: ${spec.statuses.join(", ")} (default on insert: ${spec.default_status}).`
     );
   }
 
-  // attrs validation against JSON-Schema (§3.2).
-  const attrs = args.attrs ?? {};
-  const attrErrors = validateAttrs(spec.attrs_schema, attrs);
-  if (attrErrors.length > 0) {
-    return err(
-      `attrs invalid for item_type '${args.item_type}':\n  - ${attrErrors.join("\n  - ")}\n` +
-      `Expected schema: ${JSON.stringify(spec.attrs_schema)}\nExample: ${JSON.stringify(spec.example.attrs ?? {})}`
-    );
+  // attrs validation against JSON-Schema (§3.2) — only what the caller is
+  // actually writing. Omitted attrs are preserved, so there is nothing to
+  // validate (and validating the stored value would turn a stale row into a
+  // hard failure on an unrelated field edit).
+  if (args.attrs !== undefined) {
+    const attrErrors = validateAttrs(spec.attrs_schema, args.attrs);
+    if (attrErrors.length > 0) {
+      return err(
+        `attrs invalid for item_type '${args.item_type}':\n  - ${attrErrors.join("\n  - ")}\n` +
+        `Expected schema: ${JSON.stringify(spec.attrs_schema)}\nExample: ${JSON.stringify(spec.example.attrs ?? {})}`
+      );
+    }
   }
 
   // ---- Resolve idempotency target ----
-  type ExistingDocItem = { id: string; status: string; attrs: Record<string, unknown> | null };
+  type ExistingDocItem = { id: string; status: string; item_type: string; attrs: Record<string, unknown> | null };
+  const EXISTING_COLS = "id, status, item_type, attrs";
   let existing: ExistingDocItem | null = null;
 
   if (args.code) {
     const { data, error } = await db
       .from(DOC_ITEMS)
-      .select("id, status, attrs")
+      .select(EXISTING_COLS)
       .eq("project_id", args.project_id)
       .eq("code", args.code)
       .maybeSingle();
@@ -215,7 +297,7 @@ export async function docItemUpsert(
     // document's items and match in JS.
     const { data: rows, error } = await db
       .from(DOC_ITEMS)
-      .select("id, status, attrs")
+      .select(EXISTING_COLS)
       .eq("document_id", args.document_id);
     if (error) return err(`Lookup by client_token failed: ${error.message}`);
     const match = (Array.isArray(rows) ? rows : []).find(
@@ -225,17 +307,13 @@ export async function docItemUpsert(
   } else if (args.sort_order !== undefined) {
     const { data, error } = await db
       .from(DOC_ITEMS)
-      .select("id, status, attrs")
+      .select(EXISTING_COLS)
       .eq("document_id", args.document_id)
       .eq("sort_order", args.sort_order)
       .maybeSingle();
     if (error) return err(`Lookup by sort_order failed: ${error.message}`);
     existing = (data as ExistingDocItem | null) ?? null;
   }
-
-  // Persist client_token inside attrs for future idempotent matching.
-  const storedAttrs: Record<string, unknown> = { ...attrs };
-  if (args.client_token) storedAttrs._client_token = args.client_token;
 
   const now = nowIso();
 
@@ -244,22 +322,101 @@ export async function docItemUpsert(
     if (existing.status === "superseded") {
       return err(`doc_item ${existing.id} is superseded (immutable). Use doc_supersede to create a new version instead of editing.`);
     }
-    const update: Record<string, unknown> = { item_type: args.item_type, status, updated_at: now };
-    if (args.body !== undefined) update.body = args.body;
-    if (args.priority !== undefined) update.priority = args.priority;
-    if (args.owner !== undefined) update.owner = args.owner;
-    if (args.sort_order !== undefined) update.sort_order = args.sort_order;
-    update.attrs = storedAttrs;
 
-    const { data, error } = await db
+    const written: string[] = [];
+    const preserved: string[] = [];
+    const warnings: string[] = [];
+    const update: Record<string, unknown> = { updated_at: now };
+
+    // item_type is a required arg, so it is always written. Retyping a row in
+    // place is legal but must not be silent — an item whose type changed is
+    // validated against a different attrs schema from here on.
+    update.item_type = args.item_type;
+    written.push("item_type");
+    if (existing.item_type && existing.item_type !== args.item_type) {
+      warnings.push(
+        `item_type changed in place on ${existing.id}: '${existing.item_type}' → '${args.item_type}'. ` +
+        `attrs are now validated against the '${args.item_type}' schema. If you meant a new version, use doc_supersede.`
+      );
+    }
+
+    if (args.status !== undefined) { update.status = args.status; written.push("status"); }
+    else preserved.push("status");
+    if (args.body !== undefined) { update.body = args.body; written.push("body"); }
+    else preserved.push("body");
+    if (args.priority !== undefined) { update.priority = args.priority; written.push("priority"); }
+    else preserved.push("priority");
+    if (args.owner !== undefined) { update.owner = args.owner; written.push("owner"); }
+    else preserved.push("owner");
+    if (args.sort_order !== undefined) { update.sort_order = args.sort_order; written.push("sort_order"); }
+    else preserved.push("sort_order");
+
+    const prevAttrs: Record<string, unknown> = existing.attrs ?? {};
+    if (args.attrs !== undefined) {
+      const next: Record<string, unknown> = { ...args.attrs };
+      // Carry the idempotency token forward: dropping it would silently break
+      // future (document_id, client_token) lookups and split one item in two.
+      if (args.client_token) next._client_token = args.client_token;
+      else if (prevAttrs._client_token !== undefined) next._client_token = prevAttrs._client_token;
+
+      const dropped = Object.keys(prevAttrs).filter((k) => !(k in next));
+      if (dropped.length > 0) {
+        warnings.push(
+          `attrs replaced on ${existing.id}: ${dropped.length} stored key(s) dropped (${dropped.join(", ")}). ` +
+          `attrs is replaced wholesale, not merged — re-pass every key you want to keep, or omit attrs entirely to leave the stored value untouched.`
+        );
+      }
+      update.attrs = next;
+      written.push("attrs");
+    } else if (args.client_token && prevAttrs._client_token !== args.client_token) {
+      // Only touching attrs to stamp the token, never to replace the payload.
+      update.attrs = { ...prevAttrs, _client_token: args.client_token };
+      written.push("attrs._client_token");
+    } else {
+      preserved.push("attrs");
+    }
+
+    const { error } = await db
       .from(DOC_ITEMS)
       .update(update)
       .eq("id", existing.id)
       .select("id, code, status")
       .maybeSingle();
-    if (error || !data) return err(`Failed to update doc_item '${existing.id}': ${error?.message ?? "item not found after update"}`);
-    const r = data as { id: string; code: string | null; status: string };
-    return { ok: true, data: { item_id: r.id, code: r.code, created: false, status: r.status } };
+    if (error) return err(`Failed to update doc_item '${existing.id}': ${error.message}`);
+
+    // Read the row back and compare (GTD point 4 / D-132). See diffAgainstRow.
+    const { data: after, error: afterErr } = await db
+      .from(DOC_ITEMS)
+      .select("id, code, status, item_type, body, priority, owner, sort_order, attrs")
+      .eq("id", existing.id)
+      .maybeSingle();
+    if (afterErr || !after) {
+      return err(
+        `doc_item '${existing.id}' was updated but could not be read back for verification: ` +
+        `${afterErr?.message ?? "row not found"}. Treat the write as UNCONFIRMED and re-read the item.`
+      );
+    }
+    const afterRow = after as Record<string, unknown>;
+    const mismatches = diffAgainstRow(update, afterRow);
+    if (mismatches.length > 0) {
+      return err(
+        `Write NOT applied to doc_item '${existing.id}' — the row does not match what was sent, and the DB raised no error ` +
+        `(RLS denial under doc_rw affects 0 rows silently). Nothing was changed as requested:\n  - ${mismatches.join("\n  - ")}`
+      );
+    }
+
+    return {
+      ok: true,
+      data: {
+        item_id: existing.id,
+        code: (afterRow.code as string | null) ?? null,
+        created: false,
+        status: afterRow.status as string,
+        fields_written: written,
+        fields_preserved: preserved,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      },
+    };
   }
 
   // INSERT — resolve sort_order (append) when not provided.
@@ -275,12 +432,19 @@ export async function docItemUpsert(
     sortOrder = (typeof top === "number" ? top : -1) + 1;
   }
 
+  // Insert-only default: an absent status means "start at the type default".
+  const insertStatus = args.status ?? spec.default_status;
+
+  // Persist client_token inside attrs for future idempotent matching.
+  const storedAttrs: Record<string, unknown> = { ...(args.attrs ?? {}) };
+  if (args.client_token) storedAttrs._client_token = args.client_token;
+
   const insert: Record<string, unknown> = {
     document_id: args.document_id,
     project_id: args.project_id,
     item_type: args.item_type,
     code: args.code ?? null,
-    status,
+    status: insertStatus,
     owner: args.owner ?? ctx.selfSlug,
     sort_order: sortOrder,
     body: args.body ?? null,
@@ -301,7 +465,37 @@ export async function docItemUpsert(
     return err(`Failed to insert doc_item: ${m}`);
   }
   const r = data as { id: string; code: string | null; status: string };
-  return { ok: true, data: { item_id: r.id, code: r.code, created: true, status: r.status } };
+
+  // Same read-back as the update path: under doc_rw the insert result is
+  // synthesized client-side (no RETURNING), so `data` is not evidence of a row.
+  const { data: afterIns, error: afterInsErr } = await db
+    .from(DOC_ITEMS)
+    .select("id, code, status, item_type, body, priority, owner, sort_order, attrs")
+    .eq("id", r.id)
+    .maybeSingle();
+  if (afterInsErr || !afterIns) {
+    return err(
+      `doc_item insert reported success but the row is not readable at id '${r.id}': ` +
+      `${afterInsErr?.message ?? "row not found"}. Treat the write as UNCONFIRMED — nothing may have been persisted.`
+    );
+  }
+  const insRow = afterIns as Record<string, unknown>;
+  const insMismatches = diffAgainstRow(insert, insRow);
+  if (insMismatches.length > 0) {
+    return err(
+      `doc_item '${r.id}' was inserted but does not match what was sent, and the DB raised no error:\n  - ${insMismatches.join("\n  - ")}`
+    );
+  }
+
+  return {
+    ok: true,
+    data: {
+      item_id: r.id,
+      code: (insRow.code as string | null) ?? null,
+      created: true,
+      status: insRow.status as string,
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------

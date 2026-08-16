@@ -277,7 +277,7 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 | Tool | Descrizione | Operazione DB |
 |---|---|---|
 | `doc_create` | Crea documento (default status=draft, version=1.0, visibility=project, owner=self) | INSERT documents |
-| `doc_item_upsert` | Insert/update riga tipata; idempotente `(project_id,code)` / `(document_id,client_token|sort_order)`; valida `attrs` vs JSON-Schema; **RITORNA UUID** | UPSERT doc_items |
+| `doc_item_upsert` | Insert/update riga tipata; idempotente `(project_id,code)` / `(document_id,client_token|sort_order)`; valida `attrs` vs JSON-Schema; **RITORNA UUID**. **PATCH dichiarato (v0.16.3, D-a5-upsert-patch-semantics):** ogni campo opzionale omesso è **conservato** — `attrs` e `status` inclusi (prima venivano riscritti dai default: un upsert del solo `status` azzerava gli `attrs` rispondendo `ok:true`). `attrs` passato **sostituisce** l'oggetto per intero (mai fuso) e `attrs:{}` svuota apposta; chiavi scartate e cambi di `item_type` in place escono in `warnings`, e la risposta porta `fields_written`/`fields_preserved`. Prima di rispondere `ok` la riga viene **riletta e confrontata** (D-132): mismatch → `ok:false` | UPSERT doc_items |
 | `doc_item_resolve` | `(project_id,code)→uuid`; project_id obbligatorio; mai sceglie su ambiguità; **audit-log** ogni chiamata | SELECT doc_items |
 | `doc_link` | UUID-only, enum `target_kind doc\|gtd\|wi` instrada alle 3 tabelle (nessun param code) | INSERT doc_item_links / doc_item_gtd_links / doc_item_wi_links |
 | `doc_link_by_code` | Sugar resolve+resolve+link project-scoped (stesso resolver loggato) | SELECT×2 + INSERT |
