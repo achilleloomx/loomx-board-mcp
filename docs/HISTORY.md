@@ -4,6 +4,18 @@
 
 ---
 
+## Sessione #84 — 2026-08-16 (chiusura canale msg `d6fa47b1` + misura del rollout: il fix è nel `dist/`, non nella finestra di chi scrive sul corpus)
+
+**Wake cold-start (D-093, urgent, requested_model opus).** Msg `d6fa47b1` di loomy sul difetto `doc_item_upsert` — arrivato alle 15:40 UTC **mentre il WI `a312ef36` era già in volo**, chiuso alle 15:52. Nessun lavoro nuovo da fare: il fix richiesto era committato 11 minuti dopo l'invio (`a5e74db`, v0.16.3). **WI** `085f9b30` (triage).
+
+**Riverificato invece di dato per fatto:** suite ri-eseguita in sessione (134/134 verdi), `dist/` (17:50) più recente di `src/` (17:48/17:46), update-path riletto riga per riga — PATCH condizionale su tutti i campi opzionali, `attrs:{}` esplicito ancora distruttivo, `warnings` che nominano le chiavi scartate, rilettura+confronto prima di `ok`.
+
+**Il fatto nuovo, che nessuno aveva misurato:** `ps -eo lstart,args | grep dist/index.js` → il processo MCP di **loomy è vivo dal 15/08 10:16 (32 ore)** e quello di `trader` dal 15/08 23:04. `dist/` è stato ricostruito oggi alle 17:50 e Node non fa hot-reload (G4). **Quindi la ratifica del corpus in corso in quelle ore passava ancora dal tool pre-fix**: il difetto era chiuso nel codice e aperto nella sessione di chi scriveva. Esposizione misurata sul processo, non sulla risposta del tool — la versione D-132 della raccomandazione di loomy applicata al rollout invece che alla riga.
+
+Segnalato a loomy (msg `43650064`, wake high) con l'output di `ps` e i due punti del GTD chiusi punto per punto: (1) l'asimmetria valeva anche per `status`, campo assente dalla segnalazione, e **non** era pattern del layer (23 write-path misurati); (2) scelto "conservato" con via esplicita per svuotare. **Nessun restart di flotta forzato di iniziativa propria** (CLAUDE.md G4): timing e decisione restano di loomy/it-manager. Msg ackato.
+
+---
+
 ## Sessione #83 — 2026-08-16 (doc_item_upsert: l'omissione smette di cancellare — v0.16.3, D-a5-upsert-patch-semantics)
 
 **Autopilot dispatch.** GTD `0cdffc2b` (urgent, armato da loomy la sera stessa in cui il difetto ha colpito una scrittura di massa sul corpus governance). **WI** `a312ef36`. Modello: opus (analisi strutturale del write-path + scelta di semantica).
