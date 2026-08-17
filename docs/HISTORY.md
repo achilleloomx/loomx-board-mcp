@@ -4,6 +4,18 @@
 
 ---
 
+## Sessione #85 — 2026-08-17 (fix root cause wi_resume cache: `syncWiCache` preferiva `started_at` all'active — build+test+deploy, GTD 4f05821c)
+
+**Wake cold-start (D-093, high).** Msg `5ce7a0f5` di it-manager: root cause trovata e patchata (non committata) del bug segnalato da Achille — `governance-gate.sh` blocca ogni scrittura dopo un `wi_resume` legittimo. Causa: `syncWiCache` (src/wiCache.ts) ordinava per `started_at desc limit 1`, colonna stampata una sola volta a `wi_start` e mai toccata da `wi_pause`/`wi_resume`. Scenario: `wi_start A(t0)` → `wi_pause A` → `wi_start B(t1>t0)` → `wi_end B(done)` → `wi_resume A`: la query continuava a restituire B (done, t1) anche con A ora `active` — cache riscritta col WI sbagliato, gate legge status=done e blocca tutto mentre `wi_status` mostra correttamente A active.
+
+**Review del patch di it-manager (non mio il fix, mia la verifica):** logica sound — interroga prima la riga `status=active` per l'agente (al più una, `one_active_wi_per_agent`), fallback sull'ordinamento per `started_at` solo quando non c'è nessuna riga active (preserva il comportamento whitelist post-close esistente). Aggiunta copertura di regressione mancante (`tests/wiCache.test.ts`, 4 test: preferenza active-over-newer-closed = lo scenario del bug, fallback ordinato quando nessuna riga è active, scoping per `agent_slug`, rimozione cache quando l'agente non ha WI). `npx tsc --noEmit` pulito, suite 138/138 verde, build pulita. Version bump 0.16.3→0.16.4.
+
+**Trovato in corso d'opera (non richiesto, ma nel working tree):** `.claude/hooks/governance-gate.sh` e `.claude/settings.json` avevano ~6 settimane di fix (v1.2→v1.6, dal 2026-07-18 al 2026-07-30, già live in flotta per msg loomy `61c427bf`) mai committati in questo repo, più il wiring di due hook fleet-wide nuovi verso script esterni (`/home/loomy/workspace/hub/scripts/heartbeat_ping.py`, `wi_instrument.py`) non menzionati nel messaggio di it-manager. Letti entrambi gli script prima di committare il wiring: fail-open (`exit 0` sempre), debounced, nessuna scrittura distruttiva, entrambi già autorizzati (GTD ba022585/c29d6143 GO Achille via loomy; gap b7975288 loomy). Committato separatamente dal fix wiCache (due commit distinti) per non conflaterli.
+
+Due commit: `fix(wiCache)` (src/wiCache.ts + test + package.json) e `chore(hooks)` (governance-gate.sh + settings.json). Nessun deploy possibile oltre alla build locale (G4: `dist/` è gitignored, build unica condivisa, nessun meccanismo di push/reconnect per server MCP stdio — solo un restart di finestra carica il nuovo `dist/`). Non forzato alcun restart di flotta di iniziativa propria; segnalato a it-manager via board_send. Msg ackato.
+
+---
+
 ## Sessione #84 — 2026-08-16 (chiusura canale msg `d6fa47b1` + misura del rollout: il fix è nel `dist/`, non nella finestra di chi scrive sul corpus)
 
 **Wake cold-start (D-093, urgent, requested_model opus).** Msg `d6fa47b1` di loomy sul difetto `doc_item_upsert` — arrivato alle 15:40 UTC **mentre il WI `a312ef36` era già in volo**, chiuso alle 15:52. Nessun lavoro nuovo da fare: il fix richiesto era committato 11 minuti dopo l'invio (`a5e74db`, v0.16.3). **WI** `085f9b30` (triage).
