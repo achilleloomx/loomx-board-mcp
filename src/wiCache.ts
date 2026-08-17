@@ -42,7 +42,8 @@ async function writeAtomic(absPath: string, content: string): Promise<void> {
   await fs.rename(tmp, absPath);
 }
 
-// Mirror the agent's most recent WI (any status) to the cache file.
+// Mirror the agent's current WI to the cache file: the active one if there
+// is one, else the most recently *started* WI (any status).
 //
 // governance-gate.sh branches on cache status (active/paused/done/failed) to
 // pick its message — including a post-close whitelist (D-069 two-phase close:
@@ -53,6 +54,17 @@ async function writeAtomic(absPath: string, content: string): Promise<void> {
 // code and even the mandated post-wi_end runtime_request got blocked. We only
 // remove the cache when the agent has genuinely never had a WI (forces the
 // initial wi-start).
+//
+// Bug fix (2026-08-17, GTD 4f05821c / board msg b4ff5966): plain "most recent
+// by started_at" breaks wi_resume. started_at is stamped once at wi_start and
+// never bumped by wi_pause/wi_resume, so resuming an OLDER paused WI after a
+// NEWER one has already been closed used to mirror the newer (done) row over
+// the just-reactivated (active) one — governance-gate then blocked every
+// write with "WI already closed" while wi_status correctly showed active.
+// One_active_wi_per_agent means there's at most one active row per agent, so
+// preferring it outright (with the started_at-ordered query only as fallback
+// when nothing is active) is unambiguous and keeps the post-close whitelist
+// behavior for the no-active-WI case.
 export async function syncWiCache(
   db: SupabaseClient,
   agentSlug: string
@@ -65,21 +77,40 @@ export async function syncWiCache(
     await fs.mkdir(cacheDir, { recursive: true });
     const cachePath = path.join(cacheDir, CACHE_FILE);
 
-    const { data, error } = await db
+    const { data: activeData, error: activeError } = await db
       .from(WI_TABLE)
       .select("*")
       .eq("agent_slug", agentSlug)
-      .order("started_at", { ascending: false })
+      .eq("status", "active")
       .limit(1);
 
-    if (error) {
+    if (activeError) {
       process.stderr.write(
-        `[board-mcp wiCache] sync failed: ${error.message}\n`
+        `[board-mcp wiCache] sync failed: ${activeError.message}\n`
       );
       return;
     }
 
-    const row = Array.isArray(data) && data.length > 0 ? data[0] : null;
+    let row = Array.isArray(activeData) && activeData.length > 0 ? activeData[0] : null;
+
+    if (!row) {
+      const { data, error } = await db
+        .from(WI_TABLE)
+        .select("*")
+        .eq("agent_slug", agentSlug)
+        .order("started_at", { ascending: false })
+        .limit(1);
+
+      if (error) {
+        process.stderr.write(
+          `[board-mcp wiCache] sync failed: ${error.message}\n`
+        );
+        return;
+      }
+
+      row = Array.isArray(data) && data.length > 0 ? data[0] : null;
+    }
+
     if (row) {
       await writeAtomic(cachePath, JSON.stringify(row, null, 2));
     } else {
