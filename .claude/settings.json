@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/governance-gate.sh --agent board-mcp"
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/governance-gate.sh\" --agent board-mcp"
           }
         ]
       },
@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/governance-gate.sh --agent board-mcp --mcp-mode"
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/governance-gate.sh\" --agent board-mcp --mcp-mode"
           }
         ]
       },
@@ -25,7 +25,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/governance-gate.sh --agent board-mcp --bash"
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/governance-gate.sh\" --agent board-mcp --bash"
           }
         ]
       },
@@ -34,7 +34,25 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/doc-lint.sh 2>&1 || true"
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/doc-lint.sh\" 2>&1 || true"
+          }
+        ]
+      },
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/loomy/workspace/hub/scripts/heartbeat_ping.py"
+          }
+        ]
+      },
+      {
+        "matcher": "mcp__board__wi_checkpoint|mcp__board__wi_end|mcp__board__wi_pause",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/loomy/workspace/hub/scripts/wi_instrument.py sync"
           }
         ]
       }
@@ -44,11 +62,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '[governance D-024] Pre-flight: leggi CLAUDE.md + AGENT-STANDARD §0/§0bis, verifica wi_status, apri wi_start prima di scritture persistenti. Template WI in hub/templates/work-items/.'"
+            "command": "echo '[governance D-024] Pre-flight: leggi CLAUDE.md + AGENT-STANDARD \u00a70/\u00a70bis, verifica wi_status, apri wi_start prima di scritture persistenti. Template WI in hub/templates/work-items/.'"
           },
           {
             "type": "command",
-            "command": "bash .claude/hooks/session-start-hint.sh --agent board-mcp"
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-start-hint.sh\" --agent board-mcp"
           }
         ]
       }
@@ -58,7 +76,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash .claude/hooks/session-end-gate.sh"
+            "command": "bash \"$CLAUDE_PROJECT_DIR/.claude/hooks/session-end-gate.sh\""
           }
         ]
       }
@@ -77,6 +95,17 @@
           {
             "type": "command",
             "command": "python3 /home/loomy/workspace/hub/scripts/track_interactive_session.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /home/loomy/workspace/hub/scripts/wi_instrument.py record"
           }
         ]
       }

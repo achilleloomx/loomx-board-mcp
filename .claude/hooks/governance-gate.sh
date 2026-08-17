@@ -17,6 +17,65 @@
 #   - exit 1 -> exit 2 su tutti i branch di blocco (prima il gate era fail-open)
 #   - modalita --bash: enforcement bash_commands external + scritture via shell
 #   - tool_uses counter best-effort (non aborta il gate sotto set -e)
+# v1.2 (2026-07-18, fix WI ccde9d50 — race self-modifica cache):
+#   - flock sull'intera esecuzione del gate: serializza hook paralleli, elimina
+#     i falsi BLOCK "status=done" da letture concorrenti della cache
+#   - mktemp nella STESSA directory di WI_CACHE (prima era /tmp: su filesystem
+#     diverso `mv` degrada a copy+unlink NON atomico -> finestra di file vuoto/
+#     troncato leggibile dagli hook concorrenti)
+#   - WRITE_RE non triggera piu su redirezioni innocue (2>/dev/null, 2>&1, ecc.)
+# v1.3 (2026-07-22, fix GTD 138a9e59 — clobber cross-window):
+#   - whitelist post-chiusura (sezione 2) estesa a wi_checkpoint/wi_end/
+#     doc_item_upsert: WI_CACHE e' keyed solo per agent_slug (non per WI/
+#     sessione), quindi due window dello stesso agente si clobberano la cache.
+#     Se una window chiude il proprio WI (status=done in cache) mentre
+#     un'altra window, con un WI DIVERSO regolarmente active a DB, prova a
+#     chiudere IL PROPRIO, veniva bloccata perche' questi 3 tool non erano
+#     nella whitelist post-close. Fix minimale (non DB round-trip): questi
+#     tool sono di per se' azioni di chiusura/checkpoint — lasciarli passare
+#     su cache stale e' innocuo (nel caso peggiore un checkpoint/end ridondante
+#     sul WI sbagliato in cache, non una scrittura di governance saltata) ed
+#     e' lo stesso principio gia' applicato a gtd_update/board_send/wi_start.
+#     Root cause strutturale (cache non per-sessione) resta aperta — tracciata
+#     separatamente, non risolta da questa patch.
+# v1.4 (2026-07-23, fix P1 Achille — CACHE_DIR relativo, blocco forge b575b2e1):
+#   - CACHE_DIR era ".claude/cache" (path RELATIVO alla cwd della bash
+#     persistente). Un agente che fa `cd` fuori dalla project root (es. forge
+#     in packages/app-kit) fa perdere al hook il file WI_CACHE al path
+#     relativo -> crash prima degli echo -> harness tratta come errore/block
+#     -> tutte le write bloccate. Fix: CACHE_DIR ora risolto come ASSOLUTO da
+#     CLAUDE_PROJECT_DIR se presente, altrimenti self-locating dalla posizione
+#     dello script stesso (hooks/ -> .. -> project root). Il hook funziona
+#     ora indipendentemente dalla cwd del chiamante.
+#   - Effetto collaterale voluto: chiude anche il buco no-op silenzioso su
+#     window con CLAUDE_PROJECT_DIR vuoto (GTD 582de253) — con path
+#     self-locating il gate torna a trovare la cache e ad enforceare davvero.
+# v1.5 (2026-07-30, EVAL-it-manager-002 / §6b stress-test 2026-07-29, GO+sign-off
+#   loomy msg 82ba0efd/fd40bfeb, D-105):
+#   - sezione 2, ramo "jq non installato": WARN+exit 0 (fail-open) -> BLOCK+exit 2
+#     (fail-closed). Se jq manca il gate non puo' validare le pre_conditions del
+#     WI attivo (sezione 4 dipende da jq) e quindi non puo' garantire enforcement:
+#     lasciar passare era un bypass totale indipendente dal contenuto della
+#     cache, residuo mai convertito dall'intento dichiarato in v1.1 ("prima il
+#     gate era fail-open"). Nessun agente della flotta impattato al deploy (jq
+#     presente ovunque, verificato) — chiude un fail-mode teorico/futuro.
+# v1.6 (2026-07-30, EVAL-forge-005 + verifica loomy msg 391ed53c, GTD afe3e5c7):
+#   il v1.5 aveva chiuso il path edit/write (37/37 verificato) ma introdotto/
+#   lasciato scoperti due difetti nuovi, entrambi isolati da forge (74 casi):
+#   - difetto A (sezione 0.5, LIVE su tutti i 37 gate): `exec 9>"$LOCK_FILE"
+#     2>/dev/null` e' `exec` senza comando -> il redirect di stderr diventa
+#     PERMANENTE per il resto dello script, quindi ogni cat >&2 di BLOCK (incl.
+#     il fail-closed appena aggiunto in v1.5) veniva scritto nel nulla. Fix:
+#     testa la scrivibilita' del lock file con un redirect scoped alla riga
+#     (`: > "$LOCK_FILE" 2>/dev/null`), poi fai l'exec vero senza sopprimere
+#     stderr.
+#   - difetto B (sezione 0, modalita' --bash): senza jq, BASH_CMD restava
+#     sempre vuoto e l'early-exit "permissive" scattava PRIMA di arrivare al
+#     fail-closed di sezione 2 -> passavano ungoverned i comandi external
+#     (git push, npm publish, supabase db push, vercel --prod) proprio quando
+#     mancava la capacita' di giudicarli. Fix: jq assente -> BLOCK immediato in
+#     sezione 0 (stesso principio v1.5); solo un payload vuoto/non ispezionabile
+#     con jq presente resta permissive.
 #
 # Spec: hub/initiatives/governance-compliance/design.md sezione 6
 #
@@ -84,19 +143,42 @@ fi
 # hub/governance-policy.yaml sezione external.bash_commands) e scritture shell
 # (redirect, sed -i, rm/mv/cp, tee, psql/curl mutanti).
 if [[ "$BASH_MODE" == "true" ]]; then
+  # v1.6 (2026-07-30, fix defect B — GTD afe3e5c7, segnalato loomy msg 391ed53c):
+  # senza jq, BASH_CMD restava sempre vuoto e la riga sotto usciva 0 PRIMA del
+  # fail-closed di sezione 2 -> con jq assente passavano ungoverned esattamente
+  # i comandi external (git push, npm publish, supabase db push, vercel --prod)
+  # che questa sezione esiste per intercettare. jq assente e payload vuoto sono
+  # due casi diversi: solo il secondo resta permissive.
+  if ! command -v jq &>/dev/null; then
+    cat >&2 <<'EOF'
+[governance-gate BLOCK]
+
+jq non installato — modalita' --bash non puo' ispezionare tool_input.command,
+quindi non puo' distinguere un comando read-only da uno external/write (git
+push, npm publish, supabase db push, vercel --prod, ...). Fail-closed (non
+fail-open): installa jq oppure segnala it-manager/DBA se l'ambiente e'
+strutturalmente privo di jq.
+EOF
+    exit 2
+  fi
+
   BASH_CMD=""
-  if command -v jq &>/dev/null && [[ -n "$HOOK_INPUT" ]]; then
+  if [[ -n "$HOOK_INPUT" ]]; then
     BASH_CMD=$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_input.command // empty' 2>/dev/null || echo "")
   fi
-  # Senza comando ispezionabile: permissive (non possiamo giudicare)
+  # Payload vuoto/non ispezionabile (jq presente, ma niente da leggere): permissive
   [[ -z "$BASH_CMD" ]] && exit 0
 
   EXTERNAL_RE='git push|git push --force|supabase (db push|functions deploy|secrets set)|vercel (--prod|deploy)|npm publish|gh release|systemctl (restart|stop|disable)|docker (push|rm)'
   WRITE_RE='(^|[^>])>>?[[:space:]]*[^&[:space:]]|sed[[:space:]]+-i|\btee\b|\brm[[:space:]]|\bmv[[:space:]]|\bcp[[:space:]]|mkdir|chmod|chown|truncate|\bln[[:space:]]|psql .*(-c|-f)|curl .*-(X[[:space:]]*(POST|PUT|PATCH|DELETE)|d[[:space:]])|python[0-9.]*[[:space:]].*(setup|install)|pip[0-9.]*[[:space:]]+install|npm[[:space:]]+(install|ci)|git[[:space:]]+(commit|merge|rebase|reset|checkout[[:space:]]+-b|cherry-pick|tag)'
+  # Redirezioni innocue (fd-dup, /dev/null) NON sono scritture "gated": ripulisci
+  # prima di matchare WRITE_RE, altrimenti `2>/dev/null` triggera un falso BLOCK.
+  NOISE_RE='[0-9]?>>?&?[0-9]?[[:space:]]*/dev/null|[0-9]>&[0-9]'
+  BASH_CMD_CLEAN=$(echo "$BASH_CMD" | sed -E "s#$NOISE_RE##g")
 
   if echo "$BASH_CMD" | grep -qE "$EXTERNAL_RE"; then
     EXTERNAL=true   # prosegue: richiede WI attivo + segnala external
-  elif echo "$BASH_CMD" | grep -qE "$WRITE_RE"; then
+  elif echo "$BASH_CMD_CLEAN" | grep -qE "$WRITE_RE"; then
     :               # scrittura via shell: prosegue col WI check standard
   else
     exit 0          # bash read-only: nessun gate
@@ -104,10 +186,41 @@ if [[ "$BASH_MODE" == "true" ]]; then
 fi
 
 # ------------------------------------------------------------------------------
-# Paths
+# Paths — risolti come ASSOLUTI, indipendenti dalla cwd del chiamante (v1.4).
+# Priorita': CLAUDE_PROJECT_DIR (se valorizzato dall'harness) > self-locating
+# dalla posizione dello script (questo file vive in <project-root>/.claude/hooks/).
 # ------------------------------------------------------------------------------
-CACHE_DIR=".claude/cache"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$SCRIPT_DIR}"
+CACHE_DIR="$PROJECT_ROOT/.claude/cache"
 WI_CACHE="$CACHE_DIR/current-work-item.json"
+
+# ------------------------------------------------------------------------------
+# 0.5 Lock: serializza le esecuzioni concorrenti del gate (fix WI ccde9d50).
+# Senza questo, due tool gated in parallelo possono leggere/scrivere WI_CACHE
+# a cavallo l'uno dell'altro (self-modifica non atomica in sezione 6) e vedere
+# uno stato transitoriamente vuoto/stale -> falso BLOCK "status=done" col DB
+# active. flock sull'intero gate (fd 9, rilasciato all'uscita del processo)
+# rende read-status + increment-counter una sezione critica unica. Timeout
+# breve: se flock non e disponibile o il lock e contended troppo a lungo, il
+# gate prosegue permissivo invece di bloccare in deadlock.
+# ------------------------------------------------------------------------------
+mkdir -p "$CACHE_DIR" 2>/dev/null || true
+LOCK_FILE="$CACHE_DIR/.governance-gate.lock"
+if command -v flock &>/dev/null; then
+  # v1.6 (2026-07-30, fix defect A — GTD afe3e5c7, segnalato loomy msg 391ed53c):
+  # `exec 9>"$LOCK_FILE" 2>/dev/null` ridirigeva stderr in modo PERMANENTE per
+  # tutto il resto dello script (exec senza comando applica i redirect alla
+  # shell corrente) -> ogni BLOCK successivo (sezioni 1-4) veniva scritto nel
+  # nulla, su tutti i gate deployati. Il fd 9 sul lock file DEVE restare aperto
+  # per tutta l'esecuzione (e' il punto della flock) ma stderr no: si testa
+  # prima la scrivibilita' del lock file con un redirect scoped alla singola
+  # riga (non exec), poi si fa l'exec vero senza sopprimere stderr.
+  if : > "$LOCK_FILE" 2>/dev/null; then
+    exec 9>"$LOCK_FILE"
+    flock -w 2 9 2>/dev/null || true
+  fi
+fi
 
 # ------------------------------------------------------------------------------
 # 1. Verifica WI cache esiste
@@ -136,11 +249,30 @@ fi
 # 2. Verifica WI status attivo
 # ------------------------------------------------------------------------------
 if ! command -v jq &> /dev/null; then
-  echo "[governance-gate WARN] jq non installato — skip validazione cache (permissive)" >&2
-  exit 0
+  cat >&2 <<'EOF'
+[governance-gate BLOCK]
+
+jq non installato — il gate non puo' validare le pre_conditions del Work Item
+attivo, quindi non puo' garantire che le scritture siano governate. Fail-closed
+(non fail-open): installa jq oppure segnala it-manager/DBA se l'ambiente e'
+strutturalmente privo di jq.
+EOF
+  exit 2
 fi
 
-WI_STATUS=$(jq -r '.status // "unknown"' "$WI_CACHE" 2>/dev/null || echo "unknown")
+# Difesa in profondita' oltre al lock: se jq non riesce a parsare la cache
+# (letta a meta' scrittura da un hook concorrente pre-fix, o su ambienti senza
+# flock), ritenta un paio di volte prima di trattare lo stato come "unknown"
+# e bloccare. Un file valido si stabilizza in pochi ms.
+WI_STATUS="unknown"
+for _attempt in 1 2 3; do
+  if WI_STATUS=$(jq -r '.status // "unknown"' "$WI_CACHE" 2>/dev/null); then
+    [[ "$WI_STATUS" != "unknown" || $_attempt == 3 ]] && break
+  else
+    WI_STATUS="unknown"
+  fi
+  sleep 0.05
+done
 WI_ID=$(jq -r '.id // "unknown"' "$WI_CACHE" 2>/dev/null || echo "unknown")
 WI_INTENT=$(jq -r '.intent // ""' "$WI_CACHE" 2>/dev/null || echo "")
 
@@ -148,8 +280,31 @@ case "$WI_STATUS" in
   active|emergency|exempt)
     # OK, procede a verifica pre-conditions
     ;;
-  paused)
-    cat >&2 <<EOF
+  paused|done|failed)
+    # Whitelist post-chiusura (D-069 two-phase close + summary D-014):
+    # dopo wi_end (incl. status=waiting -> WI.status=paused) o wi_pause sono
+    # legittimi SOLO gli step di chiusura/segnalazione — arm GTD, summary a
+    # loomy, runtime_request. Tutto il resto resta bloccato. Fix GTD 8056c224
+    # (2026-07-21): il ramo 'paused' bloccava runtime_request/board_send anche
+    # subito dopo un wi_end(status=waiting) regolare, rompendo la sequenza di
+    # chiusura obbligatoria D-058/§0ter (la window restava appesa).
+    # Fix GTD 138a9e59 (2026-07-22, v1.3): aggiunti wi_checkpoint/wi_end/
+    # doc_item_upsert — clobber cross-window della cache (keyed solo per
+    # agent_slug) bloccava la chiusura pulita del PROPRIO WI (active a DB)
+    # quando un'altra window dello stesso agente aveva appena scritto
+    # status=done/paused nella cache condivisa.
+    POST_CLOSE_TOOL=""
+    if command -v jq &>/dev/null && [[ -n "$HOOK_INPUT" ]]; then
+      POST_CLOSE_TOOL=$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
+    fi
+    case "$POST_CLOSE_TOOL" in
+      mcp__board__gtd_update|mcp__board__gtd_complete|mcp__board__board_send|mcp__board__runtime_request|mcp__board__wi_start|mcp__board__wi_checkpoint|mcp__board__wi_end|mcp__board__doc_item_upsert)
+        echo "[governance-gate] WI $WI_STATUS — consentito solo step di chiusura D-069/D-014: $POST_CLOSE_TOOL" >&2
+        exit 0
+        ;;
+    esac
+    if [[ "$WI_STATUS" == "paused" ]]; then
+      cat >&2 <<EOF
 [governance-gate BLOCK]
 
 Work Item corrente e in pausa (status=paused).
@@ -162,23 +317,8 @@ Prima di scrivere, riprendi il WI con:
 
 Oppure aprine uno nuovo con wi-start.
 EOF
-    exit 2
-    ;;
-  done|failed)
-    # Whitelist post-chiusura (D-069 two-phase close + summary D-014):
-    # dopo wi_end sono legittimi SOLO gli step di chiusura — arm GTD, summary
-    # a loomy, runtime_request. Tutto il resto resta bloccato.
-    POST_CLOSE_TOOL=""
-    if command -v jq &>/dev/null && [[ -n "$HOOK_INPUT" ]]; then
-      POST_CLOSE_TOOL=$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
-    fi
-    case "$POST_CLOSE_TOOL" in
-      mcp__board__gtd_update|mcp__board__gtd_complete|mcp__board__board_send|mcp__board__runtime_request|mcp__board__wi_start)
-        echo "[governance-gate] WI chiuso ($WI_STATUS) — consentito solo step di chiusura D-069/D-014: $POST_CLOSE_TOOL" >&2
-        exit 0
-        ;;
-    esac
-    cat >&2 <<EOF
+    else
+      cat >&2 <<EOF
 [governance-gate BLOCK]
 
 Work Item corrente e gia chiuso (status=$WI_STATUS).
@@ -187,6 +327,7 @@ La cache non e stata aggiornata correttamente dalla skill session-manager v2.
 Apri un nuovo WI con:
   wi-start --new --intent "..."
 EOF
+    fi
     exit 2
     ;;
   *)
@@ -292,7 +433,12 @@ fi
 # non lo passa in $* per ora). La skill session-manager v2 popola questo campo
 # in Mode 3 (Checkpoint) leggendo la conversazione. Qui incrementiamo solo
 # tool_uses counter come euristica per checkpoint periodico.
-TMP=$(mktemp) || true
+# mktemp NELLA STESSA DIRECTORY di WI_CACHE (non /tmp): garantisce che la `mv`
+# sia una rename atomica sullo stesso filesystem, non un copy+unlink cross-device
+# (che lascerebbe una finestra di file parziale/assente leggibile da un altro
+# hook in corsa). Combinato col lock in 0.5, l'intera read+increment+write e'
+# ora una sezione critica.
+TMP=$(mktemp "$CACHE_DIR/.current-work-item.XXXXXX.json") || true
 if [[ -n "${TMP:-}" ]]; then
   { jq '.in_flight_state.tool_uses = ((.in_flight_state.tool_uses // 0) + 1)' "$WI_CACHE" > "$TMP" && mv "$TMP" "$WI_CACHE"; } 2>/dev/null || rm -f "$TMP" 2>/dev/null || true
 fi
