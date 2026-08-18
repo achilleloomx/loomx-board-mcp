@@ -60,6 +60,51 @@ function docRwHandle(db: SupabaseClient): { agentInProject: (p: string) => Promi
   return h.__docRw && h.agentInProject ? { agentInProject: h.agentInProject } : null;
 }
 
+// D-167 extended (GTD dc4e943e): membership on the project the CALLER NAMED says
+// nothing about a document living in a project they did not name, so "you can see
+// project X" was never grounds for "…therefore this document is new".
+//
+// Measured 2026-08-18 against production RLS (`documents_select` USING
+// loomx_document_visibility_predicate(project_id, visibility)), as board-mcp under
+// doc_rw: visibility='org' rows are readable from every project (all 6 projects
+// board-mcp has no membership on), while visibility='project'/'team' rows of those
+// same projects evaluate false and are filtered out silently. So 0 rows means:
+//   (a) the document does not exist                        → doc_create is safe
+//   (b) it exists elsewhere, org-visible                   → detectable (probe below)
+//   (c) it exists elsewhere, project/team-visible          → INDISTINGUISHABLE from (a)
+//
+// (b) needs no probe here: docItemUpsert's own lookup is already by id alone, in
+// this same transaction and role, so anything a probe could see it has seen — the
+// mismatch branch fires and documentNotFoundError is never reached. Adding the
+// "non-scoped probe" the GTD proposed would be the identical query run twice and a
+// branch no callsite can reach. What was actually missing on that path was the
+// instruction, not the detection (see projectMismatchError).
+// (c) is the case that minted the CFG-090 duplicate: loomy created 794e873c in
+// project 669fd07b at 06:40 on 2026-08-16 (doc_create defaults to
+// visibility='project'), board-mcp — not a member — was told "not found, create it
+// first" at 07:15 and created its own document at 07:18; the row only became
+// org-visible later that day. Nothing reachable from this tool can close (c)
+// without a SECURITY DEFINER existence oracle (DBA-side DDL, D-005), so the member
+// branch must stop asserting a safety it cannot verify.
+
+// Shared diagnosis for "the document is real, the project_id isn't". The
+// instruction matters as much as the diagnosis: learning that a document belongs to
+// another project is exactly the moment an agent is tempted to create its own copy
+// in the project it named (CFG-090, 2026-08-16).
+function projectMismatchError(
+  documentId: string,
+  ownerProjectId: string,
+  namedProjectId: string,
+  title?: string
+): string {
+  return (
+    `project_id mismatch (the document exists, the project_id doesn't match): document ${documentId} ` +
+    `belongs to project ${ownerProjectId}${title ? ` ("${title}")` : ""}, not ${namedProjectId}. ` +
+    `doc_items inherit the document's project (anti-divergence FK). Do NOT call doc_create — retry with ` +
+    `project_id=${ownerProjectId}, or ask whoever gave you ${namedProjectId} which project they meant (D-167).`
+  );
+}
+
 async function documentNotFoundError(
   db: SupabaseClient,
   documentId: string,
@@ -67,25 +112,34 @@ async function documentNotFoundError(
   selfSlug: string
 ): Promise<string> {
   const rw = docRwHandle(db);
-  if (rw) {
-    try {
-      const member = await rw.agentInProject(projectId);
-      if (!member) {
-        return (
-          `Access denied or not visible: '${selfSlug}' has no membership/visibility on project ${projectId} ` +
-          `— document_id '${documentId}' may exist but that can't be confirmed from here (D-167). ` +
-          `Do NOT call doc_create — that would risk minting a duplicate. Ask an agent with access ` +
-          `(e.g. loomy) to check, or request project membership from dba.`
-        );
-      }
-    } catch {
-      // Membership probe is a diagnostic aid, not load-bearing — fall through to
-      // the plain message rather than block the error path on it failing too.
-    }
+  if (!rw) {
+    return `document_id '${documentId}' not found in project ${projectId}.`;
   }
+
+  try {
+    const member = await rw.agentInProject(projectId);
+    if (!member) {
+      return (
+        `Access denied or not visible: '${selfSlug}' has no membership/visibility on project ${projectId} ` +
+        `— document_id '${documentId}' may exist but that can't be confirmed from here (D-167). ` +
+        `Do NOT call doc_create — that would risk minting a duplicate. Ask an agent with access ` +
+        `(e.g. loomy) to check, or request project membership from dba.`
+      );
+    }
+  } catch {
+    // Membership probe is a diagnostic aid, not load-bearing — fall through to
+    // the plain message rather than block the error path on it failing too.
+  }
+
+  // (a) or (c) — and the tool cannot tell which, so it says so instead of guessing.
   return (
-    `document_id '${documentId}' not found in project ${projectId} (you have visibility on this project — ` +
-    `if this is genuinely new, create it first with doc_create).`
+    `document_id '${documentId}' not found in project ${projectId}. You do have visibility on ` +
+    `${projectId}, but that is not evidence the document is new: a document owned by ANOTHER project ` +
+    `with visibility='project'/'team' is invisible to you and looks exactly like this (D-167 — the ` +
+    `2026-08-16 CFG-090 duplicate was minted on this exact branch). You did not invent this ` +
+    `document_id: if a brief or message handed it to you, a wrong project_id is the likelier fault — ` +
+    `ask its author (or loomy) which project the document really belongs to. Call doc_create only to ` +
+    `create a genuinely new document, and then use the document_id it returns.`
   );
 }
 
@@ -274,20 +328,19 @@ export async function docItemUpsert(
   }
 
   // Validate item_type belongs to the document's document_type.
+  // Not project-scoped, deliberately: a document that RLS lets us read but that
+  // lives in another project must surface as a mismatch, never as "not found".
   const { data: docRow, error: docErr } = await db
     .from(DOCUMENTS)
-    .select("id, project_id, document_type")
+    .select("id, project_id, document_type, title")
     .eq("id", args.document_id)
     .maybeSingle();
   if (docErr) return err(`Failed to load document ${args.document_id}: ${docErr.message}`);
   if (!docRow) return err(await documentNotFoundError(db, args.document_id, args.project_id, ctx.selfSlug));
 
-  const doc = docRow as { id: string; project_id: string; document_type: string };
+  const doc = docRow as { id: string; project_id: string; document_type: string; title?: string };
   if (doc.project_id !== args.project_id) {
-    return err(
-      `project_id mismatch: document ${args.document_id} belongs to project ${doc.project_id}, ` +
-      `not ${args.project_id}. doc_items inherit the document's project (anti-divergence FK).`
-    );
+    return err(projectMismatchError(args.document_id, doc.project_id, args.project_id, doc.title));
   }
   if (!itemTypeAllowedForDocumentType(args.item_type, doc.document_type)) {
     return err(

@@ -31,7 +31,12 @@ function uuid(): string {
   return `00000000-0000-4000-8000-${n}`;
 }
 
-function makeDb(store: Store, members: Set<string> = new Set()): SupabaseClient {
+// `rls: true` makes SELECTs on `documents` behave like production does (measured
+// 2026-08-18 under doc_rw: documents_select USING loomx_document_visibility_predicate
+// → visibility='org' readable from anywhere, 'project'/'team' only for members).
+// Opt-in: the pre-existing tests seed documents into projects they hold no
+// membership on, and enforcing RLS for them would test the fake, not the handler.
+function makeDb(store: Store, members: Set<string> = new Set(), opts: { rls?: boolean } = {}): SupabaseClient {
   store.documents ??= [];
   store.doc_items ??= [];
   store.doc_item_links ??= [];
@@ -116,6 +121,9 @@ function makeDb(store: Store, members: Set<string> = new Set()): SupabaseClient 
       }
       // select
       let rows = apply(store[table]);
+      if (opts.rls && table === "documents") {
+        rows = rows.filter((r) => r.visibility === "org" || members.has(r.project_id as string));
+      }
       if (orderCol) {
         rows = [...rows].sort((a, b) => {
           const av = a[orderCol!], bv = b[orderCol!];
@@ -737,18 +745,77 @@ test("doc_item_upsert on a project the caller has no standing on: 403-style mess
   assert.doesNotMatch((res as any).error, /create it first with doc_create/i);
 });
 
-test("doc_item_upsert on a project the caller IS a member of: plain 404, safe to doc_create (D-167)", async () => {
+// ---------------------------------------------------------------------------
+// D-167 extended (GTD dc4e943e) — the three outcomes of a 0-row document lookup.
+// The fakes run with rls:true so `documents` hides what production hides.
+// ---------------------------------------------------------------------------
+
+function seedDocument(store: Store, projectId: string, visibility: string, title: string): string {
+  const id = uuid();
+  (store.documents ??= []).push({
+    id, project_id: projectId, document_type: "decisions", title,
+    visibility, status: "draft", version: "1.0", owner: "loomy",
+  });
+  return id;
+}
+
+test("doc_item_upsert, document absent: 404 that no longer claims doc_create is safe (D-167)", async () => {
   const store: Store = {};
   seedProjects(store);
-  const db = makeDb(store, new Set([PROJ_A]));
-  const bogusDocId = uuid(); // never created
+  const db = makeDb(store, new Set([PROJ_A]), { rls: true });
+  const bogusDocId = uuid(); // never created, anywhere
 
   const res = await docItemUpsert(db, {
     project_id: PROJ_A, document_id: bogusDocId, item_type: "requirement", code: "REQ-003",
   }, ctx);
   assert.equal(res.ok, false);
   assert.match((res as any).error, /not found in project/);
-  assert.match((res as any).error, /create it first with doc_create/i);
+  // Visibility on the NAMED project is not evidence about other projects: the
+  // caller must be told what it cannot rule out, not waved through to doc_create.
+  assert.match((res as any).error, /visibility='project'\/'team' is invisible to you/);
+  assert.doesNotMatch((res as any).error, /create it first with doc_create/i);
+});
+
+test("doc_item_upsert, document exists in ANOTHER project and is org-visible: names the real project, forbids doc_create (D-167)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  // The CFG-090 shape: caller is a member of the project it named, the document
+  // lives elsewhere. Org-visible → RLS lets it through, so docItemUpsert's own
+  // non-scoped lookup reaches the mismatch branch before documentNotFoundError.
+  // What this test pins is that the branch now carries the *instruction* (don't
+  // create, retry there) and not just the diagnosis.
+  const realDocId = seedDocument(store, PROJ_B, "org", "Configurazioni verificate — decision-enforcement");
+  const db = makeDb(store, new Set([PROJ_A]), { rls: true });
+
+  const res = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: realDocId, item_type: "requirement", code: "REQ-004",
+  }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, new RegExp(`belongs to project ${PROJ_B}`));
+  assert.match((res as any).error, /Do NOT call doc_create/);
+  assert.match((res as any).error, new RegExp(`retry with project_id=${PROJ_B}`));
+  assert.match((res as any).error, /Configurazioni verificate/); // title, so the caller recognises it
+});
+
+test("doc_item_upsert, document exists in ANOTHER project but is project-visible: no false 'safe to create', no leak (D-167)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  // The 2026-08-16 incident verbatim: loomy's document in PROJ_B with the
+  // doc_create default visibility='project'; caller is a member of PROJ_A only.
+  const hiddenDocId = seedDocument(store, PROJ_B, "project", "loomy's private doc");
+  const db = makeDb(store, new Set([PROJ_A]), { rls: true });
+
+  const res = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: hiddenDocId, item_type: "requirement", code: "REQ-005",
+  }, ctx);
+  assert.equal(res.ok, false);
+  // Leak floor: RLS hid the row, so the message must not disclose its existence,
+  // its owning project, or its title — the probe adds no read the caller lacks.
+  assert.doesNotMatch((res as any).error, new RegExp(PROJ_B));
+  assert.doesNotMatch((res as any).error, /loomy's private doc/);
+  // Honesty floor: indistinguishable from "absent", so it must not invite doc_create.
+  assert.doesNotMatch((res as any).error, /create it first with doc_create/i);
+  assert.match((res as any).error, /not evidence the document is new/);
 });
 
 test("doc_query 0 rows + no project membership: visibility_gap:true (D-167, closes the GTD 63142305 false-green class)", async () => {

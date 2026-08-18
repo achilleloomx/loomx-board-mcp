@@ -4,6 +4,28 @@
 
 ---
 
+## Sessione #91 — 2026-08-18 (chiuso il buco D-167 «esiste, ma in un altro progetto» — GTD `dc4e943e`, WI `0b73b5f1`, v0.16.7)
+
+**Prima misura, e ribalta la premessa del GTD.** Il GTD (scritto in #90) dava per fatto che oggi board-mcp, su `794e873c` con `project_id=22ae4e79`, riceverebbe il ramo rassicurante «not found… create it first». **Falso, misurato:** il lookup di `docItemUpsert` (`src/docs.ts:277`) è **by-id, non project-scoped, fin dal commit iniziale** `40a4e4d` — e `794e873c` è `visibility=org`, quindi RLS la lascia passare. Il ramo che scatta è `project_id mismatch`, non il 404. Verificato eseguendo la chiamata vera sul path di produzione.
+
+**Ma il buco esiste, ed è un altro.** Misurato sotto `doc_rw` come board-mcp (`documents_select USING loomx_document_visibility_predicate(project_id, visibility)`): sui **6** progetti dove board-mcp non è membro, `visibility='org'` → **visibile**, `visibility='project'/'team'` → **filtrata in silenzio**. Quindi 0 righe significa (a) non esiste · (b) esiste altrove ed è org-visible · (c) esiste altrove ed è project/team-visible — e **(c) è indistinguibile da (a)**.
+
+**(c) è esattamente l'incidente del 16/08, ricostruito dai timestamp:** loomy crea `794e873c` in `669fd07b` alle **06:40** (`doc_create` default `visibility='project'`), board-mcp — non membro — riceve «not found, create it first» alle **07:15**, crea il proprio documento alle **07:18** (`de6879a4`). La riga risulta `updated_at` **21:44** dello stesso giorno: è diventata org-visible *dopo*. Il duplicato è nato sul ramo (c), che nessun probe raggiungibile da questo tool può chiudere.
+
+**Il probe non-scoped proposto dal GTD non è stato scritto, e la ragione è misurata:** sarebbe la **query identica** a quella che il callsite già fa, nella stessa transazione e nello stesso ruolo — un roundtrip in più e un ramo che nessun chiamante può raggiungere. Su quel path non mancava la *rilevazione*: mancava l'**istruzione**.
+
+**Fix, in due punti:**
+- `projectMismatchError` (nuovo, condiviso): il messaggio di mismatch ora *dice cosa fare* — «Do NOT call doc_create — retry with `project_id=Y`, o chiedi a chi ti ha dato X quale progetto intendeva» — e riporta il **titolo** del documento, così il chiamante lo riconosce. Sapere che il documento sta altrove è precisamente il momento in cui un agente è tentato di crearsene una copia (è ciò che accadde).
+- ramo «membro del progetto nominato»: **non promette più che sia sicuro creare**. La membership su X non è evidenza su un documento che vive in Y. Il messaggio dichiara cosa non può escludere e ordina la verifica (l'id non te lo sei inventato → risali a chi te l'ha dato) prima di qualsiasi `doc_create`.
+
+**Leak floor verificato, non assunto** (era la richiesta esplicita del GTD): nessun ramo rivela l'esistenza, il progetto o il titolo di una riga che RLS ha nascosto — pinnato da un test dedicato.
+
+**Test:** 3 rami nuovi in `tests/docs.test.ts` (assente · esiste-altrove-org-visible · esiste-altrove-ma-nascosto), su un fake con simulazione RLS **opt-in** (`makeDb(store, members, {rls:true})`) — opt-in perché i test preesistenti seminano documenti in progetti di cui non sono membri, e imporgli la RLS avrebbe testato il fake, non l'handler. Suite **147/147**. In più `tests/verify-d167-branches.ts`: gli stessi 3 rami eseguiti **contro il DB di produzione** via `runDocRw` — il fake è un mimo scritto a mano, solo il DB dice su quale ramo un chiamante atterra davvero. **ALL PASS.**
+
+**Residuo, non mio da chiudere:** il ramo (c) richiede un oracolo di esistenza `SECURITY DEFINER` lato DBA (es. `loomx_document_project(uuid) → uuid`). Proposto a dba con loomy in copia (D-005) — nessuna DDL scritta da qui.
+
+---
+
 ## Sessione #90 — 2026-08-18 (allineate a produzione le 2 decisioni superate dai fatti + arbitrata CFG-090 — GTD f1f93baf, WI `97e8e1c2`)
 
 **Autopilot dispatch, istruzione diretta di Achille:** «allinea le decisioni con quanto in produzione». Vincolo di metodo: **allineare non è riscrivere** — il corpo di una decisione non si tocca, si aggiunge una nota di stato datata o si registra un supersede.
