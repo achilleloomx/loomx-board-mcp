@@ -4,6 +4,36 @@
 
 ---
 
+## Sessione #90 — 2026-08-18 (allineate a produzione le 2 decisioni superate dai fatti + arbitrata CFG-090 — GTD f1f93baf, WI `97e8e1c2`)
+
+**Autopilot dispatch, istruzione diretta di Achille:** «allinea le decisioni con quanto in produzione». Vincolo di metodo: **allineare non è riscrivere** — il corpo di una decisione non si tocca, si aggiunge una nota di stato datata o si registra un supersede.
+
+**PARTE A — le due decisioni superate (progetto `596cd5fc`, documento `1da8642c`):**
+- **`D-004`** (service_role unico backend) → `status: active → superseded`, `attrs.superseded_by = "D-084"`, edge `supersedes` **D-084 → D-004**, nota di raccordo in coda. **Non ho usato `doc_supersede`**, che il GTD proponeva: quel tool crea una **nuova** riga trasportando il codice, e D-084 esiste già come riga propria — l'avrebbe duplicata. Il tool giusto per «una decisione già esistente ne rimpiazza un'altra» è `doc_link(relation_type='supersedes')`.
+- **`D-016`** (solo loomy riassegna `owner`) → nota di raccordo, `status` **invariato**. Il guard reale è `!(isLoomy || isBroker)` (`src/tools.ts:1248`) **fin dal commit iniziale** `40a4e4d` (2026-06-29, allora riga 783): la regola è nata più stretta di come è sempre stata applicata. Due dettagli che la rendono invisibile: il messaggio d'errore (`:1251`) e la description del tool (`:1226`) dicono entrambi «only loomy». La nota **registra lo scarto, non lo sana** — ratificare o ritirare il permesso del broker è di Achille.
+
+**PARTE A-bis — correzione dichiarata del mio verdetto di FASE 4:** `D-a5-F3` era `NON_APPLICATA`, **retrocessa a `PARZIALMENTE_APPLICATA`**. `documents.attrs jsonb NOT NULL DEFAULT '{}'` **esiste**, applicata dal DBA il 2026-06-27 (`20260627030000…f45.sql:21-23`, che cita testualmente «finding F3»). Manca solo la metà tool-floor (`docCreate` non la scrive, nessuno schema `attrs` doc-level nel registry). **Perché il primo giro sbagliò:** aveva dedotto lo schema da `src/docs.ts` invece di misurarlo — e, se avesse misurato con `information_schema`, avrebbe sbagliato lo stesso: sotto ruolo nativo `board-mcp` quella vista ritorna **zero righe** su `documents` (filtra per privilegio, solo `doc_rw` ha grant). Una colonna che esiste appare assente. **Per l'esistenza di una colonna si legge `pg_catalog`.** È la trappola D-167 riaffiorata un piano sotto, a livello `psql`.
+
+**PARTE A-ter — le non applicate, tracciate e NON implementate:** `D-010` aveva già `50d93acf`. Creati non armati `d6106e20` (D-150 hash-pinning, `waiting_on=loomy` + `no_auto_arm=true`: la forma del pinning non è ratificata) e `9e1805d9` (metà tool-floor di D-a5-F3). Tutti e tre agganciati alla propria decisione con `doc_link(target_kind='gtd')`.
+
+**PARTE B — CFG-090 arbitrato, e il verdetto è contro il CFG.** Il documento `794e873c` **esiste** e conteneva già tutte e 30 le righe `CFG-061..090`, copiate il **16/08 alle 21:44:39Z**. Non è nell'hub `22ae4e79` come diceva il brief: sta in **`669fd07b`** (*decision-enforcement*), `visibility=org`. Il probe del 16/08 aveva discriminato «esiste o non esiste» **interrogando il progetto sbagliato** e letto quello zero come conferma. Il messaggio dba `588c775c` aveva ragione. **Causa radice: il brief accoppiava un `project_id` e un `document_id` che non stanno insieme** — e `doc_item_upsert` valida quella coerenza, quindi non poteva che fallire, con un messaggio che imputava tutto all'assenza.
+
+**Buco confermato in D-167 (GTD `dc4e943e`, high):** il discriminante è `loomx_agent_in_project(project_id)` sul progetto **nominato dal chiamante**. Su `22ae4e79` board-mcp *ha* membership → oggi riceverebbe il ramo rassicurante *«not found… create it first»* e **minterebbe il duplicato che D-167 esiste per prevenire**. Il caso «esiste, ma in un altro progetto» non è coperto. Non riparato in questo giro (regola del mandato: non mescolare correzione documentale e fix di codice).
+
+**Escalation aperta a loomy (GTD `a33bf519`):** il corpus CFG-061..090 **vive in due progetti e sta già divergendo** — `CFG-086` era stato aggiornato solo in `596cd5fc` il 18/08, e questo giro ne ha aggiunte altre quattro (`CFG-063`, `CFG-076`, `CFG-088`, `CFG-090`). Quale copia sia canonica non lo decido io.
+
+**Altri CFG allineati:** `CFG-063` e `CFG-088` → divergenze **chiuse** dal commit `8c6629c` (16/08). `CFG-076` → difetto 1 chiuso (`0.16.1` → `0.16.6`, un bump per commit, verificati uno per uno), **difetto 2 invariato e strutturale** (nessun segnale di build per-window). `CFG-086` → tesi confermata, e il suo stesso elenco di slug è già stale (37 nel testo, 38 nel mio processo, 39 attivi in `board_agents`: manca `teams-bridge`) — dimostrazione gratuita della tesi, lasciata apposta non aggiornata. Corretto lì un `36`→`37` (errore di conteggio della sua stessa lista), **dichiarato nel documento** invece che fatto in silenzio.
+
+**Chiusi perché misurati risolti:** `40125115` (GRANT su `loomx_projects` — `project_list` risponde con 50 progetti dal ruolo nativo) e `e79c340d` (l'arbitraggio di CFG-090).
+
+**I conteggi NON sono migliorati, e non dovevano.** `req_without_sdes` **0 → 0**, `sdes_without_uat` **12 → 12**, link CFG→SDES **0 → 0** (33 `config_pattern`, gli unici 3 link sono fra `PROBE-A`/`PROBE-B`). Questo giro ha toccato decisioni e CFG, che non stanno su nessuna delle due catene: nessun link inventato per far quadrare un conteggio. Controllo positivo eseguito prima di fidarsi dello zero (`sdes_without_uat` ritorna 12 righe reali sullo stesso path RLS).
+
+**Verifica:** ogni scrittura riletta dal DB **fuori dai tool** (`psql` sotto `SET LOCAL ROLE doc_rw` + GUC `request.agent_slug='board-mcp'`), non solo dalla risposta di `doc_item_upsert`. Tutti gli upsert con `created:false`.
+
+**Code lasciate aperte:** (a) il titolo del documento `de6879a4` dice ancora «destinazione hub 794e873c non scrivibile», oggi falso — **non esiste un tool `doc_*` per aggiornare i metadati di un `documents`**, serve loomy o dba; (b) nit: `doc_query` ignora `limit` in modalità `traceability`.
+
+---
+
 ## Sessione #89 — 2026-08-18 (popolato il progetto di dominio `doc-in-db`: as-is misurato + 16 requisiti del modello — GTD ed44f955, D-166)
 
 **Autopilot dispatch.** WI `501b1afd`. Achille ha deciso il contrario di quanto avevo raccomandato nella sessione #88: `doc-in-db` (`1e59391d`) **non** si assorbe in `596cd5fc`, si riempie e diventa il progetto del **dominio** «modello documenti» (criterio D-166: curatore di dominio ≠ praticante di progetto). Le mie due ragioni per assorbire non reggevano — il modello è consumato da tutta la flotta, non solo da chi lo implementa, e «un quarto dei miei SDES lo descrive già» è un argomento a favore del contrario.
