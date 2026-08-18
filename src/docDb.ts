@@ -58,6 +58,13 @@ export interface DocRwDb {
   // past the caller's own RLS) and already GRANTed to doc_rw, so this needs no new DB
   // object: true if selfSlug leads/shares-team/co-engages on the project (or is loomy/pmo).
   agentInProject: (projectId: string) => Promise<boolean>;
+  // D-167 point 4 (dba msg 25bb24d9, migration 20260818215000): ground-truth existence
+  // oracle for the doc_item_upsert not-found branch — closes case (c) that
+  // agentInProject (membership on the NAMED project) could never resolve, since a
+  // document can exist and be hidden in a DIFFERENT project. doc_document_exists is
+  // SECURITY DEFINER, GRANTed to doc_rw + service_role, returns ONLY true/false — by
+  // design no project_id/owner, so the caller can never reconstruct or leak them.
+  documentExists: (documentId: string) => Promise<boolean>;
 }
 
 export function assertSlug(slug: string): void {
@@ -226,6 +233,11 @@ function makeDb(exec: PgExecutor): DocRwDb {
     },
     agentInProject: async (projectId: string) => {
       const { rows } = await exec("SELECT loomx_agent_in_project($1::uuid) AS ok", [projectId]);
+      const r = rows[0] as Row | undefined;
+      return Boolean(r && r.ok);
+    },
+    documentExists: async (documentId: string) => {
+      const { rows } = await exec("SELECT doc_document_exists($1::uuid) AS ok", [documentId]);
       const r = rows[0] as Row | undefined;
       return Boolean(r && r.ok);
     },

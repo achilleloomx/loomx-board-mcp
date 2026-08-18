@@ -55,9 +55,17 @@ function err(msg: string): { ok: false; error: string } {
 // caller have ANY standing on this project" without a new DB object: if not, the
 // 0 rows could be either case and creating is unsafe; if yes, the caller's view of
 // the project is authoritative and 0 rows really does mean "not found".
-function docRwHandle(db: SupabaseClient): { agentInProject: (p: string) => Promise<boolean> } | null {
-  const h = db as unknown as { __docRw?: boolean; agentInProject?: (p: string) => Promise<boolean> };
-  return h.__docRw && h.agentInProject ? { agentInProject: h.agentInProject } : null;
+interface DocRwProbes {
+  agentInProject?: (p: string) => Promise<boolean>;
+  documentExists?: (id: string) => Promise<boolean>;
+}
+
+// Each probe is checked independently at its call site (not both required
+// together) — a handle that only wires one of the two DB functions still serves
+// the caller that needs the other.
+function docRwHandle(db: SupabaseClient): DocRwProbes | null {
+  const h = db as unknown as { __docRw?: boolean } & DocRwProbes;
+  return h.__docRw ? { agentInProject: h.agentInProject, documentExists: h.documentExists } : null;
 }
 
 // D-167 extended (GTD dc4e943e): membership on the project the CALLER NAMED says
@@ -105,42 +113,48 @@ function projectMismatchError(
   );
 }
 
+// D-167 point 4 (dba msg 25bb24d9, migration 20260818215000): the membership
+// heuristic above (agentInProject on the NAMED project) could never close case (c)
+// — a document living in a DIFFERENT project, invisible by RLS, looks identical to
+// "doesn't exist" no matter what the caller's own standing is. doc_document_exists
+// is a ground-truth oracle: SECURITY DEFINER, sees past RLS, returns ONLY
+// true/false (by design — no project_id, no owner, so this function can neither
+// leak them nor reconstruct them from elsewhere). It replaces the guess with a
+// fact, so the two branches below are no longer probabilistic:
+//   exists === false → genuinely not found, doc_create is the right answer
+//   exists === true  → real document, hidden by RLS — do NOT create a duplicate
+// The exists===true branch is deliberately the SAME text regardless of the
+// caller's membership on the named project (dba's third, non-negotiable
+// constraint): if the wording varied case by case, the wording itself would be an
+// unaudited second oracle.
 async function documentNotFoundError(
   db: SupabaseClient,
   documentId: string,
   projectId: string,
   selfSlug: string
 ): Promise<string> {
+  const plain = `document_id '${documentId}' not found in project ${projectId}.`;
   const rw = docRwHandle(db);
-  if (!rw) {
-    return `document_id '${documentId}' not found in project ${projectId}.`;
-  }
+  if (!rw || !rw.documentExists) return plain;
 
   try {
-    const member = await rw.agentInProject(projectId);
-    if (!member) {
+    const exists = await rw.documentExists(documentId);
+    if (exists) {
       return (
-        `Access denied or not visible: '${selfSlug}' has no membership/visibility on project ${projectId} ` +
-        `— document_id '${documentId}' may exist but that can't be confirmed from here (D-167). ` +
-        `Do NOT call doc_create — that would risk minting a duplicate. Ask an agent with access ` +
-        `(e.g. loomy) to check, or request project membership from dba.`
+        `document_id '${documentId}' exists but is not accessible with your current identity. ` +
+        `Do NOT call doc_create — that would mint a duplicate. Request access from the project's ` +
+        `owner, or ask an agent with visibility (e.g. loomy) to check it.`
       );
     }
+    return plain;
   } catch {
-    // Membership probe is a diagnostic aid, not load-bearing — fall through to
-    // the plain message rather than block the error path on it failing too.
+    // Existence probe is a diagnostic aid, not load-bearing — on failure, don't
+    // assert a certainty (found or not) the call didn't actually establish.
+    return (
+      `${plain} Its existence could not be confirmed (existence probe failed) — do not assume it's ` +
+      `safe to call doc_create without checking with loomy or dba first.`
+    );
   }
-
-  // (a) or (c) — and the tool cannot tell which, so it says so instead of guessing.
-  return (
-    `document_id '${documentId}' not found in project ${projectId}. You do have visibility on ` +
-    `${projectId}, but that is not evidence the document is new: a document owned by ANOTHER project ` +
-    `with visibility='project'/'team' is invisible to you and looks exactly like this (D-167 — the ` +
-    `2026-08-16 CFG-090 duplicate was minted on this exact branch). You did not invent this ` +
-    `document_id: if a brief or message handed it to you, a wrong project_id is the likelier fault — ` +
-    `ask its author (or loomy) which project the document really belongs to. Call doc_create only to ` +
-    `create a genuinely new document, and then use the document_id it returns.`
-  );
 }
 
 // Recognise the composite-FK violation that a cross-app link triggers, and turn
@@ -1007,7 +1021,7 @@ async function visibilityGap(
   selfSlug: string
 ): Promise<VisibilityGap | undefined> {
   const rw = docRwHandle(db);
-  if (!rw) return undefined;
+  if (!rw || !rw.agentInProject) return undefined;
   try {
     const member = await rw.agentInProject(projectId);
     if (member) return undefined;

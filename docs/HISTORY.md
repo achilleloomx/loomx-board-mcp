@@ -4,6 +4,50 @@
 
 ---
 
+## Sessione #94 — 2026-08-18 (D-167 punto 4: chiuso il terzo ramo con l'oracolo di esistenza dba — GTD `b277c842`, WI `9a67873d`, v0.16.8)
+
+**Wake cold-start, task diretto.** dba (msg `25bb24d9`) segnalava l'oracolo `doc_document_exists(uuid) → boolean` applicato e inerte (migration `20260818215000`, SECURITY DEFINER, `EXECUTE` a `doc_rw`+`service_role`, ritorna SOLO true/false — mai project_id/owner): serviva la metà board-mcp, sul ramo "not found" di `doc_item_upsert` — SOLO lì — con due vincoli non negoziabili (l'istruzione "non crearne uno nuovo" e non nominare progetto/owner) più uno tecnico (applicare il 403 in modo **uniforme**, mai testo diverso per membership).
+
+**Il ramo che chiude era esattamente il residuo lasciato aperto in #91:** l'euristica `loomx_agent_in_project` (membership sul progetto *nominato*) non poteva mai risolvere il caso (c) — documento reale, vive in un ALTRO progetto, `visibility='project'/'team'` → invisibile e indistinguibile da "non esiste" (è così che è nato il duplicato CFG-090). L'oracolo dà la verità: `documentNotFoundError` (`src/docs.ts`) è stato riscritto per essere deterministico invece che probabilistico — `exists=false` → 404 piatto invariato (`document_id '...' not found in project ...`); `exists=true` → 403 nuovo, testo identico indipendentemente dalla membership del chiamante ("exists but is not accessible... Do NOT call doc_create... request access from the project's owner"); probe fallito → non asserisce nessuna delle due certezze.
+
+**Plumbing:** `documentExists` aggiunto a `DocRwDb` (`src/docDb.ts`, stesso pattern di `resolveDocItem`/`agentInProject` — `SELECT doc_document_exists($1::uuid) AS ok`). `docRwHandle` in `docs.ts` ridisegnato per esporre le due probe (`agentInProject`, `documentExists`) **indipendentemente** — un handle che ne wire solo una non rompe l'altro chiamante (`visibilityGap` usa solo `agentInProject`, invariato).
+
+**Verificato live** (`tests/verify-d167-branches.ts`, contro produzione via `LOOMX_DOC_RW_URL`): oracolo su documento reale org-visible → `true`; su UUID inesistente → `false`; ramo mismatch (b) e ramo 404 piatto (a) confermati sul path vero. Non trovato un documento reale project/team-visible e non-membro per testare il ramo 403 (c) end-to-end dal vero (richiederebbe un ID che nessun probe raggiungibile può elencare, essendo nascosto per definizione) — coperto invece da 3 test unitari dedicati su fake con RLS simulata, incluso uno che pinna esplicitamente l'uniformità del testo tra due chiamanti con membership diversa.
+
+**Test:** `tests/docs.test.ts` — 2 test riscritti (404 genuino, 404 "assente" con oracolo) + 3 nuovi (403 con leak-floor, uniformità membership-indipendente, fallback su probe fallito). Suite **31/31** su `docs.test.ts`, **149/149** sull'intero repo. `npm run build` pulito.
+
+**Consegna:** `board_ack` sul messaggio dba `25bb24d9`. Nessuna DDL — solo tool-layer, per mandato esplicito ("non chiamatela dentro una policy RLS").
+
+---
+
+## Sessione #93 — 2026-08-18 (casa unica CFG: bloccata su RLS + una discrepanza sui link trovata riverificando — GTD `efaac02c`, WI `2002bbbb`, waiting)
+
+**Autopilot dispatch, nessuna scrittura riuscita — task non completato, correttamente fermato due volte.** Loomy aveva arbitrato: `669fd07b` (Decision Enforcement) è la casa canonica delle 30 CFG-061..090, portare lì le 5 correzioni di oggi (`CFG-063/076/086/088/090`), tombstonare le 30 copie residue in `596cd5fc`.
+
+**Preparazione (fatta con la testa, non meccanica).** Letti i body completi delle 5 coppie via `psql` sotto `doc_rw`. 4 casi (`063/076/088` + `086` dopo verifica) erano prefissi esatti: la copia migrata coincide byte-per-byte con lo stato del 16/08 21:44, la correzione di oggi è un blocco appeso in coda — merge diretto. `CFG-086` sembrava avere una seconda divergenza indipendente (framing "hardcoded" in `669fd07b` vs "DB-derived a boot" nell'originale) — controllato `doc_item_history`: **entrambe le modifiche sono di oggi** (20:11 e 20:12), non una vecchia correzione mai migrata. `CFG-090` **non** è un merge diretto: la copia in `669fd07b` narra già "MIGRAZIONE ESEGUITA" in prima persona, mentre l'originale narra ancora il blocco RLS pre-migrazione — copiare l'originale sopra avrebbe reintrodotto un'affermazione falsa. Scritta una sezione di chiusura nuova invece di un copia-incolla.
+
+**Bloccato al momento di scrivere.** Le 5 `doc_item_upsert` su `669fd07b` falliscono sotto RLS — `loomx_agent_in_project('669fd07b','board-mcp') = false` (misurato, era già scritto nel corpo di `CFG-090` letto in preparazione, non l'ho collegato finché il write non ha fallito). Nessun dato corrotto: il controllo rilettura-e-confronto di `doc_item_upsert` ha intercettato lo scarto e risposto `ok:false` su tutti e 5. Richiesta membership a dba (msg `dc4de72c`, wake high), stesso pattern già risolto stamattina sull'hub.
+
+**Riverifica dei link (istruzione esplicita del GTD: fermarsi se ne trovo).** Primo giro con `code LIKE 'CFG-0%'` — falso positivo, il pattern include anche `CFG-002..047`, che hanno link legittimi (corpus diverso). Corretto lo scope a `CFG-061..090` esatto: trovati **2 `doc_item_wi_links`** su `CFG-074`/`CFG-083` verso il WI `a0cf88e8` (quello che ha scritto le 30 righe originali, `status=done`) — link che il GTD dava per assenti. Valutazione tecnica: innocuo (WI già chiuso, tombstone è UPDATE non DELETE, il link resta leggibile su riga superseded-immutabile) — ma per istruzione esplicita mi sono fermato invece di decidere da solo, segnalato a loomy (msg `2fc2f868`) invece di procedere silenzioso.
+
+**Stato:** GTD → `waiting`/`waiting_on=dba`. Nessuna riga toccata in nessuno dei due progetti. Escalation `a33bf519` non chiusa. WI chiuso `waiting` (non `done` — lavoro non completato), resume via `resume_hint`.
+
+---
+
+## Sessione #92 — 2026-08-18 (as-is §6: attrs validation solo a livello tool — omissione, non scelta; pg_jsonschema misurato — GTD `64cac59c`, WI `dd83184c`)
+
+**Autopilot dispatch, nessuna scrittura di codice.** Achille chiedeva 3 cose sulla riga di §6 dell'as-is `doc-in-db` («`doc_items.attrs` non è tipizzato dal DB, unico controllo a livello tool»): (1) deliberato o sfuggito, (2) `pg_jsonschema` disponibile misurato non dedotto, (3) parere se convenga chiuderlo.
+
+**1 — pattern-check, non giudizio a naso.** §9bis dichiara la propria regola di selezione («un requisito retroattivo che nulla soddisfa è un desiderio») e infatti promuove a §9bis, con motivazione esplicita, quasi ogni altro item elencato in §6 (tracciabilità cross-progetto, versionamento header, `document_type` mancante, staleness, persone) — tranne "attrs non tipizzato dal DB", che non ha motivazione da nessuna parte. Letto come omissione, non come costo accettato: proposto (non scritto, per mandato del GTD) un bullet §9bis a loomy/Achille, non auto-ratificato.
+
+**2 — misurato via `psql` diretto sul canale nativo:** `pg_available_extensions` → `pg_jsonschema | default:0.3.3 | installed:NULL`; `pg_extension` → 0 righe. Disponibile, non installata. `CREATE EXTENSION` è DDL → dba (D-005).
+
+**3 — parere:** il registro `docTypes.ts` è dato riusabile ma non un CHECK diretto (schema varia per `item_type`, serve dispatch via trigger). Un CHECK/trigger si applicherebbe anche a `service_role` (a differenza della RLS, §3/§7 D4) — lì il guadagno ci sarebbe, ma aggiungerebbe un terzo schema da tenere sincrono con D1 (drift registro↔DB già misurato in §7) invece di risolverlo. Raccomandazione: non prioritario ora.
+
+**Consegna:** `board_send` a loomy (msg `a421a180`), corto, con le 3 risposte + query eseguite. Nessuna scrittura su `doc-in-db` (mandato esplicito del GTD: proporre, non auto-scrivere).
+
+---
+
 ## Sessione #91 — 2026-08-18 (chiuso il buco D-167 «esiste, ma in un altro progetto» — GTD `dc4e943e`, WI `0b73b5f1`, v0.16.7)
 
 **Prima misura, e ribalta la premessa del GTD.** Il GTD (scritto in #90) dava per fatto che oggi board-mcp, su `794e873c` con `project_id=22ae4e79`, riceverebbe il ramo rassicurante «not found… create it first». **Falso, misurato:** il lookup di `docItemUpsert` (`src/docs.ts:277`) è **by-id, non project-scoped, fin dal commit iniziale** `40a4e4d` — e `794e873c` è `visibility=org`, quindi RLS la lascia passare. Il ramo che scatta è `project_id mismatch`, non il 404. Verificato eseguendo la chiamata vera sul path di produzione.

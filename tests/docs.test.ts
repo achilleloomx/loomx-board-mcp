@@ -201,7 +201,20 @@ function makeDb(store: Store, members: Set<string> = new Set(), opts: { rls?: bo
   // true iff selfSlug is in the caller-supplied `members` set for that project.
   const agentInProject = async (projectId: string): Promise<boolean> => members.has(projectId);
 
-  return { from: (table: string) => query(table), __docRw: true, resolveDocItem, relinkSuperseded, agentInProject } as unknown as SupabaseClient;
+  // D-167 point 4: mimics doc_document_exists (SECURITY DEFINER, sees past RLS) —
+  // a raw existence check against `documents`, ignoring visibility/membership
+  // entirely (that's the whole point of the oracle).
+  const documentExists = async (documentId: string): Promise<boolean> =>
+    (store.documents as Row[]).some((r) => r.id === documentId);
+
+  return {
+    from: (table: string) => query(table),
+    __docRw: true,
+    resolveDocItem,
+    relinkSuperseded,
+    agentInProject,
+    documentExists,
+  } as unknown as SupabaseClient;
 }
 
 // Simulates gov.relink_superseded raising an error (e.g. the SECURITY DEFINER
@@ -726,22 +739,22 @@ test("doc_query fields: rejects unknown column, accepts a valid projection", asy
   assert.equal((good as any).data.count, 1);
 });
 
-test("doc_item_upsert on a project the caller has no standing on: 403-style message, not the duplicate-inviting 404 (D-167)", async () => {
+test("doc_item_upsert on a document that genuinely doesn't exist: plain 404, oracle confirms it, doc_create is fine (D-167 point 4)", async () => {
   const store: Store = {};
   seedProjects(store);
-  const db = makeDb(store); // no memberships granted
-  const someDocId = uuid();
+  const db = makeDb(store); // no memberships granted — irrelevant once the oracle answers
+  const someDocId = uuid(); // never created, anywhere
 
-  // Tool layer genuinely can't tell "doesn't exist" from "exists but hidden" here —
-  // the point is it must NOT claim "not found, create it" when it can't tell (that
-  // false confidence is how the 2026-08-17 duplicate got minted, msg c692035a).
+  // Before D-167 point 4, a caller with no standing on the named project got the
+  // hedged "may exist but can't be confirmed" text even when the id was pure
+  // fiction — the membership heuristic couldn't tell. doc_document_exists can:
+  // ground truth says false, so the answer is the plain, unhedged 404.
   const res = await docItemUpsert(db, {
     project_id: PROJ_A, document_id: someDocId, item_type: "requirement", code: "REQ-002",
   }, { selfSlug: "dba", isLoomy: false });
   assert.equal(res.ok, false);
-  assert.match((res as any).error, /Access denied or not visible/);
-  assert.match((res as any).error, /no membership\/visibility on project/);
-  assert.doesNotMatch((res as any).error, /not found in project/);
+  assert.match((res as any).error, new RegExp(`not found in project ${PROJ_A}`));
+  assert.doesNotMatch((res as any).error, /Access denied|membership/i, "no membership heuristic needed anymore");
   assert.doesNotMatch((res as any).error, /create it first with doc_create/i);
 });
 
@@ -759,7 +772,7 @@ function seedDocument(store: Store, projectId: string, visibility: string, title
   return id;
 }
 
-test("doc_item_upsert, document absent: 404 that no longer claims doc_create is safe (D-167)", async () => {
+test("doc_item_upsert, document absent: plain 404, oracle rules out the RLS-hidden case (D-167 point 4)", async () => {
   const store: Store = {};
   seedProjects(store);
   const db = makeDb(store, new Set([PROJ_A]), { rls: true });
@@ -769,10 +782,7 @@ test("doc_item_upsert, document absent: 404 that no longer claims doc_create is 
     project_id: PROJ_A, document_id: bogusDocId, item_type: "requirement", code: "REQ-003",
   }, ctx);
   assert.equal(res.ok, false);
-  assert.match((res as any).error, /not found in project/);
-  // Visibility on the NAMED project is not evidence about other projects: the
-  // caller must be told what it cannot rule out, not waved through to doc_create.
-  assert.match((res as any).error, /visibility='project'\/'team' is invisible to you/);
+  assert.equal((res as any).error, `document_id '${bogusDocId}' not found in project ${PROJ_A}.`);
   assert.doesNotMatch((res as any).error, /create it first with doc_create/i);
 });
 
@@ -797,11 +807,13 @@ test("doc_item_upsert, document exists in ANOTHER project and is org-visible: na
   assert.match((res as any).error, /Configurazioni verificate/); // title, so the caller recognises it
 });
 
-test("doc_item_upsert, document exists in ANOTHER project but is project-visible: no false 'safe to create', no leak (D-167)", async () => {
+test("doc_item_upsert, document exists in ANOTHER project but is project-visible: 403, no leak, explicit 'do not create' (D-167 point 4)", async () => {
   const store: Store = {};
   seedProjects(store);
   // The 2026-08-16 incident verbatim: loomy's document in PROJ_B with the
   // doc_create default visibility='project'; caller is a member of PROJ_A only.
+  // Before D-167 point 4 this was indistinguishable from "absent" — the oracle
+  // now resolves it to a definite 403.
   const hiddenDocId = seedDocument(store, PROJ_B, "project", "loomy's private doc");
   const db = makeDb(store, new Set([PROJ_A]), { rls: true });
 
@@ -809,13 +821,57 @@ test("doc_item_upsert, document exists in ANOTHER project but is project-visible
     project_id: PROJ_A, document_id: hiddenDocId, item_type: "requirement", code: "REQ-005",
   }, ctx);
   assert.equal(res.ok, false);
-  // Leak floor: RLS hid the row, so the message must not disclose its existence,
-  // its owning project, or its title — the probe adds no read the caller lacks.
+  // Leak floor: the oracle returns ONLY true/false — the message must not
+  // reconstruct or disclose the document's real project or title from elsewhere.
   assert.doesNotMatch((res as any).error, new RegExp(PROJ_B));
   assert.doesNotMatch((res as any).error, /loomy's private doc/);
-  // Honesty floor: indistinguishable from "absent", so it must not invite doc_create.
+  // Repair floor (dba's constraint #1): the instruction that prevents the
+  // duplicate, not just a diagnosis.
+  assert.match((res as any).error, /Do NOT call doc_create/);
+  assert.match((res as any).error, /exists but is not accessible/);
   assert.doesNotMatch((res as any).error, /create it first with doc_create/i);
-  assert.match((res as any).error, /not evidence the document is new/);
+});
+
+test("doc_item_upsert 403 text is IDENTICAL regardless of the caller's own membership on the named project (dba's uniformity constraint)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const hiddenDocId = seedDocument(store, PROJ_B, "project", "loomy's private doc");
+
+  // Same hidden document, two callers: one a member of the NAMED project (PROJ_A),
+  // one a member of nothing at all. If the 403 wording varied between them, the
+  // wording itself would be an unaudited second oracle about membership.
+  const dbMember = makeDb(store, new Set([PROJ_A]), { rls: true });
+  const dbStranger = makeDb(store, new Set(), { rls: true });
+
+  const resMember = await docItemUpsert(dbMember, {
+    project_id: PROJ_A, document_id: hiddenDocId, item_type: "requirement", code: "REQ-006",
+  }, ctx);
+  const resStranger = await docItemUpsert(dbStranger, {
+    project_id: PROJ_A, document_id: hiddenDocId, item_type: "requirement", code: "REQ-006",
+  }, ctx);
+
+  assert.equal(resMember.ok, false);
+  assert.equal(resStranger.ok, false);
+  assert.equal((resMember as any).error, (resStranger as any).error, "identical text, membership-independent");
+});
+
+test("doc_item_upsert: existence-probe failure doesn't assert either certainty", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const bogusDocId = uuid();
+  const throwing = {
+    from: (table: string) => (makeDb(store) as any).from(table),
+    __docRw: true,
+    documentExists: async () => { throw new Error("function doc_document_exists(uuid) does not exist"); },
+  } as unknown as SupabaseClient;
+
+  const res = await docItemUpsert(throwing, {
+    project_id: PROJ_A, document_id: bogusDocId, item_type: "requirement", code: "REQ-007",
+  }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /not found in project/);
+  assert.match((res as any).error, /could not be confirmed/);
+  assert.doesNotMatch((res as any).error, /create it first with doc_create/i);
 });
 
 test("doc_query 0 rows + no project membership: visibility_gap:true (D-167, closes the GTD 63142305 false-green class)", async () => {

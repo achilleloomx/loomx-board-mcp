@@ -29,10 +29,11 @@ const upsert = (project_id: string, document_id: string) =>
 const CASES: Array<[string, string, string, RegExp, RegExp?]> = [
   // (b) the CFG-090 shape — org-visible document reached by the non-scoped lookup
   ["(b) real document, wrong project_id", HUB, REAL_DOC, /project_id mismatch.*belongs to project 669fd07b.*Do NOT call doc_create/s],
-  // (a)/(c) indistinguishable — must not invite doc_create
-  ["(a|c) absent id, caller IS a member", BOARD_MCP, ABSENT, /not evidence the document is new/, /create it first with doc_create/i],
-  // 403 — no standing on the named project at all
-  ["(403) absent id, caller NOT a member", FOREIGN, ABSENT, /Access denied or not visible/, /create it first with doc_create/i],
+  // D-167 point 4 (dba msg 25bb24d9, v0.16.8): ABSENT is genuinely absent — the
+  // oracle now says so with certainty, regardless of the caller's own membership
+  // on the named project. Both callers below get the SAME plain 404, no hedging.
+  ["(404) absent id, caller IS a member", BOARD_MCP, ABSENT, /^document_id '.*' not found in project/, /create it first with doc_create/i],
+  ["(404) absent id, caller NOT a member", FOREIGN, ABSENT, /^document_id '.*' not found in project/, /create it first with doc_create/i],
 ];
 
 let fail = 0;
@@ -43,5 +44,21 @@ for (const [name, project, doc, want, mustNotMatch] of CASES) {
   if (!good) fail++;
   console.log(`\n[${good ? "PASS" : "FAIL"}] ${name}\n  ${msg}`);
 }
+
+// D-167 point 4: the oracle itself, ground truth vs the SQL the DBA measured with
+// (SELECT direct → 0 rows / doc_document_exists → t on the same row).
+const probe = (id: string) =>
+  runDocRw("board-mcp", (db: any) => db.documentExists(id));
+const ORACLE_CASES: Array<[string, string, boolean]> = [
+  ["oracle on REAL_DOC (org-visible, exists)", REAL_DOC, true],
+  ["oracle on ABSENT (exists nowhere)", ABSENT, false],
+];
+for (const [name, id, want] of ORACLE_CASES) {
+  const got = await probe(id);
+  const good = got === want;
+  if (!good) fail++;
+  console.log(`\n[${good ? "PASS" : "FAIL"}] ${name}\n  doc_document_exists → ${got} (want ${want})`);
+}
+
 console.log(`\n${fail === 0 ? "ALL PASS" : `${fail} FAILED`}`);
 process.exit(fail === 0 ? 0 : 1);
