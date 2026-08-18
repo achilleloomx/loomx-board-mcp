@@ -4,6 +4,16 @@
 
 ---
 
+## Sessione #87 — 2026-08-18 (fix wi_end: status=failed senza failure_reason chiudeva comunque il WI — GTD 1a07aa26)
+
+**Autopilot dispatch.** GTD `1a07aa26`: `wi_end` non applicava il proprio contratto — la doc del tool dichiara `failure_reason` "Required when status=failed", ma `src/wi.ts:541` lo usava solo opportunisticamente (`if (args.status === "failed" && args.failure_reason) update.failure_reason = ...`): con `failure_reason` assente o stringa vuota il WI veniva comunque chiuso `failed`, silenziosamente, senza motivazione persistita né `[BLOCKER]` nel body GTD collegato.
+
+**Fix:** guardia esplicita in `wiEnd` (src/wi.ts:485-487) subito dopo il check di ownership, prima di qualunque lettura/mutazione a valle — `status=failed` con `failure_reason` mancante o solo whitespace ritorna errore esplicito (`"failure_reason is required when status=failed."`), il WI resta `active` e il GTD collegato resta intatto (nessun side-effect parziale, a differenza del bug). Lo schema zod del tool (`src/tools.ts:2862`) resta `failure_reason?: string` — la required-ness è condizionale su `status`, non esprimibile pulita a livello di schema, quindi l'enforcement resta runtime (stesso pattern degli altri gate in `wi.ts`, es. D-074).
+
+2 test di regressione in `tests/wi.test.ts` (failure_reason assente / blank su status=failed → rifiutato, WI+GTD invariati). `npx tsc` pulito, suite 145/145 verde (era 143 a fine sessione #86). Version bump 0.16.5→0.16.6.
+
+---
+
 ## Sessione #86 — 2026-08-18 (D-167: doc_item_upsert 404→403 honesto + doc_query visibility_gap — zero DDL, riuso loomx_agent_in_project)
 
 **Wake cold-start (D-093, normal).** Msg `26a5e70f` di loomy: D-167 (ratificata, doc `7e3dbb35`/item `1b40e8a1`) chiede due fix lato board-mcp emersi dal doppio blocco RLS del 17/08 su 669fd07b — dba bloccato in scrittura da `doc_item_upsert`, auditor bloccato in lettura su un gap-check che leggeva "0 righe" come corpus vuoto invece che RLS-block (GTD 63142305). GTD `79c229e8` tracciava già lo stesso task (messaggio loomy precedente alla formalizzazione D-167) — riusato come WI anchor, non duplicato.

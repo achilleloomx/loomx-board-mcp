@@ -482,6 +482,10 @@ export async function wiEnd(
     return { ok: false, error: `Cannot close WI owned by ${row.agent_slug}.` };
   }
 
+  if (args.status === "failed" && !args.failure_reason?.trim()) {
+    return { ok: false, error: "failure_reason is required when status=failed." };
+  }
+
   if (row.status === "done" || row.status === "failed") {
     // See writeRuntimeRequest above: post the runtime_request even though the
     // WI is already closed — a stuck caller waiting on this call needs its

@@ -413,6 +413,36 @@ test("wi_end (error): cannot close someone else's WI", async () => {
   assert.match(res.error, /owned by dba/);
 });
 
+test("wi_end (error): status=failed without failure_reason is rejected, WI stays open (GTD 1a07aa26)", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [] },
+    ],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "failed" }, ctxOwn);
+  assert.equal(res.ok, false);
+  if (res.ok) return;
+  assert.match(res.error, /failure_reason is required/);
+  assert.equal(store.loomx_work_items[0].status, "active");
+  assert.equal(store.loomx_items[0].gtd_status, "in_progress");
+});
+
+test("wi_end (error): status=failed with blank failure_reason is rejected", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [] },
+    ],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "failed", failure_reason: "   " }, ctxOwn);
+  assert.equal(res.ok, false);
+  if (res.ok) return;
+  assert.match(res.error, /failure_reason is required/);
+});
+
 test("wi_end (error): cannot close already-closed WI", async () => {
   const store: Store = {
     loomx_items: [{ id: "gtd-1" }],
