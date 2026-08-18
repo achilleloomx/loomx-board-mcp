@@ -3545,6 +3545,8 @@ export function registerTools(
       `Filter mode: by document_type / item_type / status / code. ` +
       `Lean modes (avoid dumping bodies on large docs): summary=true → per item {code,status,body_chars,headline,links:{doc_out,doc_in,gtd,wi}}; or fields="code,status,..." → projection over chosen columns only. ` +
       `Traceability mode: traceability='req_without_sdes' (REQ rows with no linked SDES) or 'sdes_without_uat'. ` +
+      `D-167: a 0-row result carries visibility_gap:true + a note when you have no membership/visibility on project_id — ` +
+      `that 0 may be an RLS block, not an empty corpus (verify before treating it as a clean gap-check pass). ` +
       `Example (filter): doc_query({project_id:"<uuid>", item_type:"requirement"}). ` +
       `Example (lean): doc_query({project_id:"<uuid>", document_type:"req", summary:true}). ` +
       `Example (gap): doc_query({project_id:"<uuid>", traceability:"req_without_sdes"}).`,

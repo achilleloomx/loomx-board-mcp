@@ -31,7 +31,7 @@ function uuid(): string {
   return `00000000-0000-4000-8000-${n}`;
 }
 
-function makeDb(store: Store): SupabaseClient {
+function makeDb(store: Store, members: Set<string> = new Set()): SupabaseClient {
   store.documents ??= [];
   store.doc_items ??= [];
   store.doc_item_links ??= [];
@@ -189,7 +189,11 @@ function makeDb(store: Store): SupabaseClient {
     return n;
   };
 
-  return { from: (table: string) => query(table), __docRw: true, resolveDocItem, relinkSuperseded } as unknown as SupabaseClient;
+  // D-167: mimics loomx_agent_in_project (SECURITY DEFINER, granted to doc_rw) —
+  // true iff selfSlug is in the caller-supplied `members` set for that project.
+  const agentInProject = async (projectId: string): Promise<boolean> => members.has(projectId);
+
+  return { from: (table: string) => query(table), __docRw: true, resolveDocItem, relinkSuperseded, agentInProject } as unknown as SupabaseClient;
 }
 
 // Simulates gov.relink_superseded raising an error (e.g. the SECURITY DEFINER
@@ -712,6 +716,73 @@ test("doc_query fields: rejects unknown column, accepts a valid projection", asy
   assert.ok(good.ok);
   assert.equal((good as any).data.mode, "items");
   assert.equal((good as any).data.count, 1);
+});
+
+test("doc_item_upsert on a project the caller has no standing on: 403-style message, not the duplicate-inviting 404 (D-167)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store); // no memberships granted
+  const someDocId = uuid();
+
+  // Tool layer genuinely can't tell "doesn't exist" from "exists but hidden" here —
+  // the point is it must NOT claim "not found, create it" when it can't tell (that
+  // false confidence is how the 2026-08-17 duplicate got minted, msg c692035a).
+  const res = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: someDocId, item_type: "requirement", code: "REQ-002",
+  }, { selfSlug: "dba", isLoomy: false });
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /Access denied or not visible/);
+  assert.match((res as any).error, /no membership\/visibility on project/);
+  assert.doesNotMatch((res as any).error, /not found in project/);
+  assert.doesNotMatch((res as any).error, /create it first with doc_create/i);
+});
+
+test("doc_item_upsert on a project the caller IS a member of: plain 404, safe to doc_create (D-167)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store, new Set([PROJ_A]));
+  const bogusDocId = uuid(); // never created
+
+  const res = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: bogusDocId, item_type: "requirement", code: "REQ-003",
+  }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /not found in project/);
+  assert.match((res as any).error, /create it first with doc_create/i);
+});
+
+test("doc_query 0 rows + no project membership: visibility_gap:true (D-167, closes the GTD 63142305 false-green class)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store); // no memberships granted
+
+  const res = await docQuery(db, { project_id: PROJ_A, item_type: "requirement" }, { selfSlug: "auditor", isLoomy: false });
+  assert.ok(res.ok);
+  assert.equal((res as any).data.count, 0);
+  assert.equal((res as any).data.visibility_gap, true);
+  assert.match((res as any).data.note, /RLS block rather than an empty corpus/);
+});
+
+test("doc_query 0 rows + caller IS a project member: no visibility_gap noise (D-167)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store, new Set([PROJ_A]));
+
+  const res = await docQuery(db, { project_id: PROJ_A, item_type: "requirement" }, ctx);
+  assert.ok(res.ok);
+  assert.equal((res as any).data.count, 0);
+  assert.equal((res as any).data.visibility_gap, undefined);
+});
+
+test("doc_query traceability req_without_sdes: empty project + no membership flags visibility_gap (D-167)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store); // no memberships granted
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_sdes" }, { selfSlug: "auditor", isLoomy: false });
+  assert.ok(res.ok);
+  assert.equal((res as any).data.count, 0);
+  assert.equal((res as any).data.visibility_gap, true);
 });
 
 test("doc_item_types returns schema + example for a type, and parity in full mode", () => {

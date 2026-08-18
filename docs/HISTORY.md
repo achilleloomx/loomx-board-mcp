@@ -4,6 +4,20 @@
 
 ---
 
+## Sessione #86 — 2026-08-18 (D-167: doc_item_upsert 404→403 honesto + doc_query visibility_gap — zero DDL, riuso loomx_agent_in_project)
+
+**Wake cold-start (D-093, normal).** Msg `26a5e70f` di loomy: D-167 (ratificata, doc `7e3dbb35`/item `1b40e8a1`) chiede due fix lato board-mcp emersi dal doppio blocco RLS del 17/08 su 669fd07b — dba bloccato in scrittura da `doc_item_upsert`, auditor bloccato in lettura su un gap-check che leggeva "0 righe" come corpus vuoto invece che RLS-block (GTD 63142305). GTD `79c229e8` tracciava già lo stesso task (messaggio loomy precedente alla formalizzazione D-167) — riusato come WI anchor, non duplicato.
+
+**Root cause su `doc_item_upsert`:** `src/docs.ts:240` rispondeva `"document_id 'X' not found. Create it first with doc_create."` su qualunque 0-righe della SELECT `documents` sotto `doc_rw` — ma RLS (D-015) filtra silenziosamente sia "non esiste" sia "esiste ma non visibile al chiamante" con lo stesso 0-righe, senza errore distinguibile. Il testo spingeva verso la creazione di un duplicato (stessa famiglia D-121).
+
+**Fix senza nuova DDL:** invece di chiedere al DBA una nuova funzione SECURITY DEFINER (ipotesi in D-167 "se serve una funzione lato DB da esporre al tool"), verificato che `loomx_agent_in_project(project_id)` — SECURITY DEFINER, già `GRANT`ata a `doc_rw` dalla migration `20260629065000` (co-engagement, D-070) — è sufficiente: risponde "il chiamante ha una qualche legittimazione sul progetto" (lead/team/co-engaged/loomy/pmo) bypassando l'RLS del chiamante internamente. Aggiunto `agentInProject` a `DocRwDb` (`src/docDb.ts`, stesso pattern di `resolveDocItem`/`relinkSuperseded`). `docItemUpsert`: 0 righe + NON membro → errore 403-style ("Access denied or not visible… may exist but that can't be confirmed from here… Do NOT call doc_create"); 0 righe + membro → messaggio 404 originale (safe to create). `docQuery`/`docTraceability`: 0 righe + NON membro → `visibility_gap:true` + `note` esplicativa sul possibile RLS-block, in tutti e tre i path (filtro semplice, filtro `document_type`, traceability) — quest'ultimo è esattamente l'incidente GTD 63142305. Descrizione tool `doc_query` aggiornata per menzionare il segnale.
+
+Non è una diagnosi certa (il predicato è a livello progetto, non documento — `visibility='org'/'team'` può dare falsi positivi rari) ma è un segnale reale ancorato a un grant DB esistente, non un'euristica inventata — coerente con D-136 §5 (niente contratto inventato). Il gap residuo (predicato a grana documento, non progetto) resta aperto e non bloccante: nessun agente ha oggi bisogno di più precisione di questa per evitare il duplicato o il falso-verde.
+
+5 nuovi test in `tests/docs.test.ts` (403 vs 404 su membership, visibility_gap presente/assente, traceability con gap). Version bump 0.16.4→0.16.5. `npx tsc` pulito, suite 143/143 verde.
+
+---
+
 ## Sessione #85 — 2026-08-17 (fix root cause wi_resume cache: `syncWiCache` preferiva `started_at` all'active — build+test+deploy, GTD 4f05821c)
 
 **Wake cold-start (D-093, high).** Msg `5ce7a0f5` di it-manager: root cause trovata e patchata (non committata) del bug segnalato da Achille — `governance-gate.sh` blocca ogni scrittura dopo un `wi_resume` legittimo. Causa: `syncWiCache` (src/wiCache.ts) ordinava per `started_at desc limit 1`, colonna stampata una sola volta a `wi_start` e mai toccata da `wi_pause`/`wi_resume`. Scenario: `wi_start A(t0)` → `wi_pause A` → `wi_start B(t1>t0)` → `wi_end B(done)` → `wi_resume A`: la query continuava a restituire B (done, t1) anche con A ora `active` — cache riscritta col WI sbagliato, gate legge status=done e blocca tutto mentre `wi_status` mostra correttamente A active.

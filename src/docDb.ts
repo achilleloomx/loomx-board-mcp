@@ -52,6 +52,12 @@ export interface DocRwDb {
   // doc_item_xproject_links. Rejects (23514) unless old.status='superseded'.
   // Returns the total row count touched across all six directions.
   relinkSuperseded: (oldItemId: string, newItemId: string) => Promise<number>;
+  // D-167: tells apart "row doesn't exist" from "row exists but RLS hides it" on a
+  // 0-row SELECT — a plain doc_rw scan can't, since RLS filters silently either way.
+  // loomx_agent_in_project is SECURITY DEFINER (reads loomx_projects/loomx_project_members
+  // past the caller's own RLS) and already GRANTed to doc_rw, so this needs no new DB
+  // object: true if selfSlug leads/shares-team/co-engages on the project (or is loomy/pmo).
+  agentInProject: (projectId: string) => Promise<boolean>;
 }
 
 export function assertSlug(slug: string): void {
@@ -217,6 +223,11 @@ function makeDb(exec: PgExecutor): DocRwDb {
       const { rows } = await exec("SELECT gov.relink_superseded($1::uuid, $2::uuid) AS n", [oldItemId, newItemId]);
       const n = rows[0] && (rows[0] as Row).n;
       return typeof n === "number" ? n : Number(n ?? 0);
+    },
+    agentInProject: async (projectId: string) => {
+      const { rows } = await exec("SELECT loomx_agent_in_project($1::uuid) AS ok", [projectId]);
+      const r = rows[0] as Row | undefined;
+      return Boolean(r && r.ok);
     },
   };
 }

@@ -46,6 +46,49 @@ function err(msg: string): { ok: false; error: string } {
   return { ok: false, error: msg };
 }
 
+// D-167: a 0-row SELECT against `documents`/`doc_items` under doc_rw is ambiguous
+// by construction — RLS filters out both "doesn't exist" and "exists but you can't
+// see it" the same silent way, and the naive message ("not found, create it") used
+// to push callers toward the second case as if it were the first, minting duplicates
+// (dba hit this 2026-08-17, msg c692035a). loomx_agent_in_project is SECURITY DEFINER
+// and already GRANTed to doc_rw (D-a5 F4.5 migration), so it can answer "does the
+// caller have ANY standing on this project" without a new DB object: if not, the
+// 0 rows could be either case and creating is unsafe; if yes, the caller's view of
+// the project is authoritative and 0 rows really does mean "not found".
+function docRwHandle(db: SupabaseClient): { agentInProject: (p: string) => Promise<boolean> } | null {
+  const h = db as unknown as { __docRw?: boolean; agentInProject?: (p: string) => Promise<boolean> };
+  return h.__docRw && h.agentInProject ? { agentInProject: h.agentInProject } : null;
+}
+
+async function documentNotFoundError(
+  db: SupabaseClient,
+  documentId: string,
+  projectId: string,
+  selfSlug: string
+): Promise<string> {
+  const rw = docRwHandle(db);
+  if (rw) {
+    try {
+      const member = await rw.agentInProject(projectId);
+      if (!member) {
+        return (
+          `Access denied or not visible: '${selfSlug}' has no membership/visibility on project ${projectId} ` +
+          `— document_id '${documentId}' may exist but that can't be confirmed from here (D-167). ` +
+          `Do NOT call doc_create — that would risk minting a duplicate. Ask an agent with access ` +
+          `(e.g. loomy) to check, or request project membership from dba.`
+        );
+      }
+    } catch {
+      // Membership probe is a diagnostic aid, not load-bearing — fall through to
+      // the plain message rather than block the error path on it failing too.
+    }
+  }
+  return (
+    `document_id '${documentId}' not found in project ${projectId} (you have visibility on this project — ` +
+    `if this is genuinely new, create it first with doc_create).`
+  );
+}
+
 // Recognise the composite-FK violation that a cross-app link triggers, and turn
 // the raw Postgres error into an actionable message (§16 "errori azionabili").
 function translateLinkError(message: string): string {
@@ -237,7 +280,7 @@ export async function docItemUpsert(
     .eq("id", args.document_id)
     .maybeSingle();
   if (docErr) return err(`Failed to load document ${args.document_id}: ${docErr.message}`);
-  if (!docRow) return err(`document_id '${args.document_id}' not found. Create it first with doc_create.`);
+  if (!docRow) return err(await documentNotFoundError(db, args.document_id, args.project_id, ctx.selfSlug));
 
   const doc = docRow as { id: string; project_id: string; document_type: string };
   if (doc.project_id !== args.project_id) {
@@ -894,13 +937,46 @@ export interface DocQueryArgs {
   limit?: number;
 }
 
+export interface VisibilityGap {
+  visibility_gap: true;
+  note: string;
+}
+
+// D-167: the auditor gap-check on 669fd07b sat "green" for days because a 0-row
+// result from a query the caller has no project standing on is indistinguishable
+// from a genuinely empty corpus (GTD 63142305 — the incident this helper closes).
+// Same probe as documentNotFoundError, applied to the query path: not a certainty,
+// a signal — attach it only when rows really are 0, never as noise on populated
+// results.
+async function visibilityGap(
+  db: SupabaseClient,
+  projectId: string,
+  selfSlug: string
+): Promise<VisibilityGap | undefined> {
+  const rw = docRwHandle(db);
+  if (!rw) return undefined;
+  try {
+    const member = await rw.agentInProject(projectId);
+    if (member) return undefined;
+    return {
+      visibility_gap: true,
+      note:
+        `0 rows — '${selfSlug}' has no membership/visibility on project ${projectId}, so this could be an ` +
+        `RLS block rather than an empty corpus (D-167). Verify via org_lookup({project:"${projectId}"}) or ` +
+        `request project membership from dba if you expect data here.`,
+    };
+  } catch {
+    return undefined;
+  }
+}
+
 export async function docQuery(
   db: SupabaseClient,
   args: DocQueryArgs,
-  _ctx: DocContext
-): Promise<DocResult<{ mode: string; count: number; items: unknown[] }>> {
+  ctx: DocContext
+): Promise<DocResult<{ mode: string; count: number; items: unknown[]; visibility_gap?: true; note?: string }>> {
   if (args.traceability) {
-    return docTraceability(db, args);
+    return docTraceability(db, args, ctx);
   }
 
   // Decide which columns to pull. summary needs body (for headline + char
@@ -943,7 +1019,8 @@ export async function docQuery(
     if (de) return err(`Failed to filter by document_type: ${de.message}`);
     const ids = (Array.isArray(docs) ? docs : []).map((d) => (d as any).id);
     if (ids.length === 0) {
-      return { ok: true, data: { mode: args.summary ? "summary" : "items", count: 0, items: [] } };
+      const gap = await visibilityGap(db, args.project_id, ctx.selfSlug);
+      return { ok: true, data: { mode: args.summary ? "summary" : "items", count: 0, items: [], ...gap } };
     }
     q = q.in("document_id", ids);
   }
@@ -951,13 +1028,14 @@ export async function docQuery(
   const { data, error } = await q;
   if (error) return err(`Query failed: ${error.message}`);
   const rows = Array.isArray(data) ? (data as any[]) : [];
+  const gap = rows.length === 0 ? await visibilityGap(db, args.project_id, ctx.selfSlug) : undefined;
 
   if (args.summary) {
     const summarized = await docSummarize(db, args.project_id, rows);
-    return { ok: true, data: { mode: "summary", count: summarized.length, items: summarized } };
+    return { ok: true, data: { mode: "summary", count: summarized.length, items: summarized, ...gap } };
   }
 
-  return { ok: true, data: { mode: "items", count: rows.length, items: rows } };
+  return { ok: true, data: { mode: "items", count: rows.length, items: rows, ...gap } };
 }
 
 // summary mode — compact, token-lean rows for review-at-scale. Returns code,
@@ -1021,8 +1099,9 @@ async function docSummarize(
 // "target" type. Computed in JS (portable across supabase-js + pg shim).
 async function docTraceability(
   db: SupabaseClient,
-  args: DocQueryArgs
-): Promise<DocResult<{ mode: string; count: number; items: unknown[] }>> {
+  args: DocQueryArgs,
+  ctx: DocContext
+): Promise<DocResult<{ mode: string; count: number; items: unknown[]; visibility_gap?: true; note?: string }>> {
   const map: Record<string, { source: ItemType; target: ItemType; label: string }> = {
     req_without_sdes: { source: "requirement", target: "sdes_entry", label: "REQ without a linked SDES" },
     sdes_without_uat: { source: "sdes_entry", target: "uat_case", label: "SDES without a linked UAT" },
@@ -1038,7 +1117,10 @@ async function docTraceability(
     .eq("item_type", cfg.source);
   if (srcErr) return err(`Traceability source query failed: ${srcErr.message}`);
   const sources = Array.isArray(srcRows) ? (srcRows as any[]) : [];
-  if (sources.length === 0) return { ok: true, data: { mode: `traceability:${args.traceability}`, count: 0, items: [] } };
+  if (sources.length === 0) {
+    const gap = await visibilityGap(db, args.project_id, ctx.selfSlug);
+    return { ok: true, data: { mode: `traceability:${args.traceability}`, count: 0, items: [], ...gap } };
+  }
 
   // Target item ids in the project.
   const { data: tgtRows, error: tgtErr } = await db
