@@ -4,6 +4,44 @@
 
 ---
 
+## Sessione #89 — 2026-08-18 (popolato il progetto di dominio `doc-in-db`: as-is misurato + 16 requisiti del modello — GTD ed44f955, D-166)
+
+**Autopilot dispatch.** WI `501b1afd`. Achille ha deciso il contrario di quanto avevo raccomandato nella sessione #88: `doc-in-db` (`1e59391d`) **non** si assorbe in `596cd5fc`, si riempie e diventa il progetto del **dominio** «modello documenti» (criterio D-166: curatore di dominio ≠ praticante di progetto). Le mie due ragioni per assorbire non reggevano — il modello è consumato da tutta la flotta, non solo da chi lo implementa, e «un quarto dei miei SDES lo descrive già» è un argomento a favore del contrario.
+
+**Blocco incontrato e risolto in sessione:** `doc_create` su `1e59391d` → `new row violates row-level security policy`. Causa **misurata**, non dedotta: `loomx_agent_in_project('1e59391d') = false` (nessuno dei 3 rami — lead, team, membership). Chiesta membership a dba (msg `134a5b03`, wake high) con la migration già pronta da copiare; dba l'ha applicata nel giro di pochi minuti e la scrittura è partita. Nel frattempo il contenuto era stato prodotto in staging su file, poi **cancellato** una volta in DB (un `.md` con lo stesso contenuto sarebbe stata la seconda fonte che il modello vieta).
+
+**Novità di metodo:** ho misurato la produzione via `psql` **read-only** sotto i ruoli reali (`board-mcp` nativo e `SET ROLE doc_rw` + GUC `request.agent_slug`), non dalle migration. Chiude il limite #1 del report di sessione #88 («nessun accesso SQL diretto»).
+
+**Scritto in DB (28 item, 2 documenti, progetto `1e59391d`):**
+- `dafdace0` — *As-is del modello documenti governance* (`exec_summary`, 12 item): schema reale misurato, modello di accesso RLS, contratto dei tool, comportamenti che sorprendono, confini, 7 divergenze, Pilot D-a5, limiti, lacune, decisioni non rispettate in sezione separata.
+- `668d0dca` — *Requisiti del modello documenti governance* (`req`, 16 item `REQ-DOCM-001..016`, tutti `proposed` — non me li auto-ratifico): 14 `must`, 2 `should`, ciascuno con `rationale`, `acceptance_criteria` e `derived_from`. I 3 non soddisfatti portano un `gap_note` esplicito.
+
+**Divergenze nuove trovate misurando (le principali):**
+- **Il gate di capability-parity confronta sé stesso, non il DB.** `DB_*` in `src/docTypes.ts` è un mirror ricopiato a mano dalle CHECK: nessuna delle due parti del confronto legge Postgres. Misurati **5 valori distinti** ammessi dal DB e senza tool-path (`change_request`, `implemented`, `verified`, `in_progress`, `amends` su entrambe le tabelle di link) con `capability_parity.ok = true`. In più il gate **non controlla `document_type`**. Impatto sui dati oggi: zero (nessuna riga li usa) — ciò che è rotto è la garanzia. È il pari del precedente D-099 che la sessione #88 aveva dichiarato assente in questo corpus.
+- **`documents.attrs` esiste nel DB** (`jsonb NOT NULL DEFAULT '{}'`): D-a5-F3 non è «non applicata», è applicata a schema e non esposta dal tool. Corregge il verdetto di #88.
+- **Lo storico degli item esiste**: trigger `BEFORE DELETE OR UPDATE`, 457 righe su 309 item, zero delete mai. Ma `changed_by` è **NULL nel 49,7%** — le scritture `service_role`, che la RLS non intercetta (`relforcerowsecurity=false` ovunque).
+- **`doc_query` non ha il parametro `document_id`** che il nostro CLAUDE.md §6bis prescrive; e le cross-decisions stanno su due documenti (100 + 63), con §6bis che punta al più piccolo (39% del corpus).
+- **`docTraceability`** non filtra `status` (1 riga di rumore oggi) e ignora `doc_item_xproject_links` (0 di impatto oggi, ma si manifesta appena la tracciabilità cross-progetto viene usata).
+- **Asimmetria read/write non documentata:** `visibility='org'` apre la lettura a chiunque, la scrittura passa solo da `loomx_agent_in_project`. `visibility` è una leva **solo in lettura**.
+
+**Nota su un errore evitato per un soffio:** ho letto `doc_resolve_log` in SQL diretto, ottenuto 0 righe, e stavo per scrivere «l'audit dei resolve non viene popolato». Falso: la policy di SELECT ammette solo `loomy`/`auditor`/PMO — il mio zero era il blocco, non il dato. È la trappola D-167 che ha colpito chi mantiene il modello mentre scriveva il documento su quella stessa trappola. Registrata nell'as-is come tale.
+
+**Blocchi / note:** nessun item spostato da `596cd5fc` né dal Pilot `8930ff35` (censito e raccontato, non toccato). Nessun codice `D-NNN` allocato. I 3 requisiti non soddisfatti (`REQ-DOCM-014/015/016`) sono candidati a fix nel prodotto board-mcp, ma il fix va deciso da Loomy: sono requisiti di dominio, non backlog che mi auto-assegno.
+
+---
+
+## Sessione #88 — 2026-08-18 (review bottom-up doc-in-DB: 30 CFG + 46 decisioni verificati contro il sistema reale — GTD e95ea3d3)
+
+**Autopilot dispatch, 2 WI in sequenza sullo stesso GTD** (v1 poi v2 — Loomy ha aggiunto una FASE dopo che ero già partito, msg `0d8298bd`). Mandato di Achille via Loomy: SoW retroattivo del progetto "modello documenti" (D-a5) — prima di scriverlo, verificare che il corpus governance (162 item nel progetto `596cd5fc`: 37 REQ · 26 SDES · 22 UAT · 30 CFG · 43 decisioni) descriva davvero il sistema in esercizio. **Non correggere niente** — solo misurare e riportare.
+
+**WI `889d6845` (FASE 1-3+5, v1 del GTD):** 30 CFG (`CFG-061..090`) ri-misurati oggi contro `src/*.ts` corrente — 22 confermati netti, 3 confermati-ma-obsoleti (divergenza già risolta da un commit del 16/08 stesso), 1 divergente di framing (CFG-086: l'enum destinatari è DB-derived a boot, non hardcoded), 1 contraddizione documentale non arbitrata (CFG-090). FASE 2: separazione strutturale totale fra i 30 CFG e i 26 SDES (0 link in entrambe le direzioni). FASE 3: 0/37 REQ senza SDES (con controllo positivo D-167 prima dello zero), 12/26 SDES senza UAT (i più recenti). FASE 5 (perimetro doc-in-db): scoperto un **terzo progetto** non citato dal mandato, `Pilot D-a5` (`8930ff35`, board-mcp-owned, 11 item dimenticati) — raccomandazione: assorbire `doc-in-db` in `596cd5fc`, non riempirlo né chiuderlo.
+
+**WI `dae06594` (FASE 4, v2 del GTD):** le 43 decisioni di progetto + 3 cross (`D-150`, `D-155`, `D-167`) verificate come RISPETTATA/VIOLATA/NON_APPLICATA/SUPERATA_DAI_FATTI con evidenza `file:riga`/query — 46 in totale (il codice bare "D-a5" non esiste, è il nome della famiglia, le 6 sotto-decisioni sono già nelle 43). Eseguito con 7 agenti paralleli, uno per lotto. Esito: **41 RISPETTATA, 3 NON_APPLICATA** (D-010 governance tag mai applicata, D-150 hash-pinning/stale-marking in discussione non implementato, D-a5-F3 `documents.attrs` mai aggiunto), **2 SUPERATA_DAI_FATTI** (D-004 service_role→D-084 identità nativa preferita ma D-004 mai formalmente supersedeuta; D-016 owner-reassign su gtd_update esteso anche al broker, mai riflesso nel testo), **0 VIOLATA** — il precedente D-099/flag-27-giorni-acceso cercato esplicitamente dal mandato non ha un pari in questo corpus.
+
+Report completo: `docs/reports/track-b-review-2026-08-18.md`. `board_send` a loomy con la sintesi (msg `728f3abf`). Nessuna correzione applicata al codice — l'allineamento (ratificare/ritirare D-004/D-016, decidere se/quando D-010/D-150/D-a5-F3) spetta a Loomy con Achille.
+
+---
+
 ## Sessione #87 — 2026-08-18 (fix wi_end: status=failed senza failure_reason chiudeva comunque il WI — GTD 1a07aa26)
 
 **Autopilot dispatch.** GTD `1a07aa26`: `wi_end` non applicava il proprio contratto — la doc del tool dichiara `failure_reason` "Required when status=failed", ma `src/wi.ts:541` lo usava solo opportunisticamente (`if (args.status === "failed" && args.failure_reason) update.failure_reason = ...`): con `failure_reason` assente o stringa vuota il WI veniva comunque chiuso `failed`, silenziosamente, senza motivazione persistita né `[BLOCKER]` nel body GTD collegato.
