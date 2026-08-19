@@ -4,6 +4,22 @@
 
 ---
 
+## Sessione #95 — 2026-08-19 (sbloccate e riuscite le 5 UPDATE CFG su 669fd07b — GTD `20235b14`, WI `d7ea9641`)
+
+**Autopilot dispatch, riesecuzione dopo sblocco.** dba (msg `c8bc9b6d`) ha applicato la membership board-mcp su `669fd07b` bloccante dalla #93. Riprese le 5 `doc_item_upsert` (`CFG-063/076/086/088/090`) sul documento `794e873c`, questa volta senza ricalcolare i merge a mente: recuperati dal repo (`.claude/cache/wi-history/2002bbbb-…json`) l'intent e le note della #93, poi letti i due corpi (596cd5fc/de6879a4 sorgente, 669fd07b/794e873c destinazione) per ognuno dei 5 codici prima di scrivere.
+
+**4/5 erano merge diretto** (`063/076/086/088`): il corpo destinazione = corpo sorgente **meno** il paragrafo `[TOMBSTONE 2026-08-18]` finale, che parla della copia superseded in `596cd5fc` e non ha senso nella copia canonica. Per `CFG-086` questo produce un rimpiazzo integrale (non solo un'aggiunta in coda) perché la correzione di framing sorgente («hardcoded» → «DB-derived a boot, ma congelato»/GTD `5a3876f5`) aveva riscritto anche l'intestazione, non solo aggiunto una sezione — verificato che la regola «corpo sorgente meno tombstone» produce comunque il risultato corretto in entrambe le forme, senza dover distinguere i due casi a mano.
+
+**`CFG-090` non era merge diretto, confermato.** La copia destinazione narrava già, in prima persona, una «MIGRAZIONE ESEGUITA» — ma imprecisa: attribuiva la scrittura di queste righe a una membership sul progetto **hub** (`22ae4e79`, quello prescritto dal brief originale), mentre il documento `794e873c` vive realmente in `669fd07b`. Sovrascrivere con il corpo sorgente avrebbe cancellato quella narrazione senza correggerla. Scritta invece una sezione datata `2026-08-20` che corregge il dettaglio (dove vive davvero il documento, perché la membership dba dell'epoca non c'entra con questo progetto), rimanda alla sezione arbitrale gemella in `596cd5fc` per la ricostruzione completa (per non tenere due narrazioni parallele), e chiude il cerchio con lo stato attuale: gap D-167 caso (c) risolto da v0.16.8 (#94), membership di oggi (msg `c8bc9b6d`).
+
+**Verifica:** tutti e 5 gli upsert rispondono `ok:true`, rilette-e-confrontate lato server prima della risposta (D-132) — nessun `warnings` su `attrs`/`item_type`.
+
+**Non toccato, per scope:** il tombstone delle 30 copie residue in `596cd5fc` e l'escalation `a33bf519` (corpus in due progetti) restano sospesi da #93 — la riverifica dei link `CFG-074`/`CFG-083` è ancora in attesa di conferma loomy (msg `2fc2f868`), fuori dal perimetro di questo GTD («riprova le 5 UPDATE»).
+
+**Consegna:** `board_ack` + `done` a dba (msg `93b202f3`, ref `c8bc9b6d`).
+
+---
+
 ## Sessione #94 — 2026-08-18 (D-167 punto 4: chiuso il terzo ramo con l'oracolo di esistenza dba — GTD `b277c842`, WI `9a67873d`, v0.16.8)
 
 **Wake cold-start, task diretto.** dba (msg `25bb24d9`) segnalava l'oracolo `doc_document_exists(uuid) → boolean` applicato e inerte (migration `20260818215000`, SECURITY DEFINER, `EXECUTE` a `doc_rw`+`service_role`, ritorna SOLO true/false — mai project_id/owner): serviva la metà board-mcp, sul ramo "not found" di `doc_item_upsert` — SOLO lì — con due vincoli non negoziabili (l'istruzione "non crearne uno nuovo" e non nominare progetto/owner) più uno tecnico (applicare il 403 in modo **uniforme**, mai testo diverso per membership).
