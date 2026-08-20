@@ -4,6 +4,20 @@
 
 ---
 
+## Sessione #98 — 2026-08-20 (`gov_param_set` DEL-A5: contratto specificato, gap SECURITY DEFINER flaggato a it-manager — GTD `a2567c59`, WI `e4f757d2`)
+
+**Wake cold-start `normal`, msg `176a504f` da it-manager.** Chiede un tool `gov_param_set` per scrivere `loomx_governance_params` (registro parametri di governance DEL-A5) — RLS vieta scrittura diretta, l'unica via dichiarata è il tool.
+
+**Letto per intero** `hub/it-manager/docs/design/governance-params-registry.md` (workspace, fuori repo): tabella + history + trigger **proposte, non applicate** (dba). Nessun codice scritto — contro uno schema non ancora esistente, con un pezzo di design ancora aperto, sarebbe stato lavoro da rifare.
+
+**Gap segnalato a it-manager, non tenuto per me.** La §1 del design (riga 67) chiede l'identity-check "SECURITY DEFINER lato funzione SQL" — non un controllo applicativo nel tool. Se la scrittura vera passasse da un ruolo con GRANT UPDATE diretto (es. `doc_rw`) e il tool facesse solo un check prima di chiamarla, "l'unica via è il tool" non sarebbe vero a floor DB: stesso gap non-enforceable-a-DB già censito per `loomx_eval_runs` (D-105). Proposta girata: una `gov.param_set(...)` SECURITY DEFINER (pattern `gov.relink_superseded`) che fa lei stessa il confronto `owner_stream_claim = owner_stream` e l'UPDATE, EXECUTE solo a `doc_rw`+`service_role`, nessun GRANT UPDATE diretto sulla tabella — da includere nella stessa migration dba della tabella.
+
+**Domanda aperta girata, non decisa da solo:** il punto 1 del mandato ("verifica identità chiamante = owner_stream_claim") presuppone un registro agent_slug→owner_stream che oggi non esiste. Proposto honor-system pass-through come `requested_model` (D-101) in attesa di conferma/correzione da it-manager.
+
+**Contratto tool completo** (firma, instradamento per `value_type`, rilettura-e-confronto stile D-132, error semantics) scritto nel GTD `a2567c59`, `waiting`/`dba` — pronto da implementare non appena tabella+funzione sono live.
+
+---
+
 ## Sessione #97 — 2026-08-20 (WI-G.2: `doc_item_chain`, il resolver di catena multi-salto — GTD `d24ce961`, WI `51508b97`, v0.17.0)
 
 **Autopilot dispatch, in-place dopo la #96** (`runtime_request: continue` — contesto caldo, il design l'avevo appena scritto). Implementato `SDES-DOCM-020`: l'unico pezzo di WI-G non bloccato a monte (G.1 aspetta una tabella da dba, G.3 aspetta DEL-A2).
