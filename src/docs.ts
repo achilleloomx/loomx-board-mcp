@@ -711,6 +711,222 @@ export async function docItemResolve(
 }
 
 // ---------------------------------------------------------------------------
+// doc_item_chain — SDES-DOCM-020 (WI-G.2). Walk the `supersedes` edges FORWARD,
+// from an old UUID to the version in force today.
+//
+// Why a tool and not a caller-side loop: D-170 makes references and item
+// subscriptions UUID-bound, so a link created once stays pinned to the row that
+// was current then. doc_item_resolve only helps when you hold a CODE (the code
+// travels onto the new row, §6/D-a5) — a UUID reference has no code to resolve,
+// and every consumer would otherwise re-implement this walk, each with its own
+// idea of what to do at a fork.
+//
+// Edge direction (docSupersede, this file): new --supersedes--> old. Walking
+// forward therefore means: find the link whose to_item is the current row, and
+// step to its from_item.
+//
+// Three terminations, all explicit (never a silent "looks current to me"):
+//  - fork    → ERROR listing the candidates. Same discipline as doc_item_resolve
+//              (REQ-DOCM-007): a resolver that arbitrates produces wrong
+//              references that look right.
+//  - cycle   → ERROR. Must not happen; a resolver that loops is worse than one
+//              that errs.
+//  - unreadable next hop → STOP and say so. The visibility re-check of
+//              REQ-DOCM-006 applies at EVERY hop, not just the first: the chain
+//              must not become a side channel to reach what RLS hides.
+// ---------------------------------------------------------------------------
+
+// Hard ceiling on max_hops. A chain this long is a corpus pathology, not a
+// legitimate history — refuse with a readable error rather than recurse on.
+const CHAIN_MAX_HOPS_CEILING = 200;
+const CHAIN_DEFAULT_MAX_HOPS = 32;
+
+export interface DocItemChainArgs {
+  item_id: string;
+  max_hops?: number;
+}
+
+interface ChainHop {
+  item_id: string;
+  code: string | null;
+  item_type: string;
+  status: string;
+  document_id: string;
+  // Instant this row stopped being current (docSupersede stamps updated_at when
+  // it flips the old row to superseded). Null on the row still in force.
+  superseded_at: string | null;
+}
+
+type ChainTerminalReason = "already_current" | "reached_current" | "successor_not_readable";
+
+export async function docItemChain(
+  db: SupabaseClient,
+  args: DocItemChainArgs,
+  ctx: DocContext
+): Promise<
+  DocResult<{
+    input_id: string;
+    resolved_id: string;
+    hops: number;
+    chain: ChainHop[];
+    terminal_reason: ChainTerminalReason;
+    note?: string;
+  }>
+> {
+  if (!UUID_RE.test(args.item_id)) {
+    return err(
+      `item_id must be a UUID, got '${args.item_id}'. This tool is UUID-only (D-170: references are UUID-bound). ` +
+      `If you hold a code, resolve it first with doc_item_resolve — a code already travels onto the current version.`
+    );
+  }
+
+  const maxHops = args.max_hops ?? CHAIN_DEFAULT_MAX_HOPS;
+  if (!Number.isInteger(maxHops) || maxHops < 1 || maxHops > CHAIN_MAX_HOPS_CEILING) {
+    return err(`max_hops must be an integer between 1 and ${CHAIN_MAX_HOPS_CEILING} (got ${String(args.max_hops)}).`);
+  }
+
+  const loadRow = async (id: string) => {
+    const { data, error } = await db
+      .from(DOC_ITEMS)
+      .select("id, code, item_type, status, document_id, project_id, updated_at")
+      .eq("id", id)
+      .maybeSingle();
+    if (error) return { row: null, error: error.message };
+    return { row: (data as ChainRowRaw | null) ?? null, error: null as string | null };
+  };
+
+  const start = await loadRow(args.item_id);
+  if (start.error) return err(`Failed to load item_id: ${start.error}`);
+  if (!start.row) {
+    // REQ-DOCM-012: under RLS a 0-row read is ambiguous by construction, and we
+    // have no per-ITEM existence oracle (doc_document_exists answers for
+    // documents only). Say what we cannot rule out instead of asserting either.
+    return err(
+      `doc_item '${args.item_id}' is not readable by '${ctx.selfSlug}'. It may not exist, or it may exist in a ` +
+      `document you cannot read (D-015) — this tool cannot tell the two apart, so it asserts neither.`
+    );
+  }
+
+  const projectId = start.row.project_id;
+  const chain: ChainHop[] = [];
+  const seen = new Set<string>([start.row.id]);
+  let current: ChainRowRaw = start.row;
+  let terminal: ChainTerminalReason = "already_current";
+  let note: string | undefined;
+
+  for (let hop = 0; ; hop++) {
+    if (hop >= maxHops) {
+      return err(
+        `Supersede chain from '${args.item_id}' exceeds max_hops=${maxHops} (still not at the current version after ` +
+        `${maxHops} hops). Raise max_hops (ceiling ${CHAIN_MAX_HOPS_CEILING}) if the history is genuinely this long.`
+      );
+    }
+
+    // Forward step: who supersedes the current row? Project-scoped — doc↔doc
+    // links carry project_id and the composite FK keeps a chain inside one project.
+    const { data: succRows, error: succErr } = await db
+      .from(DOC_ITEM_LINKS)
+      .select("from_item")
+      .eq("to_item", current.id)
+      .eq("relation_type", "supersedes")
+      .eq("project_id", projectId);
+    if (succErr) return err(`Failed to walk supersede edges from '${current.id}': ${succErr.message}`);
+
+    const successors = (Array.isArray(succRows) ? (succRows as { from_item: string }[]) : []).map((r) => r.from_item);
+    const uniqueSuccessors = [...new Set(successors)];
+
+    if (uniqueSuccessors.length === 0) {
+      // Terminal. Note the honest limit: RLS could hide an edge as easily as an
+      // item, so "no successor" is really "no successor visible to you".
+      terminal = chain.length === 0 ? "already_current" : "reached_current";
+      break;
+    }
+
+    if (uniqueSuccessors.length > 1) {
+      return err(
+        `Ambiguous supersede chain at '${current.id}'${current.code ? ` (${current.code})` : ""}: ` +
+        `${uniqueSuccessors.length} rows claim to supersede it — ${uniqueSuccessors.join(", ")}. ` +
+        `Not choosing one (REQ-DOCM-007: this model never arbitrates an ambiguity). ` +
+        `Repair the corpus, then retry.`
+      );
+    }
+
+    const nextId = uniqueSuccessors[0]!;
+    if (seen.has(nextId)) {
+      return err(
+        `Cycle detected in the supersede chain: '${nextId}' was already visited ` +
+        `(path: ${[...seen].join(" → ")} → ${nextId}). Refusing to loop — this is a corpus defect.`
+      );
+    }
+
+    const next = await loadRow(nextId);
+    if (next.error) return err(`Failed to load successor '${nextId}': ${next.error}`);
+    if (!next.row) {
+      // The edge is visible but the row behind it is not: stop here and DECLARE
+      // it. Returning `current` as if it were in force would be a false answer
+      // (REQ-DOCM-006 — the chain is not a channel to reach what RLS hides).
+      chain.push(toChainHop(current, true));
+      terminal = "successor_not_readable";
+      note =
+        `Stopped early: '${current.id}' is superseded by '${nextId}', which '${ctx.selfSlug}' cannot read (D-015). ` +
+        `resolved_id is therefore NOT guaranteed to be the version in force — it is the furthest readable row.`;
+      return {
+        ok: true,
+        data: {
+          input_id: args.item_id,
+          resolved_id: current.id,
+          hops: chain.length,
+          chain,
+          terminal_reason: terminal,
+          note,
+        },
+      };
+    }
+
+    chain.push(toChainHop(current, true));
+    seen.add(nextId);
+    current = next.row;
+  }
+
+  if (chain.length > 0) chain.push(toChainHop(current, false));
+
+  return {
+    ok: true,
+    data: {
+      input_id: args.item_id,
+      resolved_id: current.id,
+      hops: chain.length === 0 ? 0 : chain.length - 1,
+      chain,
+      terminal_reason: terminal,
+      note:
+        `No further supersede edge is VISIBLE to '${ctx.selfSlug}' from '${current.id}'. ` +
+        `RLS can hide an edge as easily as an item, so this means "no visible successor", not "no successor".`,
+    },
+  };
+}
+
+interface ChainRowRaw {
+  id: string;
+  code: string | null;
+  item_type: string;
+  status: string;
+  document_id: string;
+  project_id: string;
+  updated_at: string | null;
+}
+
+function toChainHop(row: ChainRowRaw, superseded: boolean): ChainHop {
+  return {
+    item_id: row.id,
+    code: row.code ?? null,
+    item_type: row.item_type,
+    status: row.status,
+    document_id: row.document_id,
+    superseded_at: superseded ? row.updated_at ?? null : null,
+  };
+}
+
+// ---------------------------------------------------------------------------
 // doc_link — UUID-only, target_kind routes to the right table (§16 amendment).
 // ---------------------------------------------------------------------------
 

@@ -3476,6 +3476,29 @@ export function registerTools(
     }
   );
 
+  // --- doc_item_chain ---
+  server.tool(
+    "doc_item_chain",
+    `Walk the 'supersedes' chain FORWARD from an old item UUID to the version in force today (SDES-DOCM-020). ` +
+      `Use when you hold a UUID reference — a subscription, a link, a citation (D-170: references are UUID-bound) — and need ` +
+      `the row that is current now: a UUID stays pinned to the version that was current when it was created. ` +
+      `If you hold a CODE instead, use doc_item_resolve — codes already travel onto the current version. ` +
+      `Returns resolved_id + the hops walked (code, status, superseded_at) so the path is inspectable, never a magic jump. ` +
+      `NEVER guesses: a fork (two rows claiming to supersede the same item) is an ERROR listing the candidates, not a choice; ` +
+      `a cycle is an ERROR. The visibility re-check applies at EVERY hop — if the next version is not readable by you, the walk ` +
+      `stops and says so (terminal_reason='successor_not_readable') rather than passing off the last readable row as current. ` +
+      `Note "no successor" always means "no successor VISIBLE to you": RLS can hide an edge as easily as an item. ` +
+      `Example: doc_item_chain({item_id:"<old-uuid>"}).`,
+    {
+      item_id: z.string().uuid().describe("UUID of the (possibly superseded) item to walk forward from"),
+      max_hops: z.number().int().min(1).max(200).optional().describe("Walk depth limit (default 32, ceiling 200) — exceeding it is an explicit error, never a truncated answer"),
+    },
+    async (args) => {
+      const { docItemChain } = await import("./docs.js");
+      return runDocTool((db) => docItemChain(db, args, docCtx));
+    }
+  );
+
   // --- doc_link ---
   server.tool(
     "doc_link",

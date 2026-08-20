@@ -4,6 +4,26 @@
 
 ---
 
+## Sessione #97 — 2026-08-20 (WI-G.2: `doc_item_chain`, il resolver di catena multi-salto — GTD `d24ce961`, WI `51508b97`, v0.17.0)
+
+**Autopilot dispatch, in-place dopo la #96** (`runtime_request: continue` — contesto caldo, il design l'avevo appena scritto). Implementato `SDES-DOCM-020`: l'unico pezzo di WI-G non bloccato a monte (G.1 aspetta una tabella da dba, G.3 aspetta DEL-A2).
+
+**Il problema che risolve.** D-170 rende sottoscrizioni e citazioni **UUID-bound**, e un UUID resta inchiodato alla riga che era corrente quando il link fu creato. `doc_item_resolve` non copre il caso: aiuta quando hai un **codice** — che viaggia già sulla riga nuova (§6/D-a5) — mentre un riferimento a UUID non ha codice da risolvere. Senza il tool, ogni consumatore si scriverebbe la propria camminata, ciascuno con la propria idea di cosa fare a un bivio.
+
+**Direzione dell'edge, verificata nel codice** (`src/docs.ts:976`): `docSupersede` scrive `new --supersedes--> old`. Camminare in avanti significa quindi cercare il link il cui `to_item` è la riga corrente e saltare al suo `from_item` — non l'inverso, che era la lettura ingenua.
+
+**Tre terminazioni, tutte esplicite, nessuna indovinata.** Fork (due righe che dichiarano di supersedere lo stesso item) → **errore che ELENCA i candidati**, stessa disciplina di REQ-DOCM-007; ciclo → errore; **successore non leggibile → si ferma e lo dichiara** (`terminal_reason='successor_not_readable'` + nota che dice a chiare lettere che `resolved_id` **non** è garantito essere la versione in vigore). Quest'ultima è la parte che conta: il ri-controllo di visibilità di REQ-DOCM-006 vale a **ogni** salto, non solo al primo — la catena non deve diventare un canale per raggiungere ciò che la RLS nasconde, e l'ultima riga leggibile non va spacciata per corrente.
+
+**Onestà nel contratto (REQ-DOCM-012 applicato alla catena).** «Nessun successore» significa sempre «nessun successore **visibile**»: la RLS può nascondere un edge quanto un item, e il tool lo dice in `note` invece di lasciar credere di aver dimostrato un capolinea. Stessa disciplina sulla partenza non leggibile: non esiste un oracolo di esistenza per-ITEM (`doc_document_exists` risponde per i **documenti**), quindi l'errore dichiara che non può distinguere «non esiste» da «non lo puoi vedere» — invece di asserire l'una o l'altra.
+
+**Test prima del repack, come impone STP-002 punto 3.** `tests/doc-chain.test.ts`, 10 casi: catena multi-salto, già-in-vigore, fork, ciclo, salto non leggibile, `max_hops` superato, non-UUID, partenza non leggibile, edge di **altro progetto** (non va seguito — la FK composita tiene una catena dentro un progetto), edge duplicati identici (**non** sono un fork: un errore lì sarebbe un falso allarme). Fake DB dedicato invece di quello di `docs.test.ts`, che applica RLS solo su `documents`: la garanzia per-salto si esercita solo nascondendo una riga `doc_items`. Suite intera **159/159** verde, `tsc` pulito.
+
+**Dogfood involontario ma utile:** l'upsert che ha portato `SDES-DOCM-020` da `draft` ad `active` ha risposto `fields_preserved: [body, priority, owner, sort_order]` — cioè il PATCH dichiarato di `SDES-DOCM-008` che ha protetto il corpo del design mentre ne aggiornavo status e `attrs`.
+
+**Nota di rollout (G4):** `dist/` è rigenerato ma le finestre già aperte restano sul build precedente fino a un processo CLI nuovo — `doc_item_chain` non è visibile alla flotta viva finché non riparte.
+
+---
+
 ## Sessione #96 — 2026-08-20 (Piano Manifesti ondata 0 / DEL-A4: layer SDES dei 18 REQ-DOCM, gate `req_without_sdes=0` — GTD `f56b9ef6`, WI `1febbf4e`)
 
 **Wake cold-start `high`, mandato esecutivo di loomy (msg `81873b4d`, `requested_model: opus`).** Piano Manifesti approvato (D-176): il pacchetto board-mcp è **DEL-A4** del SoW `17d0e4d8`, e la prima cosa che chiede è il **layer di design prima dei build** — i 18 `REQ-DOCM` del progetto doc-in-db (`1e59391d-9754-4b92-8ce0-393544e10012`) erano `approved` con **zero** `sdes_entry`, e il gate d'uscita esige `req_without_sdes = 0` come check meccanico.
