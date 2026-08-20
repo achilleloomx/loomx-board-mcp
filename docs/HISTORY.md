@@ -4,6 +4,24 @@
 
 ---
 
+## Sessione #96 — 2026-08-20 (Piano Manifesti ondata 0 / DEL-A4: layer SDES dei 18 REQ-DOCM, gate `req_without_sdes=0` — GTD `f56b9ef6`, WI `1febbf4e`)
+
+**Wake cold-start `high`, mandato esecutivo di loomy (msg `81873b4d`, `requested_model: opus`).** Piano Manifesti approvato (D-176): il pacchetto board-mcp è **DEL-A4** del SoW `17d0e4d8`, e la prima cosa che chiede è il **layer di design prima dei build** — i 18 `REQ-DOCM` del progetto doc-in-db (`1e59391d-9754-4b92-8ce0-393544e10012`) erano `approved` con **zero** `sdes_entry`, e il gate d'uscita esige `req_without_sdes = 0` come check meccanico.
+
+**Consegnato:** documento `sdes` `d21eac63-844c-41a3-bcb5-d2f04c6c70ef`, **23 `sdes_entry`** (`SDES-DOCM-001..023`) + **24 link** `satisfies`/`relates_to`. Gate **verde, misurato**: `doc_query(traceability:"req_without_sdes")` → 0.
+
+**Come è strutturato il layer.** I dodici design già in vigore sono scritti come **as-built** (`status=active`): descrivono il meccanismo reale e il compromesso accettato, non un'aspirazione — FK composita `(document_id, project_id)`, i due predicati RLS separati (`visibility` **mai** in un predicato di scrittura), il PATCH dichiarato di v0.16.3, la rilettura-e-confronto D-132, il trigger di history. I sei con gap sono `draft` e coincidono con i WI del DEL-A4: `012`→WI-D (vuoto≠negato su **7 superfici enumerate**, incl. le 2 dove la garanzia **non** si può dare — dichiarate, non simulate), `014`→WI-A (parità da `pg_catalog` invece del mirror in-code che confronta il file con sé stesso), `015`→WI-E, `016` (attribuzione: degradare a `role:<current_user>` invece di NULL), `017`→WI-B, `018`→WI-A (`working_doc`).
+
+**WI-G (percorso critico di B1 e C3) progettato per intero ma costruibile solo per un terzo** — riportato a loomy senza ammorbidirlo: `019` link item→header **vuole una tabella nuova da dba** (oggi `doc_link` punta solo a righe: il riferimento al «deliverable pubblicato» che REQ-DOCM-015 emendato rende norma è *inesprimibile*); `021` read-path per versione **definisce la superficie di lettura di DEL-A2**, che non esiste — e STP-003 vieta di costruirne una seconda; `020` resolver di catena multi-salto è tool-layer puro ed è l'unico pezzo consegnabile (GTD `d24ce961`).
+
+**Proposta freeze del pubblicato a dba** (msg `cc0ce91e`, punto 4 del mandato): su DEC-01d (trigger dedicato, supersede mai sulla riga pubblicata) il nodo sollevato è che **`superseded` e `pubblicato` sono stati diversi** — una riga pubblicata può essere ancora in vigore — e riusare `doc_items_block_superseded_edit` perderebbe la distinzione. Domande aperte (freeze sulla riga o sull'immagine di pubblicazione? dove vive il predicato "è pubblicato"?) girate a dba per la misura, decisione finale a Loomy/Achille.
+
+**Due misure raccolte per strada.** (1) I 24 link `from=sdes_entry` sono **tutti** visibili nei conteggi e nel gap-check → il difetto `fb2f17e9` **non è generale** a `doc_link_by_code`, discrimina il caso `from=deliverable`: campo ristretto per WI-E, annotato sul GTD. (2) Letto `src/docs.ts:1167-1221`: il gap-check **non filtra per status** e legge **solo** `doc_item_links` — conferma dal vivo i difetti D6/D7 descritti in `SDES-DOCM-015`.
+
+**Un errore mio, tenuto come segnale (GTD `89c232d4`).** Il mandato abbreviava il progetto in `1e59391d`; ho completato l'UUID a caso e interrogato un progetto **inesistente**. `doc_query` ha risposto `visibility_gap: true` — «forse è un blocco RLS, chiedi la membership a dba». Cioè il segnale D-167, che ho scritto io per eliminare le diagnosi fuorvianti, ne ha prodotta una: `visibilityGap()` deduce il gap da `loomx_agent_in_project`, false sia per *progetto invisibile* sia per *progetto inesistente*, e i due casi non sono distinti. Fix a tre rami senza DDL né oracolo nuovo — `loomx_projects` è già enumerabile da `project_list`.
+
+---
+
 ## Sessione #95 — 2026-08-19 (sbloccate e riuscite le 5 UPDATE CFG su 669fd07b — GTD `20235b14`, WI `d7ea9641`)
 
 **Autopilot dispatch, riesecuzione dopo sblocco.** dba (msg `c8bc9b6d`) ha applicato la membership board-mcp su `669fd07b` bloccante dalla #93. Riprese le 5 `doc_item_upsert` (`CFG-063/076/086/088/090`) sul documento `794e873c`, questa volta senza ricalcolare i merge a mente: recuperati dal repo (`.claude/cache/wi-history/2002bbbb-…json`) l'intent e le note della #93, poi letti i due corpi (596cd5fc/de6879a4 sorgente, 669fd07b/794e873c destinazione) per ognuno dei 5 codici prima di scrivere.
