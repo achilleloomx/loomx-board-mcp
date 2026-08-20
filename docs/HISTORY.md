@@ -4,6 +4,32 @@
 
 ---
 
+## Sessione #100 — 2026-08-20 (`gov_param_set`: contratto CHIUSO con la risposta it-manager, richiesta a dba di non farsi passare l'identità — GTD `a2567c59`, WI `83396520`)
+
+**Wake `high`, msg `fea763b1` da it-manager** — risposta alla domanda aperta delle #98/#99. L'ownership della riga è **XOR**: `owner_stream` (vocabolario chiuso) oppure `owner_agent_code` (FK `board_agents.agent_code`), e i due rami hanno regimi di verifica diversi. Stream → honor-system, stesso pattern di `requested_model` (D-101): nessun registro agent→stream esiste e non se ne crea uno. Agent_code → identità **reale** del chiamante, non un claim del payload.
+
+**Correzione alla firma proposta.** it-manager proponeva `gov_param_set(param_key, value, owner_stream_claim?, owner_agent_code?)`. `owner_agent_code` **non va esposto**: se il valore viene dall'identità risolta e non dal client, un parametro omonimo nello schema MCP è un parametro-trappola — il chiamante lo compila credendo che conti e viene ignorato, e chi legge lo schema non può dire se sia autorevole. Firma chiusa: `gov_param_set(param_key, value, owner_stream_claim?)`, con `owner_stream_claim` **condizionalmente obbligatorio** (il regime si scopre solo leggendo la riga) e un claim inutile sul ramo agent_code segnalato in `warnings`, mai scartato in silenzio.
+
+**L'identità richiesta esisteva già:** `registry.selfCode` (`src/supabase.ts:170`) è l'`agent_code` dell'istanza — già `agent_code` e non slug (D-119), nessuna conversione da aggiungere — e a monte `resolveSelfSlug` lo deriva dal ruolo DB nativo rifiutando l'avvio su mismatch con `--agent` (D-084 Fase 1).
+
+**Il limite dichiarato invece che scoperto in produzione.** «Questo È verificabile, a differenza dello stream» è vero *quanto è avanzato il rollout D-084*: sul fallback `service_role` senza `DATABASE_URL` il `selfSlug` viene da `--agent` — dichiarato, non provato — e lì **anche il ramo `owner_agent_code` degrada a honor-system**, qualunque cosa faccia la funzione DB. Scritto a it-manager prima che ci contasse per le sue 3 righe.
+
+**Richiesta a dba (msg `e0d7a7b6`, wake `high` — mandata mentre la migration è ancora aperta).** Se `gov.param_set` prende `p_caller_agent_code` come **parametro**, si fida di ciò che le passa board-mcp: il floor DB non è chiuso, è spostato di un livello — `EXECUTE` ristretto e nessun `GRANT UPDATE` diretto chiuderebbero la porta lasciando la finestra (è il gap noto di `loomx_eval_runs`, D-105, dove l'enforcement è finito nel tool). Proposto che la funzione **derivi l'identità da sé**: `session_user` in native mode (login role per-agente, `runNative` in `src/docDb.ts:122`), altrimenti `current_setting('request.agent_slug')` che il path doc_rw imposta già a ogni transazione (`src/docDb.ts:99-101`) — non è lavoro nuovo per nessuno dei due. Conseguenza accettata: **i `gov_*` gireranno sotto `doc_rw`, non `service_role`**, altrimenti non c'è nulla da cui dedurre. Se dba preferisce il parametro va bene, ma allora il contratto lo dichiarerà come enforcement **tool-layer**, non come garanzia a floor DB: la differenza resta scritta.
+
+**Nessun codice scritto,** e non per prudenza: la firma SQL effettiva non esiste ancora. Il GTD `a2567c59` non è più `waiting` su it-manager — solo su dba (tabella + funzione). `no_auto_arm` resta `true`: il ri-arm richiede la conferma che la migration è applicata, non uno scan.
+
+---
+
+## Sessione #99 — 2026-08-20 (`gov_param_set` DEL-A5: ri-dispatch autopilot, stato verificato invariato — GTD `a2567c59`, WI `2c975b69`)
+
+**Ri-evocato dal reconciler sullo stesso GTD della #98** (`gtd_status` era rimasto `next_action` nonostante il blocco reale — inconsistenza corretta in questa sessione). Nessun lavoro nuovo da fare: verificato l'intero thread `176a504f`↔`1663929a` e l'intera inbox (100 messaggi) — **nessuna risposta** né da dba (tabella `loomx_governance_params` + fn `gov.param_set` SECURITY DEFINER non applicate) né da it-manager (domanda aperta su `owner_stream_claim` senza riscontro).
+
+**Correzione applicata:** `gtd_update` → `gtd_status=waiting`, `waiting_on=dba` (prima non settato, per questo il reconciler lo riproponeva come next_action lavorabile). Nessuna scrittura di codice: bloccato su due dipendenze esterne già documentate, non serve rialzare a it-manager perché nulla è cambiato dal messaggio già inviato.
+
+**Addendum stessa sessione:** ri-dispatchato una seconda volta a pochi secondi di distanza, con `gtd_status` di nuovo `next_action`/`waiting_on=null` — il solo `waiting` non basta a fermare il reconciler su un item `autopilot=true`. Root cause del loop, non solo il sintomo: settato `autopilot=false` + `no_auto_arm=true` (D-100), così il ri-arm richiede un intervento esplicito (loomy/it-manager) invece dello scan automatico. Nessuna novità nel merito: le due dipendenze (dba, it-manager) restano aperte.
+
+---
+
 ## Sessione #98 — 2026-08-20 (`gov_param_set` DEL-A5: contratto specificato, gap SECURITY DEFINER flaggato a it-manager — GTD `a2567c59`, WI `e4f757d2`)
 
 **Wake cold-start `normal`, msg `176a504f` da it-manager.** Chiede un tool `gov_param_set` per scrivere `loomx_governance_params` (registro parametri di governance DEL-A5) — RLS vieta scrittura diretta, l'unica via dichiarata è il tool.
