@@ -31,6 +31,13 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
   store.doc_item_xproject_links ??= [];
   store.loomx_projects ??= [];
 
+  // Mimics the real doc_rw contract (docDb.ts runWithPool): the whole handler runs
+  // in ONE open transaction, so a constraint violation aborts it — every subsequent
+  // query fails with "current transaction is aborted" until a ROLLBACK TO SAVEPOINT.
+  // Bug d6a57035 (atlas): without this simulation, tests couldn't see the failure
+  // mode that only showed up against the real DB.
+  const txState = { aborted: false };
+
   function query(table: string) {
     const filters: Array<{ col: string; val: unknown; op: "eq" | "in" }> = [];
     let op: "select" | "insert" | "update" | "delete" = "select";
@@ -92,6 +99,12 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
     }
 
     const exec = async (): Promise<{ data: unknown; error: { message: string } | null }> => {
+      if (txState.aborted) {
+        return {
+          data: null,
+          error: { message: "current transaction is aborted, commands ignored until end of transaction block" },
+        };
+      }
       store[table] ??= [];
       if (op === "insert") {
         const row: Row = { id: uuid(), ...insertData };
@@ -100,7 +113,10 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
           row.attrs ??= {};
         }
         const cerr = checkConstraints(table, row);
-        if (cerr) return { data: null, error: { message: cerr } };
+        if (cerr) {
+          txState.aborted = true;
+          return { data: null, error: { message: cerr } };
+        }
         store[table].push(row);
         return finalize([row]);
       }
@@ -242,6 +258,13 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
     return { publication_id: id, version_seq: existing.length + 1, published_at: publishedAt };
   };
 
+  // Mimics real SAVEPOINT/ROLLBACK TO SAVEPOINT (docDb.ts, persistentTx mode):
+  // rollback clears the aborted flag, restoring a live transaction for whatever
+  // query runs next — same as against the real DB.
+  const savepoint = async (_name: string): Promise<void> => {};
+  const rollbackToSavepoint = async (_name: string): Promise<void> => { txState.aborted = false; };
+  const releaseSavepoint = async (_name: string): Promise<void> => {};
+
   return {
     from: (table: string) => query(table),
     __docRw: true,
@@ -250,6 +273,9 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
     agentInProject,
     documentExists,
     docPublish,
+    savepoint,
+    rollbackToSavepoint,
+    releaseSavepoint,
   } as unknown as SupabaseClient;
 }
 

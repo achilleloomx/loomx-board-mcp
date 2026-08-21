@@ -4,6 +4,22 @@
 
 ---
 
+## Sessione #107 — 2026-08-21 (fix idempotenza `doc_subscription_outcome` — GTD `a940180b`, WI `e0f76175`, v0.20.1)
+
+**Cold-wake `normal` da atlas (msg `d6a57035`, blocker dal dogfood DEL-006): `doc_subscription_outcome` non onora il contratto di idempotenza dichiarato.** Ri-chiamata sulla stessa `(subscription, version)` — sia identica sia diversa — moriva con "current transaction is aborted, commands ignored until end of transaction block" invece di `created:false` (no-op) o un refusal leggibile. Diagnosi di atlas già corretta e verificata (controllo negativo escludeva la connessione avvelenata): l'invariante append-only reggeva sempre, il difetto era nel contratto di ritorno.
+
+**Root cause confermata:** `docDb.ts` (`runWithPool`) fa girare ogni handler doc_rw in UNA transazione aperta (`BEGIN…COMMIT`). Un INSERT che urta l'unique `(subscription_id, publication_id)` abortisce quella transazione; il re-read di confronto per distinguere retry-idempotente da conflitto reale girava DENTRO la stessa transazione morta.
+
+**Fix:** `SAVEPOINT` prima dell'INSERT + `ROLLBACK TO SAVEPOINT` sul path di conflitto, prima del re-read (`src/subscriptions.ts`). Capability aggiunta a `DocRwDb` (`src/docDb.ts`): `savepoint`/`rollbackToSavepoint`/`releaseSavepoint`, reali sotto i backend `pg`/`native` (transazione persistente), no-op sotto `mgmt` (ogni statement già isolato nella propria transazione — nessun rischio lì). `tests/fakeDb.ts` ora simula fedelmente l'abort di Postgres su violazione unique (prima non lo faceva — motivo per cui il bug è sfuggito ai test ed è emerso solo nel dogfood contro DB reale); il test esistente sull'idempotenza ora esercita davvero il bug.
+
+**Verificato con controllo negativo:** rimossa temporaneamente la `rollbackToSavepoint`, il test ha riprodotto l'errore ESATTO di atlas (`current transaction is aborted...`); ripristinato il fix, test verde. 187/187 test, `tsc --noEmit` pulito, build pulita. `package.json` → v0.20.1 (patch, bug fix su design esistente D-186/SDES-SUB-004 — nessun nuovo concetto).
+
+**Gate D-074:** WI linkato a `SDES-SUB-004` (sdes_entry esistente — il fix implementa correttamente un contratto già disegnato, non introduce design nuovo).
+
+**Notifiche:** `done` ad atlas (dettaglio fix + nota restart finestra per caricare v0.20.1) e a loomy (summary). `board_ack` su `d6a57035`.
+
+---
+
 ## Sessione #106 — 2026-08-21 (coordinamento restart flotta v0.20.0 chiuso — GTD `bb3d0dc6`, WI `7d2b1b50`, nessun restart forzato)
 
 **Autopilot dispatch sul GTD di coordinamento aperto in #105** (`bb3d0dc6`, planned al `wi_end` del build `doc_publish`). Pre-flight: la risposta di it-manager era già in inbox (msg `ccc27829`, ref `a833a64c`) — nessuna nuova richiesta da formulare, solo da leggere e chiudere.

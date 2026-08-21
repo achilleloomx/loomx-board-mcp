@@ -26,6 +26,24 @@ const DOCUMENTS = "documents";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+// Duck-typed access to the doc_rw SAVEPOINT capability (docDb.ts DocRwDb) — mirrors
+// the docRwHandle pattern in docs.ts. Absent under fakes that don't implement it
+// (they degrade to the no-op below, same as the mgmt backend).
+function savepointHandle(db: SupabaseClient): {
+  savepoint: (name: string) => Promise<void>;
+  rollbackToSavepoint: (name: string) => Promise<void>;
+} | null {
+  const h = db as unknown as {
+    __docRw?: boolean;
+    savepoint?: (name: string) => Promise<void>;
+    rollbackToSavepoint?: (name: string) => Promise<void>;
+  };
+  if (h.__docRw && h.savepoint && h.rollbackToSavepoint) {
+    return { savepoint: h.savepoint, rollbackToSavepoint: h.rollbackToSavepoint };
+  }
+  return null;
+}
+
 export const SUBSCRIBE_INTENTS = ["informative", "module", "critical"] as const;
 export const SUBSCRIPTION_OUTCOMES = ["updated", "no_impact", "feedback_sent"] as const;
 export const BUMP_CLASSES = ["patch", "minor", "major"] as const;
@@ -513,12 +531,22 @@ export async function docSubscriptionOutcome(
   if (args.wi_id) insert.wi_id = args.wi_id;
   if (args.message_id) insert.message_id = args.message_id;
 
+  // Bug d6a57035 (atlas, DEL-006 dogfood): the whole handler runs in ONE open
+  // transaction (docDb.ts runWithPool). Without a savepoint, a duplicate-key INSERT
+  // aborts that transaction and the follow-up re-read below dies with "current
+  // transaction is aborted" — masking BOTH the no-op and the differs-refusal.
+  const sp = savepointHandle(db);
+  const SAVEPOINT_NAME = "doc_subscription_outcome_ins";
+  if (sp) await sp.savepoint(SAVEPOINT_NAME);
+
   const { data, error } = await db.from(GOV_DOC_SUBSCRIPTION_OUTCOMES).insert(insert).select("id").maybeSingle();
   if (error || !data) {
     const m = error?.message ?? "no row returned";
     if (/duplicate key|doc_subscription_outcomes_once/i.test(m)) {
       // Idempotent retry vs. a genuine second (different) act — tell them apart
-      // (SDES-SUB-004 §4: the ledger never corrects, only integrates).
+      // (SDES-SUB-004 §4: the ledger never corrects, only integrates). Restore a
+      // live transaction first (see comment above) so this re-read can actually run.
+      if (sp) await sp.rollbackToSavepoint(SAVEPOINT_NAME);
       const { data: exRows, error: exErr } = await db
         .from(GOV_DOC_SUBSCRIPTION_OUTCOMES)
         .select("id, outcome, note, wi_id, message_id")

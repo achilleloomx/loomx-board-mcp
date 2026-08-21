@@ -77,6 +77,18 @@ export interface DocRwDb {
     changelogEntryId: string,
     deltaSummary: string
   ) => Promise<{ publication_id: string; version_seq: number; published_at: string }>;
+  // Bug d6a57035 (atlas, DEL-006 dogfood): a handler runs in ONE open transaction
+  // (BEGIN…COMMIT, see runWithPool below). An INSERT that hits a unique constraint
+  // aborts that transaction — any subsequent query (e.g. the idempotent-retry
+  // re-read in doc_subscription_outcome) then fails with "current transaction is
+  // aborted", masking the intended no-op/refusal contract. SAVEPOINT before the
+  // INSERT + ROLLBACK TO SAVEPOINT on conflict restores a live transaction for the
+  // follow-up read, without discarding anything committed earlier in the handler.
+  // No-op under the mgmt backend (each statement already runs in its own isolated
+  // transaction there — see runMgmt — so there is nothing to rescue).
+  savepoint: (name: string) => Promise<void>;
+  rollbackToSavepoint: (name: string) => Promise<void>;
+  releaseSavepoint: (name: string) => Promise<void>;
 }
 
 export function assertSlug(slug: string): void {
@@ -112,7 +124,7 @@ async function runWithPool<T>(
     await client.query(`SET LOCAL ROLE ${DOC_RW_ROLE}`); // role is a fixed literal
     await client.query("SELECT loomx_set_agent_slug($1)", [slug]); // SECURITY DEFINER; validates slug
     const exec: PgExecutor = (sql, params) => client.query(sql, params);
-    const db = makeDb(exec);
+    const db = makeDb(exec, { persistentTx: true });
     const result = await fn(db);
     await client.query("COMMIT");
     return result;
@@ -222,7 +234,16 @@ async function runMgmt<T>(slug: string, fn: (db: DocRwDb) => Promise<T>): Promis
 // shared
 // ---------------------------------------------------------------------------
 
-function makeDb(exec: PgExecutor): DocRwDb {
+const SAVEPOINT_NAME_RE = /^[a-z][a-z0-9_]*$/;
+function assertSavepointName(name: string): void {
+  if (!SAVEPOINT_NAME_RE.test(name)) {
+    throw new Error(`doc_rw: invalid savepoint name '${name}'`);
+  }
+}
+
+function makeDb(exec: PgExecutor, opts: { persistentTx?: boolean } = {}): DocRwDb {
+  const persistentTx = opts.persistentTx === true;
+  const noop = async (_name: string): Promise<void> => {};
   return {
     __docRw: true,
     // noReturning: under doc_rw, `… RETURNING` makes the RLS WITH CHECK wrongly
@@ -270,6 +291,15 @@ function makeDb(exec: PgExecutor): DocRwDb {
         published_at: String(r.published_at),
       };
     },
+    savepoint: persistentTx
+      ? async (name: string) => { assertSavepointName(name); await exec(`SAVEPOINT ${name}`, []); }
+      : noop,
+    rollbackToSavepoint: persistentTx
+      ? async (name: string) => { assertSavepointName(name); await exec(`ROLLBACK TO SAVEPOINT ${name}`, []); }
+      : noop,
+    releaseSavepoint: persistentTx
+      ? async (name: string) => { assertSavepointName(name); await exec(`RELEASE SAVEPOINT ${name}`, []); }
+      : noop,
   };
 }
 
