@@ -6,11 +6,9 @@
 // Grants measured live 2026-08-21 under doc_rw: INSERT/SELECT/UPDATE on
 // doc_subscriptions, INSERT/SELECT on doc_subscription_outcomes, SELECT-only
 // on doc_versions/doc_version_items — no role has INSERT on doc_versions; the
-// only writer will be the gov.doc_publish() SECURITY DEFINER function, which
-// the dba has not shipped yet (msg 41fa192b: "è il mio prossimo cantiere A2").
-// That is why this file has three tools, not four — doc_publish is tracked as
-// a separate follow-on GTD, waiting_on=dba, instead of a speculative call
-// against a function whose signature does not exist.
+// only writer is gov.doc_publish() SECURITY DEFINER (dba msg 401811d8, live
+// 2026-08-21, signature aligned 1:1 to SDES-SUB-003 in msg cd8554f1). The 4th
+// tool (doc_publish, below) calls it — never an INSERT.
 //
 // Identity is DERIVED, never a parameter (SDES-SUB-000 §1): the BEFORE
 // INSERT/UPDATE trigger gov.doc_subscriptions_stamp_identity (and the
@@ -30,8 +28,10 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 export const SUBSCRIBE_INTENTS = ["informative", "module", "critical"] as const;
 export const SUBSCRIPTION_OUTCOMES = ["updated", "no_impact", "feedback_sent"] as const;
+export const BUMP_CLASSES = ["patch", "minor", "major"] as const;
 type Intent = (typeof SUBSCRIBE_INTENTS)[number];
 type Outcome = (typeof SUBSCRIPTION_OUTCOMES)[number];
+type BumpClass = (typeof BUMP_CLASSES)[number];
 
 function err(msg: string): { ok: false; error: string } {
   return { ok: false, error: msg };
@@ -579,6 +579,209 @@ export async function docSubscriptionOutcome(
       version: args.version,
       outcome: afterRow.outcome,
       created: true,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// doc_publish — SDES-SUB-003 (4th subscription tool). The explicit act of
+// publication: verifies the changelog, bumps the header, appends to
+// gov.doc_versions via gov.doc_publish() — the only writer that ledger will
+// ever grant (Q5, dba msg 41fa192b/cd8554f1/401811d8). No fan-out starts on a
+// plain edit; it starts HERE (guard against STOP-002).
+// ---------------------------------------------------------------------------
+
+export interface DocPublishArgs {
+  document_id: string;
+  new_version: string;
+  bump_class: string;
+  changelog_entry_id: string;
+  delta_summary: string;
+}
+
+export interface DocPublishResult {
+  publication_id: string;
+  document_id: string;
+  version_seq: number;
+  version_label: string;
+  bump_class: string;
+  changelog_entry_id: string;
+  published_at: string;
+}
+
+export async function docPublish(
+  db: SupabaseClient,
+  args: DocPublishArgs,
+  ctx: DocContext
+): Promise<DocResult<DocPublishResult>> {
+  if (!UUID_RE.test(args.document_id)) return err(`document_id must be a UUID.`);
+  if (!UUID_RE.test(args.changelog_entry_id)) return err(`changelog_entry_id must be a UUID.`);
+  if (!args.new_version || args.new_version.trim() === "") return err(`new_version is required.`);
+  if (!BUMP_CLASSES.includes(args.bump_class as BumpClass)) {
+    return err(`Invalid bump_class '${args.bump_class}'. Allowed: ${BUMP_CLASSES.join(", ")}.`);
+  }
+  if (!args.delta_summary || args.delta_summary.trim() === "") {
+    return err(`delta_summary is required — the summary the ledger stores and the notification carries.`);
+  }
+
+  // Document must exist and be readable; legitimation = owner or loomy (SDES-SUB-003 §2).
+  const { data: docRow, error: docErr } = await db
+    .from(DOCUMENTS)
+    .select("id, project_id, owner, version")
+    .eq("id", args.document_id)
+    .maybeSingle();
+  if (docErr) return err(`Failed to load document: ${docErr.message}`);
+  if (!docRow) {
+    return err(`document_id '${args.document_id}' is not readable by '${ctx.selfSlug}' (not found, or hidden by RLS).`);
+  }
+  const doc = docRow as { id: string; project_id: string; owner: string | null; version: string | null };
+
+  if (!ctx.isLoomy && doc.owner !== ctx.selfSlug) {
+    return err(
+      `Not legitimated to publish document '${doc.id}': you are not its owner ('${doc.owner ?? "none"}'), and only ` +
+      `loomy can publish cross-agent (SDES-SUB-003 §2).`
+    );
+  }
+
+  // Changelog gate (tool-floor, defense in depth — the function re-checks this
+  // server-side too, dba msg 401811d8): pubblicare senza changelog è impossibile
+  // by-construction (SDES-SUB-003 §1).
+  const { data: chRow, error: chErr } = await db
+    .from(DOC_ITEMS)
+    .select("id, item_type, document_id, project_id, attrs")
+    .eq("id", args.changelog_entry_id)
+    .maybeSingle();
+  if (chErr) return err(`Failed to load changelog_entry_id: ${chErr.message}`);
+  if (!chRow) {
+    return err(
+      `changelog_entry_id '${args.changelog_entry_id}' is not readable by '${ctx.selfSlug}' (not found, or hidden by RLS).`
+    );
+  }
+  const ch = chRow as { id: string; item_type: string; document_id: string; project_id: string; attrs: Record<string, unknown> | null };
+  if (ch.item_type !== "changelog_entry") {
+    return err(`changelog_entry_id '${ch.id}' has item_type='${ch.item_type}', expected 'changelog_entry'.`);
+  }
+  if (ch.project_id !== doc.project_id) {
+    return err(
+      `changelog_entry_id '${ch.id}' belongs to project ${ch.project_id}, not the target document's project ${doc.project_id}.`
+    );
+  }
+  const { data: chDocRow, error: chDocErr } = await db
+    .from(DOCUMENTS)
+    .select("id, document_type")
+    .eq("id", ch.document_id)
+    .maybeSingle();
+  if (chDocErr) return err(`Failed to verify the changelog entry's document: ${chDocErr.message}`);
+  if (!chDocRow || (chDocRow as { document_type: string }).document_type !== "changelog") {
+    return err(`changelog_entry_id '${ch.id}' does not live in a document_type='changelog' document.`);
+  }
+  const chVersion = ch.attrs?.version;
+  if (String(chVersion ?? "") !== args.new_version) {
+    return err(
+      `changelog_entry_id '${ch.id}' has attrs.version='${chVersion ?? "none"}', expected '${args.new_version}' ` +
+      `(changelog-by-construction, SDES-SUB-003 §1).`
+    );
+  }
+
+  // Call gov.doc_publish() — the only writer gov.doc_versions will ever grant.
+  // Never INSERT directly (Q5, dba msg 41fa192b/cd8554f1).
+  const rw = db as unknown as {
+    __docRw?: boolean;
+    docPublish?: (
+      documentId: string,
+      newVersion: string,
+      bumpClass: string,
+      changelogEntryId: string,
+      deltaSummary: string
+    ) => Promise<{ publication_id: string; version_seq: number; published_at: string }>;
+  };
+  if (!rw.__docRw || !rw.docPublish) {
+    return err(
+      `doc_publish: db is not a DocRwDb — refusing to bypass RLS. gov.doc_publish lives in the gov schema and is ` +
+      `only reachable via the doc_rw direct-pg path (runDocRw). Test fakes must implement docPublish.`
+    );
+  }
+
+  let result: { publication_id: string; version_seq: number; published_at: string };
+  try {
+    result = await rw.docPublish(args.document_id, args.new_version, args.bump_class, args.changelog_entry_id, args.delta_summary);
+  } catch (ex) {
+    const code = (ex as { code?: string }).code ?? "";
+    const msg = ex instanceof Error ? ex.message : String(ex);
+    if (/42501|insufficient_privilege/.test(code) || /insufficient_privilege/i.test(msg)) {
+      return err(`Not legitimated to publish document '${args.document_id}' (gov.doc_publish: insufficient_privilege). Original: ${msg}`);
+    }
+    if (/P0002|no_data_found/.test(code) || /no_data_found/i.test(msg)) {
+      return err(`gov.doc_publish: document or changelog_entry_id not found server-side. Original: ${msg}`);
+    }
+    if (/22023|invalid_parameter_value/.test(code) || /invalid_parameter_value/i.test(msg)) {
+      return err(
+        `gov.doc_publish rejected the parameters — bump_class, delta_summary, version format/ordering, or a ` +
+        `changelog mismatch server-side. Original: ${msg}`
+      );
+    }
+    if (/23505|unique_violation/.test(code) || /unique_violation|duplicate key/i.test(msg)) {
+      return err(
+        `version '${args.new_version}' is already published on document ${args.document_id} — republishing the ` +
+        `same version is a REFUSAL, not a no-op (SDES-SUB-003 §3). Original: ${msg}`
+      );
+    }
+    return err(`gov.doc_publish failed: ${msg}`);
+  }
+
+  // D-132 (DEL-002 acceptance b): re-read BOTH surfaces before ok — the
+  // documents.version bump AND the ledger row — never trust the function's
+  // return value alone.
+  const { data: afterDoc, error: afterDocErr } = await db
+    .from(DOCUMENTS)
+    .select("id, version")
+    .eq("id", args.document_id)
+    .maybeSingle();
+  if (afterDocErr || !afterDoc) {
+    return err(
+      `Publish reported success but documents.version could not be re-read: ${afterDocErr?.message ?? "row not found"}. Treat as UNCONFIRMED.`
+    );
+  }
+  if ((afterDoc as { version: string | null }).version !== args.new_version) {
+    return err(
+      `Publish reported success but documents.version reads '${(afterDoc as { version: string | null }).version}', ` +
+      `expected '${args.new_version}' — treat as UNCONFIRMED.`
+    );
+  }
+
+  const { data: afterPub, error: afterPubErr } = await db
+    .from(GOV_DOC_VERSIONS)
+    .select("id, document_id, version_seq, version_label, bump_class, changelog_item_id, published_at")
+    .eq("id", result.publication_id)
+    .maybeSingle();
+  if (afterPubErr || !afterPub) {
+    return err(
+      `Publish reported success but the ledger row '${result.publication_id}' could not be re-read: ${afterPubErr?.message ?? "row not found"}. Treat as UNCONFIRMED.`
+    );
+  }
+  const pub = afterPub as {
+    id: string; document_id: string; version_seq: number; version_label: string;
+    bump_class: string; changelog_item_id: string; published_at: string;
+  };
+  if (
+    pub.document_id !== args.document_id ||
+    pub.version_label !== args.new_version ||
+    pub.bump_class !== args.bump_class ||
+    pub.changelog_item_id !== args.changelog_entry_id
+  ) {
+    return err(`Publish '${result.publication_id}' was recorded but does not match what was sent (D-132) — treat as UNCONFIRMED.`);
+  }
+
+  return {
+    ok: true,
+    data: {
+      publication_id: pub.id,
+      document_id: pub.document_id,
+      version_seq: pub.version_seq,
+      version_label: pub.version_label,
+      bump_class: pub.bump_class,
+      changelog_entry_id: pub.changelog_item_id,
+      published_at: pub.published_at,
     },
   };
 }

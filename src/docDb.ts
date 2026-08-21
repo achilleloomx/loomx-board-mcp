@@ -65,6 +65,18 @@ export interface DocRwDb {
   // SECURITY DEFINER, GRANTed to doc_rw + service_role, returns ONLY true/false — by
   // design no project_id/owner, so the caller can never reconstruct or leak them.
   documentExists: (documentId: string) => Promise<boolean>;
+  // DEL-002 4th tool (SDES-SUB-003, dba msg 401811d8): the only writer
+  // gov.doc_versions/doc_version_items will ever grant. SECURITY DEFINER, owner —
+  // bumps documents.version + appends the ledger row atomically. Raises typed
+  // SQLSTATEs: no_data_found (P0002), invalid_parameter_value (22023),
+  // unique_violation (23505), insufficient_privilege (42501).
+  docPublish: (
+    documentId: string,
+    newVersion: string,
+    bumpClass: string,
+    changelogEntryId: string,
+    deltaSummary: string
+  ) => Promise<{ publication_id: string; version_seq: number; published_at: string }>;
 }
 
 export function assertSlug(slug: string): void {
@@ -185,7 +197,7 @@ async function mgmtQuery(fullSql: string): Promise<Row[]> {
       ? JSON.stringify(parsed)
       : String(parsed);
     const err = new Error(msg) as Error & { code?: string };
-    const m = msg.match(/\b(42501|P0002|22004|23505|23503)\b/) || msg.match(/insufficient_privilege|no_data_found|null_value_not_allowed/);
+    const m = msg.match(/\b(42501|P0002|22004|22023|23505|23503)\b/) || msg.match(/insufficient_privilege|no_data_found|null_value_not_allowed|invalid_parameter_value/);
     if (m) err.code = m[0];
     throw err;
   }
@@ -240,6 +252,23 @@ function makeDb(exec: PgExecutor): DocRwDb {
       const { rows } = await exec("SELECT doc_document_exists($1::uuid) AS ok", [documentId]);
       const r = rows[0] as Row | undefined;
       return Boolean(r && r.ok);
+    },
+    docPublish: async (documentId, newVersion, bumpClass, changelogEntryId, deltaSummary) => {
+      const { rows } = await exec(
+        "SELECT publication_id, version_seq, published_at FROM gov.doc_publish($1::uuid, $2, $3, $4::uuid, $5)",
+        [documentId, newVersion, bumpClass, changelogEntryId, deltaSummary]
+      );
+      const r = rows[0] as Row | undefined;
+      if (!r) {
+        const e = new Error("gov.doc_publish returned no row") as Error & { code?: string };
+        e.code = "P0002";
+        throw e;
+      }
+      return {
+        publication_id: String(r.publication_id),
+        version_seq: Number(r.version_seq),
+        published_at: String(r.published_at),
+      };
     },
   };
 }

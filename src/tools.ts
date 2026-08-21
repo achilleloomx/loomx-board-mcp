@@ -9,7 +9,7 @@ import {
   DB_DOC_ITEM_LINK_TYPES,
 } from "./docTypes.js";
 import { rwGuardsEnabled, modelGuardsEnabled } from "./flags.js";
-import { SUBSCRIBE_INTENTS, SUBSCRIPTION_OUTCOMES } from "./subscriptions.js";
+import { SUBSCRIBE_INTENTS, SUBSCRIPTION_OUTCOMES, BUMP_CLASSES } from "./subscriptions.js";
 
 const TABLE = "board_messages";
 const OVERVIEW_VIEW = "board_overview";
@@ -3614,14 +3614,14 @@ export function registerTools(
 
   // =========================================================================
   // Subscription Tools (gov.doc_subscriptions / gov.doc_subscription_outcomes
-  // — DEL-002, design ratified D-186 SDES-SUB-000..007). doc_publish is NOT
-  // registered yet: gov.doc_publish() (the only writer gov.doc_versions will
-  // ever grant) has not been shipped by the dba — tracked as a follow-on GTD,
-  // waiting_on=dba, instead of a speculative call with a guessed signature.
+  // / gov.doc_versions — DEL-002, design ratified D-186 SDES-SUB-000..007).
+  // All 4 tools live: doc_publish calls gov.doc_publish() (dba msg 401811d8,
+  // live 2026-08-21), the only writer gov.doc_versions will ever grant.
   // =========================================================================
 
   const SUB_INTENTS_LIST = SUBSCRIBE_INTENTS.join("|");
   const SUB_OUTCOMES_LIST = SUBSCRIPTION_OUTCOMES.join("|");
+  const BUMP_CLASSES_LIST = BUMP_CLASSES.join("|");
 
   // --- doc_subscribe ---
   server.tool(
@@ -3685,6 +3685,30 @@ export function registerTools(
     async (args) => {
       const { docSubscriptionOutcome } = await import("./subscriptions.js");
       return runDocTool((db) => docSubscriptionOutcome(db, args, docCtx));
+    }
+  );
+
+  // --- doc_publish ---
+  server.tool(
+    "doc_publish",
+    `The explicit act of publication (SDES-SUB-003): verifies the changelog, bumps documents.version, appends to ` +
+      `the gov.doc_versions ledger via gov.doc_publish() — the only writer that ledger will ever grant, never an ` +
+      `INSERT. No fan-out starts on a plain edit; it starts HERE. Legitimation: document owner or loomy. ` +
+      `changelog_entry_id MUST already exist as a 'changelog_entry' in a document_type='changelog' document of the ` +
+      `SAME project, with attrs.version === new_version (changelog-by-construction — pubblicare senza changelog è ` +
+      `impossibile by-construction). bump_class ∈ {${BUMP_CLASSES_LIST}}. new_version must be dotted-numeric semver-like ` +
+      `and order after the last published version. Republishing the same (document_id, new_version) is a REFUSAL, not ` +
+      `a no-op. Example: doc_publish({document_id:"<uuid>", new_version:"2.1", bump_class:"minor", changelog_entry_id:"<uuid>", delta_summary:"..."}).`,
+    {
+      document_id: z.string().uuid().describe("The document to publish"),
+      new_version: z.string().min(1).describe("The version that is born, e.g. '2.1' — must order after documents.version"),
+      bump_class: z.enum(BUMP_CLASSES).describe(`Change severity: ${BUMP_CLASSES_LIST}`),
+      changelog_entry_id: z.string().uuid().describe("The changelog_entry doc_item for this version — no deduction, explicit UUID"),
+      delta_summary: z.string().min(1).describe("The delta summary the ledger stores and the notification carries"),
+    },
+    async (args) => {
+      const { docPublish } = await import("./subscriptions.js");
+      return runDocTool((db) => docPublish(db, args, docCtx));
     }
   );
 }

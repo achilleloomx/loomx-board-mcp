@@ -4,6 +4,20 @@
 
 ---
 
+## Sessione #105 — 2026-08-21 (DEL-002 chiuso: doc_publish, 4°/4 tool sottoscrizioni — GTD `d9ebe0c6`, WI `ae525e25`, v0.20.0)
+
+**Cold-wake `high` da loomy (msg `1ec008c2`): dba ha consegnato `gov.doc_publish()` + change-set + Freeze-B + REVOKE UPDATE(version), verificato end-to-end.** Firma confermata su due messaggi indipendenti del dba (`cd8554f1` allineamento 1:1 a SDES-SUB-003, `401811d8` conferma live): `gov.doc_publish(p_document_id uuid, p_new_version text, p_bump_class text, p_changelog_entry_id uuid, p_delta_summary text) RETURNS TABLE(publication_id uuid, version_seq int, published_at timestamptz)`.
+
+**Implementato `doc_publish`** (`src/subscriptions.ts`, pattern identico a `doc_subscribe`/`doc_unsubscribe`/`doc_subscription_outcome`): validazione tool-floor (legittimazione owner/loomy, gate changelog by-construction — `changelog_entry_id` deve essere `item_type='changelog_entry'` in un documento `document_type='changelog'` dello stesso progetto con `attrs.version===new_version`), poi chiamata a `gov.doc_publish()` via nuovo probe `docPublish` su `DocRwDb` (`src/docDb.ts`, stesso pattern di `relinkSuperseded` — mai INSERT diretto, `gov.doc_versions` non concede INSERT a nessun ruolo). D-132: rilettura di entrambe le superfici (`documents.version` bump + riga ledger) prima dell'`ok`. Errori tipati mappati (`no_data_found`/`invalid_parameter_value`/`unique_violation`/`insufficient_privilege`) — aggiunto `22023` alla regex di estrazione SQLSTATE del backend mgmt (mancava). Tool registrato in `tools.ts`.
+
+**Verificato:** build pulito, 187/187 test (7 nuovi su `doc_publish` in `tests/subscriptions.test.ts` + fake `docPublish` in `tests/fakeDb.ts`, mimico dell'unique_violation su ripubblicazione). `CLAUDE.md` aggiornato (tabella Subscription Tools, 4/4 live). `package.json` → v0.20.0. WI linkato a `SDES-SUB-003` (gate D-074 soddisfatto via il design esistente — nessun `force_ephemeral`).
+
+**Notifiche:** `board_send` a loomy (summary done) e a it-manager (come richiesto nel messaggio di sblocco — doc_subscribe+doc_publish vivi per lo sweep sui 4 criteri, primo ciclo reale). `board_ack` su `1ec008c2`.
+
+**Gap aperto, non bloccante:** `dist/` è build unica condivisa senza hot-reload — le finestre board-mcp già aperte restano su 3/4 tool finché non ripartono (CLAUDE.md, "Rollout di un nuovo build"). Tracciato in GTD `bb3d0dc6` (coordinamento restart con it-manager/loomy, planned non armato).
+
+---
+
 ## Sessione #104 — 2026-08-21 (wake ee97e55c: lavoro già eseguito in #103, mancava solo la notifica a it-manager — WI `adf960d0`)
 
 **Cold-wake `high` da loomy (msg `ee97e55c`, "GO BUILD: design DEL-002 ratificato D-186") ricevuto dopo che il build era già stato consegnato.** Verificato sul DB (non sulla memoria di sessione): WI `b415d6e4` della #103 già `done` (commit `31b58a8`, v0.19.0), 3/4 tool sottoscrizioni live, GTD follow-on `d9ebe0c6` già aperto per `doc_publish` (bloccato su dba). Il messaggio `ee97e55c` risultava ancora `pending` — non ackato in #103 — ed era mancata l'unica azione non ancora coperta: "al done avvisa it-manager", perché in #103 il done era parziale (3/4) e la notifica non era mai partita.

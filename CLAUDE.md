@@ -294,18 +294,17 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 >
 > **Write-path fix (v0.8.1):** sotto doc_rw un `INSERT/UPDATE … RETURNING` fa valutare la RLS WITH CHECK col GUC come NULL → write negate (42501). Il path doc_rw gira quindi in "no-RETURNING mode" (`PgQuery` opts): INSERT con id client-side + risultato sintetizzato, UPDATE + follow-up SELECT. Fix DB definitivo (al DBA): helper policy `loomx_*` → VOLATILE invece di STABLE.
 
-### Subscription Tools (gov.doc_subscriptions / gov.doc_subscription_outcomes — DEL-002, v0.19.0)
+### Subscription Tools (gov.doc_subscriptions / gov.doc_subscription_outcomes / gov.doc_versions — DEL-002, v0.20.0)
 
-3 dei 4 tool ratificati in D-186 (design SDES-SUB-000..007, doc `714d3313`, progetto board-mcp `596cd5fc`). Girano sotto `doc_rw` come i `doc_*` (stesso `runDocRw`, `src/subscriptions.ts`).
+4/4 tool ratificati in D-186 live (design SDES-SUB-000..007, doc `714d3313`, progetto board-mcp `596cd5fc`). Girano sotto `doc_rw` come i `doc_*` (stesso `runDocRw`, `src/subscriptions.ts`).
 
 | Tool | Descrizione | Operazione DB |
 |---|---|---|
 | `doc_subscribe` | Crea sottoscrizione origin='choice' (le origini 'fact' sono automatiche, fuori da questo tool). Esattamente uno tra `target_item_id`/`target_document_id`. Idempotente su stesso intent (`created:false`); intent diverso = cambio di grado (`intent_changed`). `critical` cross-progetto **rifiutato in v1** (D-186 Q2) | INSERT/UPDATE gov.doc_subscriptions |
 | `doc_unsubscribe` | Tombstone (mai DELETE — trigger DB lo rifiuta comunque). Rifiuta `origin='fact'` (SEC-011) **a livello tool** — il floor-trigger DB è ratificato (D-186 §2) ma non ancora applicato, misurato live 2026-08-21. `reason` non ha colonna dedicata: viene appeso a `note` (stesso pattern append di `wi_end --failed`) | UPDATE gov.doc_subscriptions |
 | `doc_subscription_outcome` | Registra un esito (subscription × publication) — append-only, `note` richiesta per `no_impact`/`feedback_sent`. `version` (label) viene risolta a `publication_id` su `gov.doc_versions`; un esito su versione mai pubblicata è un errore. Idempotente su payload identico, rifiuta payload diverso sulla stessa coppia | INSERT gov.doc_subscription_outcomes |
+| `doc_publish` | (v0.20.0, SDES-SUB-003) L'atto esplicito di pubblicazione: verifica il changelog (`changelog_entry_id` deve essere `item_type='changelog_entry'` in un documento `document_type='changelog'` dello stesso progetto, con `attrs.version === new_version` — changelog-by-construction), poi chiama `gov.doc_publish(document_id, new_version, bump_class, changelog_entry_id, delta_summary)` — SECURITY DEFINER del dba, **unico writer** che `gov.doc_versions` concederà mai (mai INSERT diretto). Legittimazione: owner del documento o loomy (doppia, anche lato funzione). Ripubblicare la stessa `(document_id, new_version)` è un **rifiuto**, non un no-op. Rilegge ENTRAMBE le superfici (documents.version + riga ledger) prima dell'`ok` (D-132). Errori tipati: `no_data_found`/`invalid_parameter_value`/`unique_violation`/`insufficient_privilege` (dba msg `401811d8`) | CALL gov.doc_publish() → UPDATE documents + INSERT gov.doc_versions |
 
-> **`doc_publish` NON è registrato.** La tabella `gov.doc_versions` è live (nessun ruolo, doc_rw incluso, ha INSERT) — l'unico writer sarà `gov.doc_publish(...)` SECURITY DEFINER, non ancora scritto dal dba (msg `41fa192b`: "è il mio prossimo cantiere A2"). Costruire il tool contro una firma indovinata avrebbe mascherato il vero blocco; tracciato come GTD follow-on `waiting_on=dba`.
->
 > **Fix registry collegato (SDES-SUB-005, D-155):** `doc_link` instrada per **confine di progetto reale** (project_id di from/to), non più per etichetta `relation_type` — un link cross-progetto con `relates_to`/`amends`/etc. ora va su `doc_item_xproject_links` invece di fallire con FK error. `'references'` resta sempre cross-project (D-074). `amends` aggiunto a `DB_DOC_ITEM_LINK_TYPES` (ammesso in entrambe le tabelle, misurato col dba).
 
 ### Tipi di messaggio

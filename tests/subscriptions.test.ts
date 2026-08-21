@@ -8,7 +8,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 
-import { docSubscribe, docUnsubscribe, docSubscriptionOutcome } from "../src/subscriptions.ts";
+import { docSubscribe, docUnsubscribe, docSubscriptionOutcome, docPublish } from "../src/subscriptions.ts";
 import { makeDb, uuid, ctx, PROJ_A, PROJ_B, seedProjects, type Store, type Row } from "./fakeDb.ts";
 
 function seedDocument(store: Store, id: string, project_id: string, version = "1.0"): void {
@@ -332,4 +332,146 @@ test("doc_subscription_outcome: outcome after tombstone-with-later-version is re
   const after = await docSubscriptionOutcome(db, { subscription_id: subId, version: "2.0", outcome: "updated" }, ctx);
   assert.equal(after.ok, false);
   assert.match((after as any).error, /tombstoned .* before version/);
+});
+
+// ---------------------------------------------------------------------------
+// doc_publish
+// ---------------------------------------------------------------------------
+
+function seedChangelogDoc(store: Store, id: string, project_id: string): void {
+  store.documents ??= [];
+  store.documents.push({ id, project_id, version: "1.0", document_type: "changelog", title: "Changelog", visibility: "project" });
+}
+
+function seedChangelogEntry(store: Store, id: string, project_id: string, changelogDocId: string, version: string): Row {
+  store.doc_items ??= [];
+  const row = {
+    id, project_id, document_id: changelogDocId, owner: "board-mcp", code: null,
+    status: "draft", item_type: "changelog_entry", body: "x", attrs: { version },
+  };
+  store.doc_items.push(row);
+  return row;
+}
+
+test("doc_publish: publishes a document, bumps version, appends the ledger row", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.0");
+  const changelogDocId = uuid();
+  seedChangelogDoc(store, changelogDocId, PROJ_A);
+  const entryId = uuid();
+  seedChangelogEntry(store, entryId, PROJ_A, changelogDocId, "1.1");
+  // document owned by the caller (default ctx.selfSlug = "board-mcp")
+  store.documents.find((r: Row) => r.id === docId)!.owner = "board-mcp";
+
+  const res = await docPublish(db, {
+    document_id: docId, new_version: "1.1", bump_class: "minor",
+    changelog_entry_id: entryId, delta_summary: "adds the 4th subscription tool",
+  }, ctx);
+  assert.ok(res.ok, `publish ok: ${JSON.stringify(res)}`);
+  assert.equal((res as any).data.version_label, "1.1");
+  assert.equal((res as any).data.version_seq, 1);
+  assert.equal((res as any).data.bump_class, "minor");
+  assert.equal(store.documents.find((r: Row) => r.id === docId)!.version, "1.1");
+  assert.equal(store["gov.doc_versions"].length, 1);
+  assert.equal(store["gov.doc_versions"][0].changelog_item_id, entryId);
+});
+
+test("doc_publish: rejects invalid bump_class", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.0");
+  store.documents.find((r: Row) => r.id === docId)!.owner = "board-mcp";
+
+  const res = await docPublish(db, {
+    document_id: docId, new_version: "1.1", bump_class: "huge",
+    changelog_entry_id: uuid(), delta_summary: "x",
+  }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /Invalid bump_class/);
+});
+
+test("doc_publish: rejects when changelog_entry_id attrs.version does not match new_version (changelog-by-construction)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.0");
+  store.documents.find((r: Row) => r.id === docId)!.owner = "board-mcp";
+  const changelogDocId = uuid();
+  seedChangelogDoc(store, changelogDocId, PROJ_A);
+  const entryId = uuid();
+  seedChangelogEntry(store, entryId, PROJ_A, changelogDocId, "9.9");
+
+  const res = await docPublish(db, {
+    document_id: docId, new_version: "1.1", bump_class: "minor",
+    changelog_entry_id: entryId, delta_summary: "x",
+  }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /changelog-by-construction/);
+});
+
+test("doc_publish: rejects when changelog_entry_id is not item_type='changelog_entry'", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.0");
+  store.documents.find((r: Row) => r.id === docId)!.owner = "board-mcp";
+  const notEntryId = uuid();
+  seedDocItem(store, notEntryId, PROJ_A, docId, "board-mcp"); // item_type='requirement' (seedDocItem default)
+
+  const res = await docPublish(db, {
+    document_id: docId, new_version: "1.1", bump_class: "minor",
+    changelog_entry_id: notEntryId, delta_summary: "x",
+  }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /expected 'changelog_entry'/);
+});
+
+test("doc_publish: non-owner (and not loomy) is rejected", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.0");
+  store.documents.find((r: Row) => r.id === docId)!.owner = "someone-else";
+
+  const res = await docPublish(db, {
+    document_id: docId, new_version: "1.1", bump_class: "minor",
+    changelog_entry_id: uuid(), delta_summary: "x",
+  }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /Not legitimated/);
+});
+
+test("doc_publish: republishing the same (document_id, new_version) is a REFUSAL, not a no-op", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.0");
+  store.documents.find((r: Row) => r.id === docId)!.owner = "board-mcp";
+  const changelogDocId = uuid();
+  seedChangelogDoc(store, changelogDocId, PROJ_A);
+  const entryId = uuid();
+  seedChangelogEntry(store, entryId, PROJ_A, changelogDocId, "1.1");
+
+  const res1 = await docPublish(db, {
+    document_id: docId, new_version: "1.1", bump_class: "minor",
+    changelog_entry_id: entryId, delta_summary: "first",
+  }, ctx);
+  assert.ok(res1.ok, JSON.stringify(res1));
+
+  const res2 = await docPublish(db, {
+    document_id: docId, new_version: "1.1", bump_class: "minor",
+    changelog_entry_id: entryId, delta_summary: "second, same version",
+  }, ctx);
+  assert.equal(res2.ok, false);
+  assert.match((res2 as any).error, /REFUSAL, not a no-op/);
+  assert.equal(store["gov.doc_versions"].length, 1);
 });

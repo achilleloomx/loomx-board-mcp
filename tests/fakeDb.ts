@@ -202,6 +202,46 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
   const documentExists = async (documentId: string): Promise<boolean> =>
     (store.documents as Row[]).some((r) => r.id === documentId);
 
+  // Mimics gov.doc_publish (SDES-SUB-003): appends to gov.doc_versions, bumps
+  // documents.version, returns (publication_id, version_seq, published_at).
+  // Throws SQLSTATE-tagged errors on the same conditions the real SECURITY
+  // DEFINER function does (unique_violation on a duplicate (document, version)).
+  const docPublish = async (
+    documentId: string,
+    newVersion: string,
+    bumpClass: string,
+    changelogEntryId: string,
+    deltaSummary: string
+  ): Promise<{ publication_id: string; version_seq: number; published_at: string }> => {
+    store["gov.doc_versions"] ??= [];
+    const existing = (store["gov.doc_versions"] as Row[]).filter((r) => r.document_id === documentId);
+    if (existing.some((r) => r.version_label === newVersion)) {
+      const e = new Error("unique_violation") as Error & { code?: string };
+      e.code = "23505";
+      throw e;
+    }
+    const doc = (store.documents as Row[]).find((r) => r.id === documentId);
+    if (!doc) {
+      const e = new Error("no_data_found") as Error & { code?: string };
+      e.code = "P0002";
+      throw e;
+    }
+    const id = uuid();
+    const publishedAt = "2026-08-21T21:00:00.000Z";
+    store["gov.doc_versions"].push({
+      id,
+      document_id: documentId,
+      version_seq: existing.length + 1,
+      version_label: newVersion,
+      bump_class: bumpClass,
+      changelog_item_id: changelogEntryId,
+      delta_summary: deltaSummary,
+      published_at: publishedAt,
+    });
+    doc.version = newVersion;
+    return { publication_id: id, version_seq: existing.length + 1, published_at: publishedAt };
+  };
+
   return {
     from: (table: string) => query(table),
     __docRw: true,
@@ -209,6 +249,7 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
     relinkSuperseded,
     agentInProject,
     documentExists,
+    docPublish,
   } as unknown as SupabaseClient;
 }
 
