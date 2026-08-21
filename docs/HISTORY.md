@@ -4,6 +4,22 @@
 
 ---
 
+## Sessione #101 — 2026-08-21 (items-subscription DEL-002: design-first dei 4 tool + D2 chiuso v0.18.0 + predicato D8 al dba — GTD `427b682b`, WI `0ba0971d`)
+
+**Wake `high` da loomy (msg `cbe96c66`): capitolato sottoscrizioni (progetto `52f9b563`) approvato da Achille, ondata dispacciata.** Mandato in tre pezzi: design-first dei 4 tool (DEL-002), fix D2 «documento sbagliato», predicato D8 con dba.
+
+**Design-first consegnato, zero righe di codice sui 4 tool (SEC-002: design prima del build).** Letti per intero DEL-001/002/008/009 + «Come funziona» + «Architettura» + SEC-011 + «Domande aperte» del capitolato. Design DB-first: doc sdes `714d3313` nel progetto board-mcp (la RLS mi ha correttamente negato `doc_create` su `52f9b563` — nessuna membership; niente duplicati, collocazione dichiarata come Q1), **visibility=org** (rilievo dba «il tuo layer SDES non è leggibile da me» recepito). Otto voci `SDES-SUB-000..007` in_review: invarianti (identità derivata server-side col contratto gov_param della #100, doc_rw, D-132, enum chiusi), i 4 tool (subscribe con verifica-lettura a RLS-floor + `subscribed_at_version`; unsubscribe=tombstone con regola SEC-011 «si esce solo dalla scelta»; publish con gate changelog by-construction e sequenza D-182 — nasce DOPO `gov.doc_versions` di DEL-A2; outcome append-only per (sottoscrizione × versione)), fix registry (routing cross per confine di progetto non per relation_type; `amends` dopo misura CHECK col dba), predicato D8, domande aperte con chi-decide-cosa. Link cross `references` verso DEL-002/DEL-008/DEL-001 + link WI.
+
+**Gap trovato leggendo, non costruendo:** DEL-001 non prevede una colonna `origin` su `gov.doc_subscriptions` — senza, la non-silenziabilità di DEL-009 («imposto al livello più basso del database») e la regola d'uscita per origine NON sono imponibili a DB-floor. Proposto al dba come Q4 (emendamento DEL-001, ratifica loomy).
+
+**D8 — predicato di «cambiamento sostanziale» (SDES-SUB-006), proposto al dba per co-firma (msg `2b15d62a`, wake normal).** Perimetro: DENTRO body/title/summary/attrs/status/code/item_type, FUORI sort_order/updated_at/owner e — deliberata — priority. Il contributo che solo board-mcp poteva portare: **`attrs._client_token` va escluso dal confronto** (è il token di idempotenza che i nostri tool persistono dentro attrs — senza esclusione un retry idempotente marca stantio mezzo corpus). IS DISTINCT FROM, confronto per colonna, due chiavi parametro (`docm.m2.significant_columns` + `docm.m2.attrs_excluded_keys`).
+
+**D2 chiuso (GTD `4a591cfe`, commit `6219357`, v0.18.0):** `doc_item_upsert` deduce il documento dal codice — `document_id` opzionale su codice esistente, mismatch → autocorrezione DICHIARATA in `warnings` (mai duplicato, mai spostamento — prima l'update procedeva in silenzio sul documento reale ignorando quello passato), riga nuova senza `document_id` → errore azionabile; risposta porta sempre `document_id` reale. `doc_query` summary: `document_id` per riga + legenda `{document_id→titolo,tipo}`. Igiene msg dba `b8f94388`: riferimenti morti a `uq_doc_items_project_code` ripuliti. 4 test nuovi, **163/163 verdi**. G4: finestre vive restano su v0.17.0 fino a restart.
+
+**Chiusure:** design+domande a loomy (msg `03162a75`: Q1 collocazione, Q2 critico cross rifiutato in v1, Q7 `changelog_entry_id` esplicito). Follow-on `fd2ac249` (build post-ratifica) creato `waiting` su loomy, NON armato.
+
+---
+
 ## Sessione #100 — 2026-08-20 (`gov_param_set`: contratto CHIUSO con la risposta it-manager, richiesta a dba di non farsi passare l'identità — GTD `a2567c59`, WI `83396520`)
 
 **Wake `high`, msg `fea763b1` da it-manager** — risposta alla domanda aperta delle #98/#99. L'ownership della riga è **XOR**: `owner_stream` (vocabolario chiuso) oppure `owner_agent_code` (FK `board_agents.agent_code`), e i due rami hanno regimi di verifica diversi. Stream → honor-system, stesso pattern di `requested_model` (D-101): nessun registro agent→stream esiste e non se ne crea uno. Agent_code → identità **reale** del chiamante, non un claim del payload.
