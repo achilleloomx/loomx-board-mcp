@@ -259,7 +259,15 @@ export async function docCreate(
 // ---------------------------------------------------------------------------
 
 export interface DocItemUpsertArgs {
-  document_id: string;
+  /**
+   * Optional when `code` is given and the code already exists in the project:
+   * the document is DEDUCED from the row (GTD 4a591cfe — the authoritative
+   * identity of a coded row is (project_id, code); asking for the document too
+   * is asking for information the system already holds, and a wrong answer
+   * used to update a row on document A while the caller believed they were
+   * writing to document B, silently). Required to CREATE a row.
+   */
+  document_id?: string;
   project_id: string;
   item_type: string;
   code?: string;
@@ -277,6 +285,8 @@ export interface DocItemUpsertResult {
   code: string | null;
   created: boolean;
   status: string;
+  /** The document the row actually lives on — deduced from code when they disagree. */
+  document_id: string;
   /** Columns this call actually wrote (update path). */
   fields_written?: string[];
   /** Optional columns omitted by the caller and therefore left untouched (update path). */
@@ -341,20 +351,67 @@ export async function docItemUpsert(
     );
   }
 
+  // ---- Resolve idempotency target: coded rows FIRST, before touching the
+  // document. The authoritative identity of a coded row is (project_id, code)
+  // — the DB enforces per-project uniqueness — so when the code already
+  // exists the document is DEDUCED from the row instead of trusted from the
+  // caller (GTD 4a591cfe). Until v0.17.x a wrong document_id on an existing
+  // code updated the row on its REAL document while the caller believed they
+  // were writing elsewhere, silently; and a missing-but-deducible document
+  // forced every caller to re-supply information the system already holds.
+  type ExistingDocItem = { id: string; status: string; item_type: string; attrs: Record<string, unknown> | null; document_id: string };
+  const EXISTING_COLS = "id, status, item_type, attrs, document_id";
+  let existing: ExistingDocItem | null = null;
+  const preWarnings: string[] = [];
+
+  if (args.code) {
+    const { data, error } = await db
+      .from(DOC_ITEMS)
+      .select(EXISTING_COLS)
+      .eq("project_id", args.project_id)
+      .eq("code", args.code)
+      .maybeSingle();
+    if (error) return err(`Lookup by code failed: ${error.message}`);
+    existing = (data as ExistingDocItem | null) ?? null;
+  }
+
+  let effectiveDocumentId: string;
+  if (existing) {
+    effectiveDocumentId = existing.document_id;
+    if (args.document_id && args.document_id !== existing.document_id) {
+      preWarnings.push(
+        `document deduced from code: '${args.code}' lives on document ${existing.document_id}, not on the ` +
+        `document_id you passed (${args.document_id}). The row was updated WHERE IT LIVES — no duplicate was ` +
+        `created and the row was not moved. If you meant a different row, pick a different code.`
+      );
+    }
+  } else {
+    if (!args.document_id) {
+      return err(
+        args.code
+          ? `code '${args.code}' does not exist in project ${args.project_id} yet — creating a new row requires ` +
+            `document_id (deduction only works for existing codes). Pass the document_id from doc_create/doc_query, ` +
+            `and double-check the code with doc_item_resolve if you expected it to exist.`
+          : `document_id is required when no code is given (code-less rows are scoped by document).`
+      );
+    }
+    effectiveDocumentId = args.document_id;
+  }
+
   // Validate item_type belongs to the document's document_type.
   // Not project-scoped, deliberately: a document that RLS lets us read but that
   // lives in another project must surface as a mismatch, never as "not found".
   const { data: docRow, error: docErr } = await db
     .from(DOCUMENTS)
     .select("id, project_id, document_type, title")
-    .eq("id", args.document_id)
+    .eq("id", effectiveDocumentId)
     .maybeSingle();
-  if (docErr) return err(`Failed to load document ${args.document_id}: ${docErr.message}`);
-  if (!docRow) return err(await documentNotFoundError(db, args.document_id, args.project_id, ctx.selfSlug));
+  if (docErr) return err(`Failed to load document ${effectiveDocumentId}: ${docErr.message}`);
+  if (!docRow) return err(await documentNotFoundError(db, effectiveDocumentId, args.project_id, ctx.selfSlug));
 
   const doc = docRow as { id: string; project_id: string; document_type: string; title?: string };
   if (doc.project_id !== args.project_id) {
-    return err(projectMismatchError(args.document_id, doc.project_id, args.project_id, doc.title));
+    return err(projectMismatchError(effectiveDocumentId, doc.project_id, args.project_id, doc.title));
   }
   if (!itemTypeAllowedForDocumentType(args.item_type, doc.document_type)) {
     return err(
@@ -387,38 +444,26 @@ export async function docItemUpsert(
     }
   }
 
-  // ---- Resolve idempotency target ----
-  type ExistingDocItem = { id: string; status: string; item_type: string; attrs: Record<string, unknown> | null };
-  const EXISTING_COLS = "id, status, item_type, attrs";
-  let existing: ExistingDocItem | null = null;
-
-  if (args.code) {
-    const { data, error } = await db
-      .from(DOC_ITEMS)
-      .select(EXISTING_COLS)
-      .eq("project_id", args.project_id)
-      .eq("code", args.code)
-      .maybeSingle();
-    if (error) return err(`Lookup by code failed: ${error.message}`);
-    existing = (data as ExistingDocItem | null) ?? null;
-  } else if (args.client_token) {
+  // ---- Resolve idempotency target for CODE-LESS rows (coded rows were
+  // resolved above, before the document load). Both keys are document-scoped.
+  if (!args.code && args.client_token) {
     // client_token persisted into attrs._client_token for idempotency w/o a column.
     // No portable JSONB-eq helper across supabase-js + pg shim → fetch the
     // document's items and match in JS.
     const { data: rows, error } = await db
       .from(DOC_ITEMS)
       .select(EXISTING_COLS)
-      .eq("document_id", args.document_id);
+      .eq("document_id", effectiveDocumentId);
     if (error) return err(`Lookup by client_token failed: ${error.message}`);
     const match = (Array.isArray(rows) ? rows : []).find(
       (r) => (r as any).attrs && (r as any).attrs._client_token === args.client_token
     );
     existing = (match as ExistingDocItem | undefined) ?? null;
-  } else if (args.sort_order !== undefined) {
+  } else if (!args.code && args.sort_order !== undefined) {
     const { data, error } = await db
       .from(DOC_ITEMS)
       .select(EXISTING_COLS)
-      .eq("document_id", args.document_id)
+      .eq("document_id", effectiveDocumentId)
       .eq("sort_order", args.sort_order)
       .maybeSingle();
     if (error) return err(`Lookup by sort_order failed: ${error.message}`);
@@ -435,7 +480,7 @@ export async function docItemUpsert(
 
     const written: string[] = [];
     const preserved: string[] = [];
-    const warnings: string[] = [];
+    const warnings: string[] = [...preWarnings];
     const update: Record<string, unknown> = { updated_at: now };
 
     // item_type is a required arg, so it is always written. Retyping a row in
@@ -522,6 +567,7 @@ export async function docItemUpsert(
         code: (afterRow.code as string | null) ?? null,
         created: false,
         status: afterRow.status as string,
+        document_id: effectiveDocumentId,
         fields_written: written,
         fields_preserved: preserved,
         ...(warnings.length > 0 ? { warnings } : {}),
@@ -550,7 +596,7 @@ export async function docItemUpsert(
   if (args.client_token) storedAttrs._client_token = args.client_token;
 
   const insert: Record<string, unknown> = {
-    document_id: args.document_id,
+    document_id: effectiveDocumentId,
     project_id: args.project_id,
     item_type: args.item_type,
     code: args.code ?? null,
@@ -569,7 +615,9 @@ export async function docItemUpsert(
     .maybeSingle();
   if (error || !data) {
     const m = error?.message ?? "no row returned";
-    if (/uq_doc_items_project_code|duplicate key/i.test(m)) {
+    // Index name uq_doc_items_project_code was dropped (DEL-C1, dba 2026-08-20);
+    // 'duplicate key' is the live alternation for the per-project-code constraint.
+    if (/duplicate key/i.test(m)) {
       return err(`code '${args.code}' already exists in project ${args.project_id} (race). Retry — upsert will update it.`);
     }
     return err(`Failed to insert doc_item: ${m}`);
@@ -604,6 +652,7 @@ export async function docItemUpsert(
       code: (insRow.code as string | null) ?? null,
       created: true,
       status: insRow.status as string,
+      document_id: effectiveDocumentId,
     },
   };
 }
@@ -1257,7 +1306,7 @@ export async function docQuery(
   db: SupabaseClient,
   args: DocQueryArgs,
   ctx: DocContext
-): Promise<DocResult<{ mode: string; count: number; items: unknown[]; visibility_gap?: true; note?: string }>> {
+): Promise<DocResult<{ mode: string; count: number; items: unknown[]; documents?: Record<string, { title: string; document_type: string }>; visibility_gap?: true; note?: string }>> {
   if (args.traceability) {
     return docTraceability(db, args, ctx);
   }
@@ -1315,10 +1364,32 @@ export async function docQuery(
 
   if (args.summary) {
     const summarized = await docSummarize(db, args.project_id, rows);
-    return { ok: true, data: { mode: "summary", count: summarized.length, items: summarized, ...gap } };
+    // GTD 4a591cfe: a project can span several documents, and 27 rows with no
+    // hint of that made the split invisible. Each summary row carries its
+    // document_id; this legend maps them to titles without a second query.
+    const documents = await documentLegend(db, rows);
+    return { ok: true, data: { mode: "summary", count: summarized.length, items: summarized, ...(documents ? { documents } : {}), ...gap } };
   }
 
   return { ok: true, data: { mode: "items", count: rows.length, items: rows, ...gap } };
+}
+
+// GTD 4a591cfe: {document_id → title/type} for the documents the result rows
+// actually span. Best-effort — a legend failure must never sink the query.
+async function documentLegend(
+  db: SupabaseClient,
+  rows: any[]
+): Promise<Record<string, { title: string; document_type: string }> | null> {
+  const ids = Array.from(new Set(rows.map((r) => r.document_id).filter(Boolean)));
+  if (ids.length === 0) return null;
+  const { data, error } = await db
+    .from(DOCUMENTS)
+    .select("id, title, document_type")
+    .in("id", ids);
+  if (error || !Array.isArray(data)) return null;
+  const out: Record<string, { title: string; document_type: string }> = {};
+  for (const d of data as any[]) out[d.id] = { title: d.title, document_type: d.document_type };
+  return Object.keys(out).length > 0 ? out : null;
 }
 
 // summary mode — compact, token-lean rows for review-at-scale. Returns code,
@@ -1364,6 +1435,7 @@ async function docSummarize(
     return {
       id: r.id,
       code: r.code,
+      document_id: r.document_id,
       item_type: r.item_type,
       status: r.status,
       body_chars: body.length,

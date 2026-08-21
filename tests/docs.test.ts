@@ -918,3 +918,94 @@ test("doc_item_types returns schema + example for a type, and parity in full mod
   assert.ok(full.ok);
   assert.equal((full as any).data.capability_parity.ok, true);
 });
+
+// ---------------------------------------------------------------------------
+// GTD 4a591cfe — the "wrong document" class. The authoritative identity of a
+// coded row is (project_id, code); the document is deduced, never trusted.
+// ---------------------------------------------------------------------------
+
+async function seedTwoDocs(store: Store) {
+  seedProjects(store);
+  const db = makeDb(store);
+  const a = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req — half A" }, ctx);
+  const b = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req — half B" }, ctx);
+  const docA = (a as any).data.document_id;
+  const docB = (b as any).data.document_id;
+  const seeded = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docA, item_type: "requirement",
+    code: "REQ-D2", body: "lives on A", attrs: { moscow: "must" },
+  }, ctx);
+  assert.ok(seeded.ok, `seed ok: ${JSON.stringify(seeded)}`);
+  return { db, docA, docB, itemId: (seeded as any).data.item_id };
+}
+
+test("doc_item_upsert: document_id omitted on an existing code → deduced, row updated where it lives", async () => {
+  const store: Store = {};
+  const { db, docA, itemId } = await seedTwoDocs(store);
+
+  const up = await docItemUpsert(db, {
+    project_id: PROJ_A, item_type: "requirement",
+    code: "REQ-D2", body: "edited without naming the document",
+  }, ctx);
+  assert.ok(up.ok, `deduced upsert ok: ${JSON.stringify(up)}`);
+  assert.equal((up as any).data.created, false);
+  assert.equal((up as any).data.item_id, itemId);
+  assert.equal((up as any).data.document_id, docA, "response says where the row lives");
+  const row = store.doc_items.find((r) => r.code === "REQ-D2");
+  assert.equal(row!.document_id, docA, "row not moved");
+  assert.equal(row!.body, "edited without naming the document");
+});
+
+test("doc_item_upsert: WRONG document_id on an existing code self-corrects with a warning — no silent duplicate, no silent redirect", async () => {
+  const store: Store = {};
+  const { db, docA, docB, itemId } = await seedTwoDocs(store);
+
+  const up = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docB, item_type: "requirement",
+    code: "REQ-D2", body: "edited while believing it was on B",
+  }, ctx);
+  assert.ok(up.ok, `self-correcting upsert ok: ${JSON.stringify(up)}`);
+  assert.equal((up as any).data.item_id, itemId, "same row, not a duplicate");
+  assert.equal((up as any).data.document_id, docA, "response declares the real document");
+  const warnings: string[] = (up as any).data.warnings ?? [];
+  assert.ok(
+    warnings.some((w) => w.includes("document deduced from code")),
+    `mismatch is DECLARED, never silent: ${JSON.stringify(warnings)}`
+  );
+  assert.equal(store.doc_items.filter((r) => r.code === "REQ-D2").length, 1, "no duplicate row");
+  assert.equal(store.doc_items.find((r) => r.code === "REQ-D2")!.document_id, docA, "row not moved to B");
+});
+
+test("doc_item_upsert: NEW code with no document_id errors actionably (deduction never invents a home)", async () => {
+  const store: Store = {};
+  const { db } = await seedTwoDocs(store);
+
+  const up = await docItemUpsert(db, {
+    project_id: PROJ_A, item_type: "requirement",
+    code: "REQ-NEW", body: "brand new",
+  }, ctx);
+  assert.ok(!up.ok, "must refuse");
+  assert.match((up as any).error, /requires document_id/i);
+  assert.match((up as any).error, /doc_item_resolve/i, "points at the code-checking move");
+  assert.equal(store.doc_items.filter((r) => r.code === "REQ-NEW").length, 0, "nothing created");
+});
+
+test("doc_query summary: rows carry document_id and the response carries a documents legend (multi-document projects visible at a glance)", async () => {
+  const store: Store = {};
+  const { db, docA, docB } = await seedTwoDocs(store);
+  const other = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docB, item_type: "requirement",
+    code: "REQ-D2-B", body: "lives on B",
+  }, ctx);
+  assert.ok(other.ok);
+
+  const res = await docQuery(db, { project_id: PROJ_A, summary: true }, ctx);
+  assert.ok(res.ok, `summary ok: ${JSON.stringify(res)}`);
+  const items = (res as any).data.items as any[];
+  assert.ok(items.length >= 2);
+  for (const it of items) assert.ok(it.document_id, `each summary row names its document: ${JSON.stringify(it)}`);
+  const legend = (res as any).data.documents as Record<string, { title: string; document_type: string }>;
+  assert.ok(legend, "documents legend present");
+  assert.equal(legend[docA]?.title, "Req — half A");
+  assert.equal(legend[docB]?.title, "Req — half B");
+});

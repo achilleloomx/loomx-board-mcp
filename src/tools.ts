@@ -3434,6 +3434,10 @@ export function registerTools(
     "doc_item_upsert",
     `Insert or update a typed row of a document. IDEMPOTENT and RETURNS the item UUID. ` +
       `Idempotency key: (project_id, code) for coded items; else (document_id, client_token) or (document_id, sort_order). ` +
+      `DOCUMENT DEDUCED FROM CODE (GTD 4a591cfe): when the code already exists in the project, document_id is OPTIONAL — ` +
+      `the row is updated on the document it actually lives on; a document_id that disagrees with the row comes back as a ` +
+      `warning (the row is neither moved nor duplicated). Creating a NEW row still requires document_id. ` +
+      `The response always carries document_id = where the row actually lives. ` +
       `UPDATE IS A PATCH: every optional field you OMIT is left untouched — attrs and status included. ` +
       `A field you DO pass is written, and attrs is REPLACED wholesale (never merged), so re-pass every key you want to keep; ` +
       `pass attrs:{} to empty it on purpose. Dropped attrs keys and in-place item_type changes come back in 'warnings'; ` +
@@ -3443,7 +3447,7 @@ export function registerTools(
       `Example: doc_item_upsert({project_id:"<uuid>", document_id:"<uuid>", item_type:"requirement", code:"REQ-001", body:"The system must…", attrs:{moscow:"must", acceptance_criteria:["x"]}}).`,
     {
       project_id: z.string().uuid().describe("Must equal the document's project (anti-divergence FK)"),
-      document_id: z.string().uuid().describe("Parent document (from doc_create)"),
+      document_id: z.string().uuid().optional().describe("Parent document (from doc_create). Optional when `code` already exists in the project — deduced from the row. Required to create a new row."),
       item_type: z.string().describe(`Item type: ${ITEM_TYPES_LIST}`),
       code: z.string().optional().describe("Per-project code (e.g. REQ-001). Omit for prose/exec items. Idempotency key when present."),
       body: z.string().optional().describe("Markdown content of the item. Omit on update = keep the stored body."),
@@ -3566,7 +3570,7 @@ export function registerTools(
     "doc_query",
     `Query doc_items in a project, or run a traceability check. ` +
       `Filter mode: by document_type / item_type / status / code. ` +
-      `Lean modes (avoid dumping bodies on large docs): summary=true → per item {code,status,body_chars,headline,links:{doc_out,doc_in,gtd,wi}}; or fields="code,status,..." → projection over chosen columns only. ` +
+      `Lean modes (avoid dumping bodies on large docs): summary=true → per item {code,document_id,status,body_chars,headline,links:{doc_out,doc_in,gtd,wi}} plus a top-level documents legend {document_id→title,type} — a project can span several documents, and the legend makes the split visible at a glance (GTD 4a591cfe); or fields="code,status,..." → projection over chosen columns only. ` +
       `Traceability mode: traceability='req_without_sdes' (REQ rows with no linked SDES) or 'sdes_without_uat'. ` +
       `D-167: a 0-row result carries visibility_gap:true + a note when you have no membership/visibility on project_id — ` +
       `that 0 may be an RLS block, not an empty corpus (verify before treating it as a clean gap-check pass). ` +
