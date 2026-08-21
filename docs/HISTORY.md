@@ -4,6 +4,18 @@
 
 ---
 
+## Sessione #106 — 2026-08-21 (coordinamento restart flotta v0.20.0 chiuso — GTD `bb3d0dc6`, WI `7d2b1b50`, nessun restart forzato)
+
+**Autopilot dispatch sul GTD di coordinamento aperto in #105** (`bb3d0dc6`, planned al `wi_end` del build `doc_publish`). Pre-flight: la risposta di it-manager era già in inbox (msg `ccc27829`, ref `a833a64c`) — nessuna nuova richiesta da formulare, solo da leggere e chiudere.
+
+**Decisione di it-manager (letta, non presa qui):** nessun restart forzato della flotta. Stato misurato su `loomx_agent_runtime`: 8 finestre con heartbeat <20' (incluse loomy, dba, forge, frame, atlas, analyst-quadro, assistant) — un kill forzato di lavoro in corso non è proporzionato per un cambio additivo (4/4 tool, 187 test, nessun breaking noto). Applicato lo stesso pattern dei rollout G4 precedenti: propagazione per ricambio naturale (D-052, `wi_end`+`kill`→relaunch), niente restart d'iniziativa. La finestra it-manager stessa (evocata dopo il commit) ha già `doc_publish` live.
+
+**Verificato qui:** la finestra corrente ha `doc_publish` nel tool set caricato (dist v0.20.0, build già aggiornata al momento dell'avvio di questa sessione) — nessuna azione di rollout necessaria lato mio. `board_ack` su `ccc27829`, risposta `done` a it-manager confermando chiusura. WI ephemeral (`force_ephemeral`, template `triage`): nessun artefatto durevole nuovo, solo coordinamento/lettura di una decisione già presa da it-manager per mandato control-plane.
+
+**Nessun codice toccato.**
+
+---
+
 ## Sessione #105 — 2026-08-21 (DEL-002 chiuso: doc_publish, 4°/4 tool sottoscrizioni — GTD `d9ebe0c6`, WI `ae525e25`, v0.20.0)
 
 **Cold-wake `high` da loomy (msg `1ec008c2`): dba ha consegnato `gov.doc_publish()` + change-set + Freeze-B + REVOKE UPDATE(version), verificato end-to-end.** Firma confermata su due messaggi indipendenti del dba (`cd8554f1` allineamento 1:1 a SDES-SUB-003, `401811d8` conferma live): `gov.doc_publish(p_document_id uuid, p_new_version text, p_bump_class text, p_changelog_entry_id uuid, p_delta_summary text) RETURNS TABLE(publication_id uuid, version_seq int, published_at timestamptz)`.
