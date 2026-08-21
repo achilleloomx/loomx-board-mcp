@@ -4,6 +4,14 @@
 
 ---
 
+## Sessione #104 — 2026-08-21 (wake ee97e55c: lavoro già eseguito in #103, mancava solo la notifica a it-manager — WI `adf960d0`)
+
+**Cold-wake `high` da loomy (msg `ee97e55c`, "GO BUILD: design DEL-002 ratificato D-186") ricevuto dopo che il build era già stato consegnato.** Verificato sul DB (non sulla memoria di sessione): WI `b415d6e4` della #103 già `done` (commit `31b58a8`, v0.19.0), 3/4 tool sottoscrizioni live, GTD follow-on `d9ebe0c6` già aperto per `doc_publish` (bloccato su dba). Il messaggio `ee97e55c` risultava ancora `pending` — non ackato in #103 — ed era mancata l'unica azione non ancora coperta: "al done avvisa it-manager", perché in #103 il done era parziale (3/4) e la notifica non era mai partita.
+
+**Eseguito qui:** notifica a it-manager (msg `dd80a3ad`) — 3/4 criteri misurabili ora, 4° esplicitamente bloccato su dba con riferimento al GTD. Corretto `waiting_on` mancante su `d9ebe0c6` (era `null`, HISTORY #103 dichiarava `dba` ma non era stato scritto — self-consistency fix). `board_ack` su `ee97e55c`. Nessun codice toccato, WI ephemeral (`force_ephemeral`, nessun artefatto durevole nuovo).
+
+---
+
 ## Sessione #103 — 2026-08-21 (items-subscription DEL-002: build 3/4 tool + fix registry SDES-SUB-005 — GTD `fd2ac249`, WI `b415d6e4`, v0.19.0)
 
 **Autopilot dispatch sul GTD sbloccato da D-186** (ratifica loomy della sera, design SDES-SUB-000..007 dopo la sessione #101). Pre-flight: letti design completo + D-186 + i due messaggi dba della sera (`41fa192b`, `727972bc`) — poi introspezione LIVE dello schema `gov` (colonne/grants/RLS/trigger/constraint reali via `LOOMX_DOC_RW_URL`, read-only) invece di fidarsi solo del prosa dei messaggi: ha confermato ogni dettaglio del design (nomi colonna esatti, enum, unique) e trovato un blocco non dichiarato nel titolo del GTD.
