@@ -1044,24 +1044,13 @@ export async function docLink(
     return err(`relation_type '${args.relation_type}' invalid for 'doc'. Allowed: ${route.relation_types.join(", ")}.`);
   }
 
-  // D-074: 'references' is cross-project — routes to doc_item_xproject_links (no project_id column).
-  // from_item and to_item can belong to different projects; UUIDs are globally unique.
-  if (args.relation_type === "references") {
-    const { data, error } = await db
-      .from(DOC_ITEM_XPROJECT_LINKS)
-      .insert({ from_item: args.from_id, to_item: args.to_id, relation_type: "references" })
-      .select("id")
-      .maybeSingle();
-    if (error || !data) {
-      const m = error?.message ?? "no row";
-      if (/duplicate key|doc_item_xproject_links_unique/i.test(m)) return err(`This cross-project 'references' link already exists.`);
-      if (/foreign key/i.test(m)) return err(`doc_item not found (UUID wrong?). Original: ${m}`);
-      return err(`Failed to create cross-project reference link: ${m}`);
-    }
-    return { ok: true, data: { link_id: (data as any).id, target_kind: "doc", relation_type: "references" } };
-  }
-
-  // Derive the common project_id from the FROM endpoint (intra-project types only).
+  // SDES-SUB-005 (D-155): routing is decided by the FACT of the two endpoints'
+  // project_id, not by the relation_type label. 'references' is the one
+  // exception — it always routes cross-project (D-074), even for two items
+  // that happen to share a project, since doc_item_links' CHECK does not admit
+  // it at all (measured: doc_item_links allows refines|satisfies|verifies|
+  // relates_to|supersedes|amends; doc_item_xproject_links additionally allows
+  // references — dba msg 41fa192b Q6).
   const { data: fromRow, error: fromErr } = await db
     .from(DOC_ITEMS)
     .select("id, project_id")
@@ -1069,17 +1058,48 @@ export async function docLink(
     .maybeSingle();
   if (fromErr) return err(`Failed to load from_id: ${fromErr.message}`);
   if (!fromRow) return err(`from_id '${args.from_id}' is not an existing doc_item.`);
-  const projectId = (fromRow as { project_id: string }).project_id;
+  const fromProjectId = (fromRow as { project_id: string }).project_id;
+
+  let toProjectId: string | null = null;
+  if (args.relation_type !== "references") {
+    const { data: toRow, error: toErr } = await db
+      .from(DOC_ITEMS)
+      .select("id, project_id")
+      .eq("id", args.to_id)
+      .maybeSingle();
+    if (toErr) return err(`Failed to load to_id: ${toErr.message}`);
+    if (!toRow) return err(`to_id '${args.to_id}' is not an existing doc_item.`);
+    toProjectId = (toRow as { project_id: string }).project_id;
+  }
+
+  const crossProject = args.relation_type === "references" || toProjectId !== fromProjectId;
+
+  if (crossProject) {
+    const { data, error } = await db
+      .from(DOC_ITEM_XPROJECT_LINKS)
+      .insert({ from_item: args.from_id, to_item: args.to_id, relation_type: args.relation_type })
+      .select("id")
+      .maybeSingle();
+    if (error || !data) {
+      const m = error?.message ?? "no row";
+      if (/duplicate key|doc_item_xproject_links_unique/i.test(m)) return err(`This cross-project '${args.relation_type}' link already exists.`);
+      if (/foreign key/i.test(m)) return err(`doc_item not found (UUID wrong?). Original: ${m}`);
+      if (/check constraint|doc_item_xproject_links_relation_type/i.test(m)) return err(`relation_type '${args.relation_type}' is not allowed cross-project. Original: ${m}`);
+      return err(`Failed to create cross-project link: ${m}`);
+    }
+    return { ok: true, data: { link_id: (data as any).id, target_kind: "doc", relation_type: args.relation_type } };
+  }
 
   const { data, error } = await db
     .from(DOC_ITEM_LINKS)
-    .insert({ from_item: args.from_id, to_item: args.to_id, project_id: projectId, relation_type: args.relation_type })
+    .insert({ from_item: args.from_id, to_item: args.to_id, project_id: fromProjectId, relation_type: args.relation_type })
     .select("id")
     .maybeSingle();
   if (error || !data) {
     const m = error?.message ?? "no row";
     if (/duplicate key|doc_item_links_unique/i.test(m)) return err(`This doc↔doc link already exists (${args.relation_type}).`);
     if (/no_self_link/i.test(m)) return err(`Cannot link an item to itself.`);
+    if (/check constraint|doc_item_links_relation_type/i.test(m)) return err(`relation_type '${args.relation_type}' is not allowed intra-project (it may be cross-project-only, e.g. 'references'). Original: ${m}`);
     return err(translateLinkError(m));
   }
   return { ok: true, data: { link_id: (data as any).id, target_kind: "doc", relation_type: args.relation_type } };

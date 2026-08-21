@@ -4,6 +4,22 @@
 
 ---
 
+## Sessione #103 — 2026-08-21 (items-subscription DEL-002: build 3/4 tool + fix registry SDES-SUB-005 — GTD `fd2ac249`, WI `b415d6e4`, v0.19.0)
+
+**Autopilot dispatch sul GTD sbloccato da D-186** (ratifica loomy della sera, design SDES-SUB-000..007 dopo la sessione #101). Pre-flight: letti design completo + D-186 + i due messaggi dba della sera (`41fa192b`, `727972bc`) — poi introspezione LIVE dello schema `gov` (colonne/grants/RLS/trigger/constraint reali via `LOOMX_DOC_RW_URL`, read-only) invece di fidarsi solo del prosa dei messaggi: ha confermato ogni dettaglio del design (nomi colonna esatti, enum, unique) e trovato un blocco non dichiarato nel titolo del GTD.
+
+**Blocco trovato leggendo, non costruendo:** `gov.doc_publish()` (SECURITY DEFINER, l'unico ruolo con INSERT su `gov.doc_versions` — misurato: nessun ruolo, `doc_rw` incluso, ha INSERT sulla tabella) **non è stato ancora scritto dal dba** ("è il mio prossimo cantiere A2", msg `41fa192b`). Costruire `doc_publish` contro una firma indovinata avrebbe funzionato solo per caso o mascherato il vero blocco quando la funzione fosse arrivata con parametri diversi — **non implementato**, tracciato come GTD follow-on `waiting_on=dba` invece.
+
+**Costruiti 3/4 tool** (`src/subscriptions.ts`, nuovo modulo): `doc_subscribe` (origin sempre 'choice', idempotente su stesso intent, cambio-grado su intent diverso, critico cross-progetto rifiutato v1 per D-186 Q2, target letto solo se RLS lo permette — mai rivela l'esistenza di un target non leggibile, D-167-style), `doc_unsubscribe` (tombstone, mai DELETE, rifiuta `origin='fact'` **a livello tool** — il floor-trigger DB è ratificato D-186 §2 ma misurato live come non ancora applicato; `reason` senza colonna dedicata → appeso a `note`, stesso pattern di `wi_end --failed`), `doc_subscription_outcome` (append-only per subscription×publication, `version` risolta a `publication_id` su `gov.doc_versions`, idempotente su payload identico/rifiuta payload diverso, blocco su versione pubblicata dopo un tombstone).
+
+**Fix registry SDES-SUB-005 (D-155) applicato:** `docLink` instradava cross-progetto SOLO per `relation_type==='references'` — falso da quando D-155 ha allargato `doc_item_xproject_links` a tutti i tipi (misurato col dba, msg `41fa192b` Q6: stesso set di `doc_item_links` + `references`). Ora instrada per **confine di progetto reale** (project_id from/to), non per etichetta. `amends` aggiunto a `DB_DOC_ITEM_LINK_TYPES`. `pg-shim.ts`: `ident()` ora accetta identificatori schema-qualificati (`gov.doc_subscriptions`) — unico modo per riusare `PgQuery`/`doc_rw` sulle tabelle `gov.*` senza duplicare il query builder.
+
+**Test:** nuovo `tests/subscriptions.test.ts` (17 test) + harness condiviso estratto in `tests/fakeDb.ts` (era duplicato dentro `docs.test.ts`, ora importato da entrambi — evita la doppia esecuzione che si verificava importando un file `*.test.ts` da un altro). 1 test esistente in `docs.test.ts` riscritto (il vecchio "cross-app link rejected" testava esattamente il comportamento che SDES-SUB-005 doveva correggere) + 1 nuovo per il path same-project invariato. **181/181 verdi**, `tsc` pulito, capability-parity gate verde con `amends`.
+
+**Chiusure:** WI linkato a SDES-SUB-001/002/004/005 (gate D-074). GTD follow-on `doc_publish` creato `waiting_on=dba`, non armato (FASE 1). Summary a loomy con il blocco dichiarato esplicitamente.
+
+---
+
 ## Sessione #102 — 2026-08-21 (casa unica CFG: chiusa per VERIFICA, non riesecuzione — GTD `efaac02c`, WI `adb8b596`)
 
 **Autopilot dispatch sul GTD «casa unica» rimasto aperto dalla #93.** I suoi tre passi erano in gran parte già eseguiti sotto GTD gemelli: il passo 1 (5 correzioni `CFG-063/076/086/088/090` su `669fd07b`) chiuso in #95 (GTD `20235b14`), il passo 2 (tombstone) chiuso il 18/08 con GO loomy `bdb4e21b`. Nota interna contraddittoria: la chiusura di #95 dava il tombstone «sospeso», il resume_hint del GTD lo dava completato — **fatto fede il DB**, non la memoria delle sessioni.

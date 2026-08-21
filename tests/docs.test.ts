@@ -8,7 +8,6 @@
 
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
-import type { SupabaseClient } from "@supabase/supabase-js";
 
 import {
   docCreate,
@@ -20,223 +19,7 @@ import {
   docQuery,
   docItemTypes,
 } from "../src/docs.ts";
-
-type Row = Record<string, any>;
-type Store = { [table: string]: Row[] };
-
-let idSeq = 0;
-function uuid(): string {
-  idSeq += 1;
-  const n = idSeq.toString(16).padStart(12, "0");
-  return `00000000-0000-4000-8000-${n}`;
-}
-
-// `rls: true` makes SELECTs on `documents` behave like production does (measured
-// 2026-08-18 under doc_rw: documents_select USING loomx_document_visibility_predicate
-// → visibility='org' readable from anywhere, 'project'/'team' only for members).
-// Opt-in: the pre-existing tests seed documents into projects they hold no
-// membership on, and enforcing RLS for them would test the fake, not the handler.
-function makeDb(store: Store, members: Set<string> = new Set(), opts: { rls?: boolean } = {}): SupabaseClient {
-  store.documents ??= [];
-  store.doc_items ??= [];
-  store.doc_item_links ??= [];
-  store.doc_item_gtd_links ??= [];
-  store.doc_item_wi_links ??= [];
-  store.doc_item_xproject_links ??= [];
-  store.loomx_projects ??= [];
-
-  function query(table: string) {
-    const filters: Array<{ col: string; val: unknown; op: "eq" | "in" }> = [];
-    let op: "select" | "insert" | "update" | "delete" = "select";
-    let insertData: Row | null = null;
-    let updateData: Row | null = null;
-    let orderCol: string | null = null;
-    let orderAsc = true;
-    let limitN: number | null = null;
-    let single = false;
-    let maybeSingle = false;
-
-    const apply = (rows: Row[]): Row[] =>
-      rows.filter((r) =>
-        filters.every((f) => {
-          if (f.op === "eq") return r[f.col] === f.val;
-          if (f.op === "in") return (f.val as unknown[]).includes(r[f.col]);
-          return true;
-        })
-      );
-
-    function checkConstraints(table: string, rowToInsert: Row): string | null {
-      if (table === "doc_items" && rowToInsert.code != null) {
-        const dup = store.doc_items.some(
-          (r) => r.project_id === rowToInsert.project_id && r.code === rowToInsert.code
-        );
-        if (dup) return "duplicate key value violates unique constraint uq_doc_items_project_code";
-      }
-      if (table === "doc_item_links") {
-        const from = store.doc_items.find((r) => r.id === rowToInsert.from_item);
-        const to = store.doc_items.find((r) => r.id === rowToInsert.to_item);
-        if (!from || from.project_id !== rowToInsert.project_id) {
-          return 'insert violates foreign key constraint "doc_item_links_from_fk"';
-        }
-        if (!to || to.project_id !== rowToInsert.project_id) {
-          return 'insert violates foreign key constraint "doc_item_links_to_fk"';
-        }
-        const dupLink = store.doc_item_links.some(
-          (r) => r.from_item === rowToInsert.from_item && r.to_item === rowToInsert.to_item && r.relation_type === rowToInsert.relation_type
-        );
-        if (dupLink) return "duplicate key value violates unique constraint doc_item_links_unique";
-        if (rowToInsert.from_item === rowToInsert.to_item) return "violates check constraint doc_item_links_no_self_link";
-      }
-      if (table === "doc_item_gtd_links") {
-        const dup = store.doc_item_gtd_links.some(
-          (r) => r.doc_item_id === rowToInsert.doc_item_id && r.gtd_item_id === rowToInsert.gtd_item_id
-        );
-        if (dup) return "duplicate key value violates unique constraint doc_item_gtd_links_unique";
-      }
-      return null;
-    }
-
-    const exec = async (): Promise<{ data: unknown; error: { message: string } | null }> => {
-      store[table] ??= [];
-      if (op === "insert") {
-        const row: Row = { id: uuid(), ...insertData };
-        if (table === "doc_items") {
-          row.sort_order ??= 0;
-          row.attrs ??= {};
-        }
-        const cerr = checkConstraints(table, row);
-        if (cerr) return { data: null, error: { message: cerr } };
-        store[table].push(row);
-        return finalize([row]);
-      }
-      if (op === "update") {
-        const matched = apply(store[table]);
-        matched.forEach((r) => Object.assign(r, updateData));
-        return finalize(matched);
-      }
-      if (op === "delete") {
-        const matched = apply(store[table]);
-        store[table] = store[table].filter((r) => !matched.includes(r));
-        return finalize(matched);
-      }
-      // select
-      let rows = apply(store[table]);
-      if (opts.rls && table === "documents") {
-        rows = rows.filter((r) => r.visibility === "org" || members.has(r.project_id as string));
-      }
-      if (orderCol) {
-        rows = [...rows].sort((a, b) => {
-          const av = a[orderCol!], bv = b[orderCol!];
-          if (av === bv) return 0;
-          return (av > bv ? 1 : -1) * (orderAsc ? 1 : -1);
-        });
-      }
-      if (limitN != null) rows = rows.slice(0, limitN);
-      return finalize(rows);
-    };
-
-    function finalize(rows: Row[]): { data: unknown; error: { message: string } | null } {
-      if (single) {
-        if (rows.length === 0) return { data: null, error: { message: "No rows returned" } };
-        return { data: rows[0], error: null };
-      }
-      if (maybeSingle) {
-        return { data: rows.length > 0 ? rows[0] : null, error: null };
-      }
-      return { data: rows, error: null };
-    }
-
-    const builder: any = {
-      select() { return builder; },
-      eq(col: string, val: unknown) { filters.push({ col, val, op: "eq" }); return builder; },
-      in(col: string, arr: unknown[]) { filters.push({ col, val: arr, op: "in" }); return builder; },
-      order(col: string, opts: { ascending?: boolean } = {}) { orderCol = col; orderAsc = opts.ascending !== false; return builder; },
-      limit(n: number) { limitN = n; return builder; },
-      single() { single = true; return exec(); },
-      maybeSingle() { maybeSingle = true; return exec(); },
-      insert(data: Row) { op = "insert"; insertData = data; return builder; },
-      update(data: Row) { op = "update"; updateData = data; return builder; },
-      delete() { op = "delete"; return builder; },
-      then(onF: any, onR: any) { return exec().then(onF, onR); },
-    };
-    return builder;
-  }
-
-  // REQ-GOV-016: fake must implement DocRwDb so docItemResolve uses the __docRw path
-  // (the fallback direct-scan is now a throw). resolveDocItem mimics the DB function:
-  // find by (project_id, code), throw P0002 if not found.
-  const resolveDocItem = async (projectId: string, code: string): Promise<string> => {
-    const item = (store.doc_items as Row[]).find(
-      (r) => r.project_id === projectId && r.code === code
-    );
-    if (!item) {
-      const e = new Error("no_data_found") as Error & { code?: string };
-      e.code = "P0002";
-      throw e;
-    }
-    return item.id as string;
-  };
-
-  // Mimics gov.relink_superseded (D-133): repoint every link direction across all
-  // four tables from oldItemId → newItemId, return the total rows touched. The real
-  // function is SECURITY DEFINER, so unlike a plain doc_rw .update() it can never
-  // silently affect 0 rows on a missing RLS policy.
-  const relinkSuperseded = async (oldItemId: string, newItemId: string): Promise<number> => {
-    let n = 0;
-    const repoint = (rows: Row[], col: string) => {
-      for (const r of rows) {
-        if (r[col] === oldItemId) { r[col] = newItemId; n++; }
-      }
-    };
-    repoint(store.doc_item_links, "from_item");
-    repoint(store.doc_item_links, "to_item");
-    repoint(store.doc_item_gtd_links, "doc_item_id");
-    repoint(store.doc_item_wi_links, "doc_item_id");
-    repoint(store.doc_item_xproject_links, "from_item");
-    repoint(store.doc_item_xproject_links, "to_item");
-    return n;
-  };
-
-  // D-167: mimics loomx_agent_in_project (SECURITY DEFINER, granted to doc_rw) —
-  // true iff selfSlug is in the caller-supplied `members` set for that project.
-  const agentInProject = async (projectId: string): Promise<boolean> => members.has(projectId);
-
-  // D-167 point 4: mimics doc_document_exists (SECURITY DEFINER, sees past RLS) —
-  // a raw existence check against `documents`, ignoring visibility/membership
-  // entirely (that's the whole point of the oracle).
-  const documentExists = async (documentId: string): Promise<boolean> =>
-    (store.documents as Row[]).some((r) => r.id === documentId);
-
-  return {
-    from: (table: string) => query(table),
-    __docRw: true,
-    resolveDocItem,
-    relinkSuperseded,
-    agentInProject,
-    documentExists,
-  } as unknown as SupabaseClient;
-}
-
-// Simulates gov.relink_superseded raising an error (e.g. the SECURITY DEFINER
-// function's own guards, or a transient failure) — docSupersede must fail loud
-// (not ok:true) rather than leave the new version's links untransferred.
-function makeDbWithFailingRelink(store: Store, errorMessage: string): SupabaseClient {
-  const real = makeDb(store) as any;
-  return {
-    from: (table: string) => real.from(table),
-    __docRw: true,
-    resolveDocItem: real.resolveDocItem,
-    relinkSuperseded: async () => { throw new Error(errorMessage); },
-  } as unknown as SupabaseClient;
-}
-
-const ctx = { selfSlug: "board-mcp", isLoomy: false };
-const PROJ_A = "00000000-0000-4000-9000-0000000000aa";
-const PROJ_B = "00000000-0000-4000-9000-0000000000bb";
-
-function seedProjects(store: Store) {
-  store.loomx_projects = [{ id: PROJ_A }, { id: PROJ_B }];
-}
+import { type Row, type Store, uuid, makeDb, makeDbWithFailingRelink, ctx, PROJ_A, PROJ_B, seedProjects } from "./fakeDb.ts";
 
 // ---------------------------------------------------------------------------
 
@@ -536,7 +319,12 @@ test("doc_link rejects non-UUID with guidance; doc_link_by_code resolves+links",
   assert.equal(store.doc_item_links[0].relation_type, "satisfies");
 });
 
-test("cross-app link is rejected with an actionable error (composite FK)", async () => {
+test("cross-project link routes to doc_item_xproject_links regardless of relation_type label (SDES-SUB-005, D-155)", async () => {
+  // Superseded by SDES-SUB-005: routing is decided by the FACT of the two
+  // endpoints' project_id, not by the relation_type label — a cross-project
+  // 'relates_to' used to be rejected (registry claimed only 'references' was
+  // cross-project-capable, which D-155 had already made false at the DB
+  // level). It now routes to doc_item_xproject_links instead of failing.
   const store: Store = {};
   seedProjects(store);
   const db = makeDb(store);
@@ -551,8 +339,29 @@ test("cross-app link is rejected with an actionable error (composite FK)", async
     to_id: (b as any).data.item_id,
     relation_type: "relates_to",
   }, ctx);
-  assert.equal(cross.ok, false);
-  assert.match((cross as any).error, /Cross-app link rejected|same project/i);
+  assert.ok(cross.ok, `cross-project link ok: ${JSON.stringify(cross)}`);
+  assert.equal((cross as any).data.relation_type, "relates_to");
+  assert.equal(store.doc_item_xproject_links.length, 1);
+  assert.equal(store.doc_item_links.length, 0);
+});
+
+test("same-project link still routes to doc_item_links (unchanged)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const a = await docItemUpsert(db, { project_id: PROJ_A, document_id: (doc as any).data.document_id, item_type: "requirement", code: "REQ-001" }, ctx);
+  const b = await docItemUpsert(db, { project_id: PROJ_A, document_id: (doc as any).data.document_id, item_type: "requirement", code: "REQ-002" }, ctx);
+
+  const link = await docLink(db, {
+    target_kind: "doc",
+    from_id: (a as any).data.item_id,
+    to_id: (b as any).data.item_id,
+    relation_type: "amends",
+  }, ctx);
+  assert.ok(link.ok, `same-project link ok: ${JSON.stringify(link)}`);
+  assert.equal(store.doc_item_links.length, 1);
+  assert.equal(store.doc_item_xproject_links.length, 0);
 });
 
 test("doc_supersede: old immutable + new row + supersedes edge, code carried", async () => {

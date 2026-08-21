@@ -9,6 +9,7 @@ import {
   DB_DOC_ITEM_LINK_TYPES,
 } from "./docTypes.js";
 import { rwGuardsEnabled, modelGuardsEnabled } from "./flags.js";
+import { SUBSCRIBE_INTENTS, SUBSCRIPTION_OUTCOMES } from "./subscriptions.js";
 
 const TABLE = "board_messages";
 const OVERVIEW_VIEW = "board_overview";
@@ -3608,6 +3609,82 @@ export function registerTools(
     async (args) => {
       const { docItemTypes } = await import("./docs.js");
       return toText(docItemTypes(args));
+    }
+  );
+
+  // =========================================================================
+  // Subscription Tools (gov.doc_subscriptions / gov.doc_subscription_outcomes
+  // — DEL-002, design ratified D-186 SDES-SUB-000..007). doc_publish is NOT
+  // registered yet: gov.doc_publish() (the only writer gov.doc_versions will
+  // ever grant) has not been shipped by the dba — tracked as a follow-on GTD,
+  // waiting_on=dba, instead of a speculative call with a guessed signature.
+  // =========================================================================
+
+  const SUB_INTENTS_LIST = SUBSCRIBE_INTENTS.join("|");
+  const SUB_OUTCOMES_LIST = SUBSCRIPTION_OUTCOMES.join("|");
+
+  // --- doc_subscribe ---
+  server.tool(
+    "doc_subscribe",
+    `Subscribe a doc_item to a row or a document (CHOICE origins only — voluntary/topic; FACT origins are automatic, ` +
+      `never via this tool). Exactly one of target_item_id (row-level) / target_document_id (document-level watch) is ` +
+      `required. intent ∈ {${SUB_INTENTS_LIST}}. note is REQUIRED (why you're subscribing). ` +
+      `'critical' across two different projects is REFUSED in v1 (D-186 Q2) — use board_send to the target's owner instead. ` +
+      `Idempotent: re-calling with the same intent is a no-op (created:false); a DIFFERENT intent is a grade change ` +
+      `(intent_changed in the response), never a duplicate row. ` +
+      `Example: doc_subscribe({subscriber_item_id:"<uuid>", target_item_id:"<uuid>", intent:"module", note:"tracks the schema this SDES depends on"}).`,
+    {
+      subscriber_item_id: z.string().uuid().describe("The doc_item that depends (your own project's row)"),
+      target_item_id: z.string().uuid().optional().describe("Row-level target — XOR with target_document_id"),
+      target_document_id: z.string().uuid().optional().describe("Document-level (header) watch — XOR with target_item_id"),
+      intent: z.enum(SUBSCRIBE_INTENTS).describe(`Grade: ${SUB_INTENTS_LIST}`),
+      note: z.string().min(1).describe("Required — why you're subscribing"),
+    },
+    async (args) => {
+      const { docSubscribe } = await import("./subscriptions.js");
+      return runDocTool((db) => docSubscribe(db, args, docCtx));
+    }
+  );
+
+  // --- doc_unsubscribe ---
+  server.tool(
+    "doc_unsubscribe",
+    `Tombstone a subscription (never DELETE — DB trigger rejects it unconditionally). Only for CHOICE-origin ` +
+      `subscriptions: a 'fact' origin (constitutive link, role/matrix) is refused — exit by removing the underlying ` +
+      `link/role instead (SEC-011). Already-tombstoned is a no-op (already_tombstoned:true), not an error. ` +
+      `reason is optional and appended to the stored note (no dedicated column — schema gap, never silently dropped). ` +
+      `Example: doc_unsubscribe({subscription_id:"<uuid>", reason:"topic resolved, no longer relevant"}).`,
+    {
+      subscription_id: z.string().uuid().describe("The subscription to tombstone"),
+      reason: z.string().optional().describe("Optional — why you're exiting (appended to note, not a separate column)"),
+    },
+    async (args) => {
+      const { docUnsubscribe } = await import("./subscriptions.js");
+      return runDocTool((db) => docUnsubscribe(db, args, docCtx));
+    }
+  );
+
+  // --- doc_subscription_outcome ---
+  server.tool(
+    "doc_subscription_outcome",
+    `Record the outcome of an impact analysis for (subscription × published version) — an ACT, not a state: ` +
+      `'no_impact' does NOT carry forward to the next version (D-151). outcome ∈ {${SUB_OUTCOMES_LIST}}. ` +
+      `note is REQUIRED for no_impact (why) and feedback_sent (the reference). version must already be PUBLISHED on ` +
+      `the subscription's target document (gov.doc_versions) — an outcome on an unpublished version is an error. ` +
+      `Append-only: re-calling with an IDENTICAL payload is a no-op (created:false); a DIFFERENT payload for the same ` +
+      `(subscription, version) is refused — the ledger integrates, it never corrects (send a follow-up via board_send). ` +
+      `Example: doc_subscription_outcome({subscription_id:"<uuid>", version:"2.1", outcome:"no_impact", note:"reviewed, no change needed on my side"}).`,
+    {
+      subscription_id: z.string().uuid().describe("The subscription this outcome answers"),
+      version: z.string().min(1).describe("The published version_label this outcome responds to"),
+      outcome: z.enum(SUBSCRIPTION_OUTCOMES).describe(`Outcome: ${SUB_OUTCOMES_LIST}`),
+      note: z.string().optional().describe("Required for no_impact/feedback_sent — the motivation or feedback reference"),
+      wi_id: z.string().uuid().optional().describe("The Work Item (subscription-impact-analysis) that produced this outcome"),
+      message_id: z.string().uuid().optional().describe("The board message of the feedback (for outcome=feedback_sent)"),
+    },
+    async (args) => {
+      const { docSubscriptionOutcome } = await import("./subscriptions.js");
+      return runDocTool((db) => docSubscriptionOutcome(db, args, docCtx));
     }
   );
 }

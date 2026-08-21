@@ -32,8 +32,19 @@ interface OrderSpec {
   nullsFirst?: boolean;
 }
 
+const IDENT_RE = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+
+// Table identifiers may be schema-qualified ("gov.doc_subscriptions") for the
+// gov.* tables (DEL-002 subscriptions); column names never are.
 function ident(name: string): string {
-  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(name)) {
+  if (name.includes(".")) {
+    const parts = name.split(".");
+    if (parts.length !== 2 || !parts.every((p) => IDENT_RE.test(p))) {
+      throw new Error(`Invalid identifier: ${name}`);
+    }
+    return parts.map((p) => `"${p}"`).join(".");
+  }
+  if (!IDENT_RE.test(name)) {
     throw new Error(`Invalid identifier: ${name}`);
   }
   return `"${name}"`;

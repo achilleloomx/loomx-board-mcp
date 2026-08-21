@@ -98,7 +98,7 @@ loomx-board-mcp/
 
 ## MCP Tools
 
-34 tool base esposti a ogni agente (24 board/gtd/wi/runtime/ping + 9 doc_* document model + 1 `org_lookup`) + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
+37 tool base esposti a ogni agente (24 board/gtd/wi/runtime/ping + 9 doc_* document model + 3 subscription tool + 1 `org_lookup`) + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
 
 ### Board Tools (board_messages)
 
@@ -293,6 +293,20 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 > **F4.5 (D-a5-F4.5, v0.8.0):** i doc_* NON girano più in `service_role`. Ogni call apre `BEGIN; SET LOCAL ROLE doc_rw; SELECT set_config('request.agent_slug', <selfSlug>, true); …; COMMIT;` → RLS (D-015) imposta a DB-floor per-agente. Lo slug è quello dell'istanza (`selfSlug`), bound param, mai input utente. `code→uuid` SOLO via la DB function `doc_item_resolve` (RLS-aware, audita `doc_resolve_log` su successo, errori 42501/P0002/22004). Audit: su successo, `resolveDocItem` scrive in DB (no stderr ridondante); su errore, la tx è rolled back → stderr best-effort (`auditResolve`). **Connessione:** `DOC_RW_DATABASE_URL` (direct-pg, login role con `GRANT doc_rw`) in produzione; senza un backend doc_rw i doc_* **rifiutano** di girare (niente bypass). Smoke/dev: `SUPABASE_MGMT_PAT`+`SUPABASE_PROJECT_REF` (Management API). `runDocRw` in `src/docDb.ts`.
 >
 > **Write-path fix (v0.8.1):** sotto doc_rw un `INSERT/UPDATE … RETURNING` fa valutare la RLS WITH CHECK col GUC come NULL → write negate (42501). Il path doc_rw gira quindi in "no-RETURNING mode" (`PgQuery` opts): INSERT con id client-side + risultato sintetizzato, UPDATE + follow-up SELECT. Fix DB definitivo (al DBA): helper policy `loomx_*` → VOLATILE invece di STABLE.
+
+### Subscription Tools (gov.doc_subscriptions / gov.doc_subscription_outcomes — DEL-002, v0.19.0)
+
+3 dei 4 tool ratificati in D-186 (design SDES-SUB-000..007, doc `714d3313`, progetto board-mcp `596cd5fc`). Girano sotto `doc_rw` come i `doc_*` (stesso `runDocRw`, `src/subscriptions.ts`).
+
+| Tool | Descrizione | Operazione DB |
+|---|---|---|
+| `doc_subscribe` | Crea sottoscrizione origin='choice' (le origini 'fact' sono automatiche, fuori da questo tool). Esattamente uno tra `target_item_id`/`target_document_id`. Idempotente su stesso intent (`created:false`); intent diverso = cambio di grado (`intent_changed`). `critical` cross-progetto **rifiutato in v1** (D-186 Q2) | INSERT/UPDATE gov.doc_subscriptions |
+| `doc_unsubscribe` | Tombstone (mai DELETE — trigger DB lo rifiuta comunque). Rifiuta `origin='fact'` (SEC-011) **a livello tool** — il floor-trigger DB è ratificato (D-186 §2) ma non ancora applicato, misurato live 2026-08-21. `reason` non ha colonna dedicata: viene appeso a `note` (stesso pattern append di `wi_end --failed`) | UPDATE gov.doc_subscriptions |
+| `doc_subscription_outcome` | Registra un esito (subscription × publication) — append-only, `note` richiesta per `no_impact`/`feedback_sent`. `version` (label) viene risolta a `publication_id` su `gov.doc_versions`; un esito su versione mai pubblicata è un errore. Idempotente su payload identico, rifiuta payload diverso sulla stessa coppia | INSERT gov.doc_subscription_outcomes |
+
+> **`doc_publish` NON è registrato.** La tabella `gov.doc_versions` è live (nessun ruolo, doc_rw incluso, ha INSERT) — l'unico writer sarà `gov.doc_publish(...)` SECURITY DEFINER, non ancora scritto dal dba (msg `41fa192b`: "è il mio prossimo cantiere A2"). Costruire il tool contro una firma indovinata avrebbe mascherato il vero blocco; tracciato come GTD follow-on `waiting_on=dba`.
+>
+> **Fix registry collegato (SDES-SUB-005, D-155):** `doc_link` instrada per **confine di progetto reale** (project_id di from/to), non più per etichetta `relation_type` — un link cross-progetto con `relates_to`/`amends`/etc. ora va su `doc_item_xproject_links` invece di fallire con FK error. `'references'` resta sempre cross-project (D-074). `amends` aggiunto a `DB_DOC_ITEM_LINK_TYPES` (ammesso in entrambe le tabelle, misurato col dba).
 
 ### Tipi di messaggio
 
