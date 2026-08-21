@@ -4,6 +4,16 @@
 
 ---
 
+## Sessione #102 — 2026-08-21 (casa unica CFG: chiusa per VERIFICA, non riesecuzione — GTD `efaac02c`, WI `adb8b596`)
+
+**Autopilot dispatch sul GTD «casa unica» rimasto aperto dalla #93.** I suoi tre passi erano in gran parte già eseguiti sotto GTD gemelli: il passo 1 (5 correzioni `CFG-063/076/086/088/090` su `669fd07b`) chiuso in #95 (GTD `20235b14`), il passo 2 (tombstone) chiuso il 18/08 con GO loomy `bdb4e21b`. Nota interna contraddittoria: la chiusura di #95 dava il tombstone «sospeso», il resume_hint del GTD lo dava completato — **fatto fede il DB**, non la memoria delle sessioni.
+
+**Verificato sul DB (doc_query summary su entrambi i progetti):** le 5 schede nella casa portano le correzioni (char-count coerenti con la regola «sorgente meno paragrafo tombstone», CFG-086 col framing corretto, CFG-090 con la sezione correttiva del 20/08); le 30 copie in `596cd5fc` sono **tutte** `superseded` (inclusi CFG-074/083 coi loro link WI, arbitrati allora); CFG-001..047/091 intatte nella casa.
+
+**Passo 3 eseguito qui:** escalation `a33bf519` chiusa con nota che cita la decisione di loomy (opzione 1: `794e873c` canonica) e l'evidenza dei due passi. **Residuo dichiarato a loomy** (done `0c61a4ab`): il titolo di `de6879a4` afferma ancora «destinazione hub 794e873c non scrivibile» — falso oggi, e i doc_* non toccano i metadati di `documents`: serve loomy o dba. Nessuna scrittura di contenuto in sessione.
+
+---
+
 ## Sessione #101 — 2026-08-21 (items-subscription DEL-002: design-first dei 4 tool + D2 chiuso v0.18.0 + predicato D8 al dba — GTD `427b682b`, WI `0ba0971d`)
 
 **Wake `high` da loomy (msg `cbe96c66`): capitolato sottoscrizioni (progetto `52f9b563`) approvato da Achille, ondata dispacciata.** Mandato in tre pezzi: design-first dei 4 tool (DEL-002), fix D2 «documento sbagliato», predicato D8 con dba.
