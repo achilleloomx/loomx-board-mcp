@@ -4,6 +4,20 @@
 
 ---
 
+## Sessione #111 — 2026-08-23 (fix org_lookup(project=) — column sow_id does not exist, GTD `9a5ac413`, WI `b855f88e`, v0.20.2)
+
+**Autopilot dispatch: bug segnalato da atlas (msg `3f525915`, 21/08) — `org_lookup(project=...)` falliva con `Error reading RACI: column "sow_id" does not exist`**, rendendo non verificabile il punto 4 del gate METH-013 §7 (RACI leggibile via strumento) su qualunque progetto. Root cause letta nel codice, non ipotizzata: la migrazione DBA `20260820102000` (grana deliverable A2.1-A2.6) ha rinominato `loomx_sow_raci.sow_id` → `sow_document_id` (FK composita verso `documents(id, project_id)`, tipizzata `document_type='sow'`) — `src/tools.ts` non era stato aggiornato, sia nel `select` che nel filtro `.eq("sow_id", sow)`.
+
+**Fix minimale, perimetro non allargato (per istruzione esplicita del GTD):** rinominati i due riferimenti a `sow_document_id`; aggiornata la descrizione del param `sow` (ora dichiaratamente un UUID di riga `documents` tipo `sow`, non più "SoW model WIP"). Non toccata la lettura via `loomx_raci_effective()` (la risoluzione "più specifico vince" per la grana a 3 livelli progetto→SoW→deliverable introdotta dalla stessa migrazione, migrazione `20260820104000`): la lettura diretta di `loomx_sow_raci` resta una "finestra di cortesia" dichiarata dal DBA per `org_lookup`, in attesa di una migrazione futura del tool — vedi follow-on GTD sotto.
+
+**Verificato dal vivo** (query dirette via `LOOMX_DB_URL`, stesso backend pg-shim della finestra live) su 4 progetti, incluso il caso esatto di atlas: `governance-quadro` (4 righe RACI, matrice completa), `metodo-knowledge`, `metodo-infra-esercizio`, `metodo-software`. Controllo collaterale: 0 righe con soggetto `dl_id` (distribution list) in produzione oggi — la grana a 3 soggetti (agent/person/dl) introdotta dalla stessa migrazione non espone quindi nessun bug aggiuntivo misurabile ora (il ramo `dl_id` nel codice di rendering `matrix` resta comunque non gestito esplicitamente, notato per il follow-on). `npm test` 187/187 verde, `npm run build` pulito. Versione bumpata a 0.20.2 (patch, nessun cambio di firma tool).
+
+**Follow-on GTD parcheggiato (non armato — architetturale, non meccanico):** migrare `org_lookup(project=)` dalla lettura diretta di `loomx_sow_raci` a `loomx_raci_effective(project_id, deliverable_item_id)`, la funzione di risoluzione unica dichiarata dal DBA (gate "[2] raci_effective unica fonte") — necessario prima che una migrazione futura elimini la colonna derivata `agent_slug` di cortesia. Richiede decidere il nuovo shape di output (`grain`/`derived_from`/`subject_kind` in risposta) — non lanciato in autopilot.
+
+**Notifiche:** `done` ad atlas (ref `3f525915`) — gate METH-013 §7 punto 4 torna misurabile; `done` a loomy con l'esito verificato.
+
+---
+
 ## Sessione #110 — 2026-08-22 (auto_gtd RLS root cause — GTD `839dfcf4`, WI `917d4bf7`)
 
 **Autopilot dispatch: investigato il finding collaterale della sessione #109** (`auto_gtd:true` su board_send → `gtd_creation_error` RLS su `loomx_items` per mittenti non-loomy). Nessun codice toccato — sessione di investigazione + proposta cross-repo.

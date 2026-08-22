@@ -1896,7 +1896,7 @@ export function registerTools(
       question: z.enum(["card", "chain", "escalation", "help"]).optional().describe("Query mode for `agent` (default: card)"),
       domain: z.string().optional().describe("Filter escalation/help edges by domain (e.g. 'infra')"),
       project: z.string().optional().describe("Project slug (short_name) or UUID — returns its RACI matrix"),
-      sow: z.string().optional().describe("SoW id filter within a project (SoW model is WIP — interim, most projects have none)"),
+      sow: z.string().optional().describe("sow_document_id filter within a project (UUID of a documents row with document_type='sow')"),
       raci: z.enum(["R", "A", "C", "I"]).optional().describe("Filter the RACI matrix to one role (requires `project`)"),
     },
     async ({ agent, question, domain, project, sow, raci }) => {
@@ -1932,10 +1932,10 @@ export function registerTools(
         let raciQuery = db
           .from(SOW_RACI_TABLE)
           .select(
-            "agent_slug, person_id, raci, scope_note, sow_id, status, ratified_by, ratified_at, ratification_kind, ratification_recorded_by, ratification_recorded_at, ratification_evidence"
+            "agent_slug, person_id, raci, scope_note, sow_document_id, status, ratified_by, ratified_at, ratification_kind, ratification_recorded_by, ratification_recorded_at, ratification_evidence"
           )
           .eq("project_id", projectRow.id);
-        if (sow) raciQuery = raciQuery.eq("sow_id", sow);
+        if (sow) raciQuery = raciQuery.eq("sow_document_id", sow);
         if (raci) raciQuery = raciQuery.eq("raci", raci);
 
         const { data: raciRows, error: raciErr } = await raciQuery;
