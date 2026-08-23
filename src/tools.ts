@@ -2855,7 +2855,7 @@ export function registerTools(
       "Close a Work Item. status='done'|'failed'|'waiting'. GTD status cascades (done→done, waiting→waiting, failed→next_action).",
       "'waiting' maps to WI.status='paused' (DB CHECK constraint — see CLAUDE.md WI section).",
       "Phase 1 D-074 gate (REQ-033): durable WIs (non-ephemeral template) closing as 'done' require ≥1 REQ/SDES/decision linked via doc_item_wi_links (decision covers governance/coordination WIs whose durable output is itself a decision).",
-      "Use force_ephemeral=true to bypass (audit-logged). Phase 1 D-074: arm_gtd_ids arms follow-on GTDs post-close (soft-warn). platform_contribution triggers pull enabler D-045.",
+      "Use force_ephemeral=true to bypass (audit-logged). Phase 1 D-074: arm_gtd_ids arms follow-on GTDs post-close (soft-warn). GTD 6bbc293b: arming preserves an existing autopilot_model, fills it from arm_gtd_model when absent, and otherwise warns explicitly (never a silent undispatchable arm). platform_contribution triggers pull enabler D-045.",
     ].join(" "),
     {
       wi_id: z.string().uuid().describe("Work Item id"),
@@ -2867,7 +2867,8 @@ export function registerTools(
       // Phase 1 D-074 additions:
       force_ephemeral: z.boolean().optional().describe("[D-074 gate bypass] Skip durable gate — use when WI has no durable artifacts (on-the-fly, session tasks). Must include force_reason."),
       force_reason: z.string().optional().describe("Audit context for force_ephemeral (required when force_ephemeral=true)"),
-      arm_gtd_ids: z.array(z.string().uuid()).optional().describe("[D-074 REQ-034] GTD UUIDs to set autopilot=true after close (two-phase arm D-069). Soft-warns on mismatch."),
+      arm_gtd_ids: z.array(z.string().uuid()).optional().describe("[D-074 REQ-034] GTD UUIDs to set autopilot=true after close (two-phase arm D-069). Soft-warns on mismatch, and on any armed GTD left without a dispatchable autopilot_model (GTD 6bbc293b)."),
+      arm_gtd_model: z.string().optional().describe("[GTD 6bbc293b] Fallback autopilot_model applied only to armed GTDs that don't already have one — never overwrites an existing model."),
       post_runtime_request: z.enum(["continue", "clear", "kill", "model", "none"]).optional().describe("[D-074 REQ-034] Write to loomx_agent_runtime after close (optional; alternative to separate runtime_request call)."),
       platform_contribution: z.string().optional().describe("[D-074 REQ-035 / D-045] Content to share with forge (dev-*) or atlas (analyst-*) as platform contribution. Opt-in."),
     },

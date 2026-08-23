@@ -395,6 +395,7 @@ export interface WiEndArgs {
   force_ephemeral?: boolean;      // bypass durable gate — must include force_reason
   force_reason?: string;           // audit context for force_ephemeral
   arm_gtd_ids?: string[];          // GTDs to set autopilot=true after close (soft-warn on mismatch)
+  arm_gtd_model?: string;          // fallback autopilot_model applied only to armed GTDs currently missing one (GTD 6bbc293b)
   post_runtime_request?: string;   // write to loomx_agent_runtime after close (optional)
   platform_contribution?: string;  // returned to caller for pull enabler D-045 (opt-in)
 }
@@ -627,19 +628,34 @@ export async function wiEnd(
   }
 
   // Phase 1 D-074 (REQ-034): arm follow-on GTDs post-close. Soft-warn on mismatch.
+  // GTD 6bbc293b: arming set autopilot=true but never touched autopilot_model —
+  // a GTD with no model was left "armed" yet undispatchable, silently. Fix: read
+  // the existing model first (preserve it, never overwrite), fill it from
+  // arm_gtd_model only when absent, and warn explicitly when it's still missing
+  // after arming (fail-loud on the response, not a silent success).
   const armWarnings: string[] = [];
   if (args.arm_gtd_ids && args.arm_gtd_ids.length > 0) {
     for (const gtdId of args.arm_gtd_ids) {
-      let armQ = db
-        .from(GTD_TABLE)
-        .update({ autopilot: true, updated_at: now })
-        .eq("id", gtdId);
-      // Ownership guard: non-loomy agents can only arm their own GTDs.
-      if (!ctx.isLoomy) armQ = armQ.eq("owner", ctx.selfSlug);
-      const { data: armData } = await armQ.select("id").maybeSingle();
-      if (!armData) {
+      let selQ = db.from(GTD_TABLE).select("id, owner, autopilot_model").eq("id", gtdId);
+      if (!ctx.isLoomy) selQ = selQ.eq("owner", ctx.selfSlug);
+      const { data: gtdRow } = await selQ.maybeSingle();
+      if (!gtdRow) {
         armWarnings.push(
           `GTD '${gtdId}' not armed: not found or not owned by '${ctx.selfSlug}'.`
+        );
+        continue;
+      }
+      const hasModel = gtdRow.autopilot_model !== null && gtdRow.autopilot_model !== undefined;
+      const armUpdate: Record<string, unknown> = { autopilot: true, updated_at: now };
+      if (!hasModel && args.arm_gtd_model) armUpdate.autopilot_model = args.arm_gtd_model;
+      const { error: armErr } = await db.from(GTD_TABLE).update(armUpdate).eq("id", gtdId);
+      if (armErr) {
+        armWarnings.push(`GTD '${gtdId}' not armed: ${armErr.message}`);
+        continue;
+      }
+      if (!hasModel && !args.arm_gtd_model) {
+        armWarnings.push(
+          `GTD '${gtdId}' armed WITHOUT autopilot_model — it will not be dispatched. Set one via gtd_update or pass arm_gtd_model to wi_end.`
         );
       }
     }

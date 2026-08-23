@@ -930,8 +930,36 @@ test("wi_end (D-074 gate): durable WI on failed skips gate", async () => {
   assert.equal(res.ok, true, "gate must not block failed closures");
 });
 
-test("wi_end (D-074 REQ-034): arm_gtd_ids sets autopilot=true on own GTD", async () => {
+test("wi_end (D-074 REQ-034): arm_gtd_ids sets autopilot=true on own GTD (model already present)", async () => {
   const followOnId = "gtd-follow";
+  const store: Store = {
+    loomx_items: [
+      { id: "gtd-1", owner: "app", gtd_status: "in_progress" },
+      { id: followOnId, owner: "app", gtd_status: "next_action", autopilot: false, autopilot_model: "sonnet" },
+    ],
+    loomx_work_items: [
+      {
+        id: "wi-1",
+        agent_slug: "app",
+        gtd_item_id: "gtd-1",
+        status: "active",
+        side_effects_log: [],
+        template_name: null,
+        template_layer: "on-the-fly",
+      },
+    ],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done", arm_gtd_ids: [followOnId] }, ctxOwn);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(store.loomx_items[1].autopilot, true);
+  assert.equal(store.loomx_items[1].autopilot_model, "sonnet", "existing model must be preserved untouched");
+  assert.equal(res.data.arm_warnings, undefined);
+});
+
+test("GTD 6bbc293b: arm_gtd_ids on a GTD with no autopilot_model warns instead of arming silently", async () => {
+  const followOnId = "gtd-follow-no-model";
   const store: Store = {
     loomx_items: [
       { id: "gtd-1", owner: "app", gtd_status: "in_progress" },
@@ -951,10 +979,77 @@ test("wi_end (D-074 REQ-034): arm_gtd_ids sets autopilot=true on own GTD", async
   };
   const db = makeDb(store);
   const res = await wiEnd(db, { wi_id: "wi-1", status: "done", arm_gtd_ids: [followOnId] }, ctxOwn);
+  assert.equal(res.ok, true, "must still arm — soft-warn, never blocks close");
+  if (!res.ok) return;
+  assert.equal(store.loomx_items[1].autopilot, true, "arming itself still happens");
+  assert.equal(store.loomx_items[1].autopilot_model, undefined, "no model was invented");
+  assert.ok(
+    Array.isArray(res.data.arm_warnings) &&
+      res.data.arm_warnings.some((w: string) => w.includes(followOnId) && w.includes("autopilot_model")),
+    "must warn explicitly that the armed GTD has no dispatchable model"
+  );
+});
+
+test("GTD 6bbc293b: arm_gtd_model fills a missing autopilot_model, no warning", async () => {
+  const followOnId = "gtd-follow-fill";
+  const store: Store = {
+    loomx_items: [
+      { id: "gtd-1", owner: "app", gtd_status: "in_progress" },
+      { id: followOnId, owner: "app", gtd_status: "next_action", autopilot: false },
+    ],
+    loomx_work_items: [
+      {
+        id: "wi-1",
+        agent_slug: "app",
+        gtd_item_id: "gtd-1",
+        status: "active",
+        side_effects_log: [],
+        template_name: null,
+        template_layer: "on-the-fly",
+      },
+    ],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(
+    db,
+    { wi_id: "wi-1", status: "done", arm_gtd_ids: [followOnId], arm_gtd_model: "opus" },
+    ctxOwn
+  );
   assert.equal(res.ok, true);
   if (!res.ok) return;
   assert.equal(store.loomx_items[1].autopilot, true);
+  assert.equal(store.loomx_items[1].autopilot_model, "opus");
   assert.equal(res.data.arm_warnings, undefined);
+});
+
+test("GTD 6bbc293b: arm_gtd_model never overwrites an already-set autopilot_model", async () => {
+  const followOnId = "gtd-follow-keep";
+  const store: Store = {
+    loomx_items: [
+      { id: "gtd-1", owner: "app", gtd_status: "in_progress" },
+      { id: followOnId, owner: "app", gtd_status: "next_action", autopilot: false, autopilot_model: "haiku" },
+    ],
+    loomx_work_items: [
+      {
+        id: "wi-1",
+        agent_slug: "app",
+        gtd_item_id: "gtd-1",
+        status: "active",
+        side_effects_log: [],
+        template_name: null,
+        template_layer: "on-the-fly",
+      },
+    ],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(
+    db,
+    { wi_id: "wi-1", status: "done", arm_gtd_ids: [followOnId], arm_gtd_model: "opus" },
+    ctxOwn
+  );
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(store.loomx_items[1].autopilot_model, "haiku", "pre-existing model wins over arm_gtd_model");
 });
 
 test("wi_end (D-074 REQ-034): arm_gtd_ids soft-warns on missing GTD", async () => {
