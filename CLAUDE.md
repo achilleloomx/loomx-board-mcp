@@ -192,9 +192,12 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 |---|---|---|
 | `force_ephemeral` | `boolean?` | Bypassa gate durable (gate_bypassed=true in risposta) |
 | `force_reason` | `string?` | Motivazione del bypass (log) |
-| `arm_gtd_ids` | `string[]?` | UUID GTD da armare (autopilot=true) dopo close; soft-warn su missing/unowned |
+| `arm_gtd_ids` | `string[]?` | UUID GTD da armare (autopilot=true) dopo close; soft-warn su missing/unowned e su GTD armato senza `autopilot_model` (v0.20.3, GTD 6bbc293b — vedi sotto) |
+| `arm_gtd_model` | `string?` | (v0.20.3) Modello di fallback applicato SOLO ai GTD armati che non ne hanno già uno — non sovrascrive mai un `autopilot_model` esistente |
 | `post_runtime_request` | `enum?` | Scrive runtime request atomicamente dopo close (continue/clear/kill/model/none) |
 | `platform_contribution` | `string?` | Testo contributo piattaforma: dev-* → forge, analyst-* → atlas via board_message info |
+
+**Fix `arm_gtd_ids` senza modello dispacciabile (v0.20.3, GTD 6bbc293b):** prima l'arm settava `autopilot=true` ma non toccava `autopilot_model` — un GTD senza modello risultava "armato" e non veniva mai dispacciato dal reconciler, in silenzio (risposta `ok`, nessun errore). Probabile causa reale, mai trovata prima, del caso 17/08 (`f135aae4`, attribuito all'epoca al re-arm del reconciler). Ora: il modello esistente è sempre preservato (mai sovrascritto); se assente viene riempito da `arm_gtd_model` se fornito; se resta assente, `arm_warnings` lo dichiara esplicitamente invece di armare in silenzio — pattern soft-warn coerente col resto di `wi_end` (mai bloccante).
 
 **D-118 reply-wake structural guards (v0.15.0, GTD 1aa130da, proposta it-manager msg 49a4177c):** nessun nuovo param — `wi_end` ora rileva e riporta automaticamente in risposta (mai bloccante):
 - **(a+) `inbox_pending_warning?`** — se il proprietario del WI ha in inbox messaggi `task`/`question`/`blocker` ancora `pending`, un warning testuale (subject/mittente/età del più vecchio). È la rete che avrebbe intercettato il deadlock it-manager↔board-mcp del 2026-08-10 (due messaggi incrociati, nessuno con `ref_id`, nessuno con wait dichiarato): alla chiusura l'agente è ancora vivo e vede l'informazione.

@@ -4,6 +4,22 @@
 
 ---
 
+## Sessione #112 — 2026-08-23 (fix wi_end arm_gtd_ids senza autopilot_model, GTD `6bbc293b`, WI `6f906f24`, v0.20.3)
+
+**Autopilot dispatch: bug segnalato da loomy (msg `b8eb2e69`, 23/08) — `wi_end(arm_gtd_ids=[...])` settava `autopilot=true` ma lasciava `autopilot_model` a `null`.** Il GTD risultava armato in ogni vista (flag corretto, risposta `ok`) ma non veniva mai dispacciato dal reconciler, che non ha un modello con cui evocarlo — fallimento silenzioso nella direzione peggiore: chi arma crede di aver delegato, il lavoro resta fermo senza errore. Sospettato (non confermato) essere la causa reale del caso 17/08 (`f135aae4`, sicurezza VPS, all'epoca attribuito al re-arm del reconciler).
+
+**Root cause letta nel codice** (`src/wi.ts`, blocco arm post-close D-074/REQ-034): l'update dell'arm toccava solo `{autopilot: true, updated_at}`, mai `autopilot_model` — né lettura né default né segnalazione.
+
+**Fix (scelta mia, come richiesto dal GTD — "la scelta è tua, io indico il vincolo"):** prima dell'arm si legge `autopilot_model` esistente (mai sovrascritto — preferenza #1 del GTD, già di fatto garantita dal non-touch ma ora esplicita e testata); nuovo param opzionale `arm_gtd_model` riempie il modello SOLO quando assente (preferenza #1, parte "eredita un default esplicito" — nessun default implicito globale, la scelta resta del chiamante); se resta assente, `arm_warnings` lo dichiara per nome GTD invece di armare in silenzio (preferenza #3, la più debole ma l'unica applicabile senza cambiare la semantica "mai bloccante" di `wi_end`). Scartata la preferenza #2 (fail-loud/hard-fail): avrebbe reso `wi_end` bloccante su un percorso di chiusura che oggi non fallisce mai per nessun altro guard D-074/D-118 — cambio di contratto troppo largo per un fix mirato, coerente con lo stile soft-warn già usato per `inbox_pending_warning`/`waiting_on_warning`.
+
+**Verificato:** 4 test nuovi/aggiornati in `tests/wi.test.ts` (modello esistente preservato, warn su assenza, fill da `arm_gtd_model`, `arm_gtd_model` non sovrascrive un modello già presente). `npm test` 190/190 verde, `tsc --noEmit` pulito, `npm run build` ok. Versione bumpata a 0.20.3.
+
+**Verifica collaterale richiesta dal GTD (quanti GTD oggi hanno `autopilot=true` + `autopilot_model=null`) NON eseguita da me:** `gtd_overview` è coordinator-only (loomy/loomy-assistant), `access denied` misurato dal mio slug. Girato del tutto sul build precedente in questa window (rollout D-052, dist/ non hot-reload): il fix è committato ma non live finché non c'è un restart, che non forzo di iniziativa — segnalato a loomy insieme alla richiesta di eseguire lui la query collaterale.
+
+**Notifiche:** `done` a loomy (ref `b8eb2e69`) con la scelta fatta, il commit, e la richiesta di eseguire la verifica collaterale (accesso negato dal mio lato) più il coordinamento restart.
+
+---
+
 ## Sessione #111 — 2026-08-23 (fix org_lookup(project=) — column sow_id does not exist, GTD `9a5ac413`, WI `b855f88e`, v0.20.2)
 
 **Autopilot dispatch: bug segnalato da atlas (msg `3f525915`, 21/08) — `org_lookup(project=...)` falliva con `Error reading RACI: column "sow_id" does not exist`**, rendendo non verificabile il punto 4 del gate METH-013 §7 (RACI leggibile via strumento) su qualunque progetto. Root cause letta nel codice, non ipotizzata: la migrazione DBA `20260820102000` (grana deliverable A2.1-A2.6) ha rinominato `loomx_sow_raci.sow_id` → `sow_document_id` (FK composita verso `documents(id, project_id)`, tipizzata `document_type='sow'`) — `src/tools.ts` non era stato aggiornato, sia nel `select` che nel filtro `.eq("sow_id", sow)`.
