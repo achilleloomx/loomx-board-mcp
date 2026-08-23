@@ -1345,3 +1345,81 @@ test("D-118 (E2E-RW-11 regression, already covered above): wi_end on a closed WI
   assert.equal(res.runtime_request_posted, true);
   assert.equal(store.loomx_agent_runtime[0].request, "clear");
 });
+
+// ---- D-205 pending_inbox on wi_end ---------------------------------------
+// REQ-GOV-151..154 / SDES-GOV-156-157 (ratified msg 17051c14). Distinct from
+// D-118's inbox_pending_warning: no flag, no warning framing, no DB write.
+
+// SDES-GOV-156: none of these tests set LOOMX_RW_GUARDS_ENABLED — pending_inbox
+// is ungated on purpose. D-118 shipped OFF and its warning stayed invisible for
+// weeks; that is precisely the fate this feature must not inherit.
+test("D-205 (REQ-GOV-151): wi_end returns pending_inbox with the owner's actionable queue", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-23T08:00:00Z" },
+    ],
+    board_messages: [
+      { id: "m1", from_agent: "045", to_agent: "010", type: "task", subject: "still queued", status: "pending", created_at: "2026-08-23T09:00:00Z" },
+      { id: "m2", from_agent: "002", to_agent: "010", type: "info", subject: "fyi", status: "pending", created_at: "2026-08-23T09:05:00Z" },
+    ],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done", force_ephemeral: true, force_reason: "test" }, ctxRw);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.data.pending_inbox?.count, 1);
+  assert.equal(res.data.pending_inbox?.messages[0].subject, "still queued");
+  assert.equal(res.data.pending_inbox?.messages[0].from, "it-manager");
+});
+
+test("D-205 (REQ-GOV-152): an empty queue is still reported (count 0), so 'kill' is an informed choice", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-23T08:00:00Z" },
+    ],
+    board_messages: [],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done", force_ephemeral: true, force_reason: "test" }, ctxRw);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.data.pending_inbox?.count, 0);
+});
+
+test("D-205 (REQ-GOV-151): no pending_inbox when loomy closes another agent's WI (orphan sweep)", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-23T08:00:00Z" },
+    ],
+    board_messages: [
+      { id: "m1", from_agent: "045", to_agent: "010", type: "task", subject: "still queued", status: "pending", created_at: "2026-08-23T09:00:00Z" },
+    ],
+  };
+  const db = makeDb(store);
+  const ctxLoomyRw = { ...ctxRw, selfSlug: "loomy", isLoomy: true };
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done", force_ephemeral: true, force_reason: "test" }, ctxLoomyRw);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.data.pending_inbox, undefined);
+});
+
+test("D-205 (REQ-GOV-151): pending_inbox survives a GTD-sync failure — the WI still closed", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-23T08:00:00Z" },
+    ],
+    board_messages: [
+      { id: "m1", from_agent: "045", to_agent: "010", type: "question", subject: "unanswered", status: "pending", created_at: "2026-08-23T09:00:00Z" },
+    ],
+  };
+  const db = makeDb(store, { failNext: { loomx_items: [{ op: "update", message: "row locked" }] } });
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done", force_ephemeral: true, force_reason: "test" }, ctxRw);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.match(res.data.gtd_sync_warning ?? "", /GTD sync failed/);
+  assert.equal(res.data.pending_inbox?.count, 1);
+});

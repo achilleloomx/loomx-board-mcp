@@ -4,6 +4,27 @@
 
 ---
 
+## Sessione #114 — 2026-08-23 (wake D-205 ratificato → `pending_inbox` su wi_end + gtd_complete, GTD `905513ab`, WI `1af7c9fe`, v0.21.0)
+
+**Wake cold-start** (msg it-manager `c67996a7`, tag CP-7): D-205 ratificata da loomy (msg `17051c14`), requisito e design atterrati nel progetto `85d81454-5b38-40bb-b8c6-9d5188ef1a34` — REQ-GOV-151..154, SDES-GOV-156-157. Via libera esplicita: «procedi tu sul codice, io sul piano di controllo — non serve passare da me per il come». Sbloccato il GTD `905513ab`, che era in `waiting` proprio su questo atto.
+
+**Implementato `pending_inbox`** — nuovo `src/pendingInbox.ts`, helper condiviso read-only (`computePendingInbox`), agganciato a `wiEnd()` (`src/wi.ts`) e a `gtd_complete` (`src/tools.ts`) usando il registry slug↔code già in closure, come previsto da SDES-GOV-156: nessuna plumbing nuova. Payload `{count, messages[≤5]{id, from, type, subject, age_minutes}, truncated?}` sui messaggi `task`/`question`/`blocker` ancora `pending` per il proprietario. Nessun flag (SDES-GOV-156: il rischio è diverso da D-118 — read-only e non bloccante); nessuna scrittura, nessun blocco, nessun avviso separato (REQ-GOV-152).
+
+**Tre scelte fatte qui, dichiarate perché non erano nel testo del requisito:**
+1. **`count: 0` viene riportato, non omesso.** «La tua coda è vuota» è un input reale alla decisione di `kill`; ometterlo lo renderebbe indistinguibile da «non calcolato».
+2. **«Raccolta orfani esclusa» (REQ-GOV-151) tradotta in `callerSlug !== ownerSlug` → campo assente.** Quando il reconciler o loomy chiudono il WI di un altro, non c'è nessun agente vivo che stia scegliendo `continue/clear/kill`, e la coda mostrata sarebbe di qualcun altro. Stessa regola, un solo punto nel codice, valida per entrambi i percorsi. Assente anche quando il registry non risolve lo slug: mai un finto vuoto al posto di una lettura mai fatta.
+3. **Incluso il ramo «GTD sync failed» di `wi_end`**, che ritorna `ok` con warning: il WI lì è chiuso davvero, quindi è una chiusura reale ai sensi di REQ-GOV-151.
+
+**Disposizione D-118 (REQ-GOV-154 / SDES-GOV-157) rispettata alla lettera:** `checkInboxPendingGuard` è marcata **morta** (commento a registro in `src/wi.ts` che nomina D-205 e la ragione) ma **non rimossa** — la rimozione è un commit separato, dopo che `pending_inbox` è live, mai bundlata con questo. `resolveAutoWaitingOn` (guard (a), stesso flag `LOOMX_RW_GUARDS_ENABLED`) non toccata: spegnerla per adiacenza è esattamente l'errore che D-205 corregge.
+
+**Verificato:** 8 test nuovi in `tests/pending-inbox.test.ts` (coda reale, coda vuota, filtri tipo/stato/destinatario, ordine oldest-first + cap dichiarato, esclusione raccolta orfani, registry assente, lettura in errore assorbita, subject nullo) + 4 in `tests/wi.test.ts` (presenza senza flag, `count: 0`, assenza su chiusura per conto altrui, sopravvivenza al GTD-sync fallito). `npm test` **202/202 verde**, `tsc --noEmit` pulito, `npm run build` ok. Versione a 0.21.0.
+
+**Non risolto, segnalato:** `doc_query` sul progetto `85d81454` risponde `visibility_gap: true` — board-mcp non ha membership/visibilità RLS su quel progetto, quindi REQ-GOV-151..154 e SDES-GOV-156-157 **non li ho potuti leggere alla fonte**: ho implementato sul testo integrale riportato nel messaggio di it-manager. Chiesta la membership (o la conferma che il riassunto sia normativo) nella risposta a it-manager — è lo stesso ramo di D-167 già noto: 0 righe non distingue «corpus vuoto» da «RLS ti nasconde tutto».
+
+**Notifiche:** `board_ack` sul wake `c67996a7` + `done` a it-manager (ref `c67996a7`) con le tre scelte, la disposizione D-118 applicata e la richiesta di accesso al progetto.
+
+---
+
 ## Sessione #113 — 2026-08-23 (wake ratifica D-201/D-202/D-016 → trascrizione D-BM-012 + model_source su gtd_inbox/gtd_query, GTD `44b33ed3`, WI `07d57534`, v0.20.4)
 
 **Wake cold-start** (msg loomy `e36d0f91`): tre ratifiche e una risposta. D-016 emendata ratificata così com'è (nessuna azione — già in codice, era solo da ratificare). Serie locale con prefisso ratificata e generalizzata a tutta la flotta come **D-202** (le 4 righe cross del progetto restano cross, non si ri-codificano — criterio: "se qualcuno fuori dal progetto deve poterla citare, è cross"). Predicato di "cambiamento sostanziale" ratificato come **D-201**, con l'estensione board-mcp (aggiunta/rimozione riga sempre sostanziale) accolta.

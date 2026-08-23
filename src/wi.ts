@@ -9,6 +9,7 @@ import type { WiStatus, WiEndStatus, WiTemplateLayer } from "./types.js";
 import { checkTemplateName } from "./wiTemplates.js";
 import { runDocRw, type DocRwDb } from "./docDb.js";
 import { rwGuardsEnabled } from "./flags.js";
+import { computePendingInbox, type PendingInboxInfo } from "./pendingInbox.js";
 
 const WI_TABLE = "loomx_work_items";
 const GTD_TABLE = "loomx_items";
@@ -121,6 +122,15 @@ interface BoardMsgRow {
   created_at: string;
 }
 
+// SUPERSEDED — D-205 (REQ-GOV-154, ratified msg 17051c14). This guard is dead,
+// not merely switched off: pending_inbox (src/pendingInbox.ts) replaces it on
+// every close path, unflagged and without the warning framing. It is left in
+// place for exactly one release because SDES-GOV-157 forbids bundling the
+// removal with the commit that makes pending_inbox live; deleting it is a
+// separate follow-up. Do not build on it, and do not switch off
+// resolveAutoWaitingOn (guard (a)) alongside it — that one shares the flag but
+// does a different job, and killing it by adjacency is the mistake D-205 corrects.
+//
 // (a+) At wi_end, warn (never block) if the WI owner has actionable
 // (task/question/blocker) pending messages sitting in their board inbox —
 // the class of bug behind the 2026-08-10 it-manager/board-mcp deadlock: two
@@ -425,7 +435,12 @@ export interface WiEndData {
   arm_warnings?: string[];           // soft-warns from arm_gtd_ids
   platform_contribution_pending?: string; // content for pull enabler (caller must send)
   runtime_request_warning?: string;  // post_runtime_request write failed (see writeRuntimeRequest)
+  // D-205 (REQ-GOV-151/152/153): what is still waiting for the closing agent —
+  // informational, feeds the continue/clear/kill choice. See computePendingInbox.
+  pending_inbox?: PendingInboxInfo;
   // D-118 reply-wake structural guards (see resolveAutoWaitingOn / checkInboxPendingGuard):
+  // NOTE: inbox_pending_warning is SUPERSEDED by pending_inbox (D-205, REQ-GOV-154).
+  // Kept for one release; removed with checkInboxPendingGuard in a follow-up commit.
   inbox_pending_warning?: string;              // (a+) actionable messages left unprocessed in inbox
   waiting_on_auto_set?: { waiting_on: string; block_scope: string }; // (a) auto-detected blocker
   waiting_on_warning?: string;                 // (a) ambiguous — caller must declare manually
@@ -606,6 +621,14 @@ export async function wiEnd(
     }
   }
 
+  // D-205 (REQ-GOV-151): pending_inbox on every real close path — including the
+  // GTD-sync-failure return below, which still closed the WI and still leaves a
+  // live agent choosing continue/clear/kill. Ungated by design (SDES-GOV-156):
+  // read-only and non-blocking, so the eval-first flag D-118 needed doesn't
+  // apply. Suppressed when someone else is closing this WI (orphan sweep,
+  // REQ-GOV-151) — see computePendingInbox.
+  const pendingInbox = await computePendingInbox(db, ctx, row.agent_slug, ctx.selfSlug, now);
+
   const { error: gtdErr } = await db
     .from(GTD_TABLE)
     .update(gtdUpdate)
@@ -623,6 +646,7 @@ export async function wiEnd(
         gtd_item_id: row.gtd_item_id,
         gtd_status: null,
         gtd_sync_warning: `GTD sync failed (WI is closed): ${gtdErr.message}`,
+        ...(pendingInbox ? { pending_inbox: pendingInbox } : {}),
       },
     };
   }
@@ -684,6 +708,7 @@ export async function wiEnd(
       ...(armWarnings.length > 0 ? { arm_warnings: armWarnings } : {}),
       ...(args.platform_contribution ? { platform_contribution_pending: args.platform_contribution } : {}),
       ...(runtimeRequestWarning ? { runtime_request_warning: runtimeRequestWarning } : {}),
+      ...(pendingInbox ? { pending_inbox: pendingInbox } : {}),
       ...(inboxPendingWarning ? { inbox_pending_warning: inboxPendingWarning } : {}),
       ...(waitingOnAutoSet ? { waiting_on_auto_set: waitingOnAutoSet } : {}),
       ...(waitingOnWarning ? { waiting_on_warning: waitingOnWarning } : {}),

@@ -1540,7 +1540,8 @@ export function registerTools(
   // --- gtd_complete ---
   server.tool(
     "gtd_complete",
-    "Mark a GTD item as done (shortcut). Only the owner can complete (loomy can complete any item).",
+    "Mark a GTD item as done (shortcut). Only the owner can complete (loomy can complete any item). " +
+      "D-205: when you complete your own item, the response carries pending_inbox — the actionable messages still queued for you (count + oldest few). Informational, never blocks; it is there to feed your continue/clear/kill choice.",
     {
       id: z.string().uuid().describe("ID of the GTD item to complete"),
     },
@@ -1563,7 +1564,7 @@ export function registerTools(
       }
 
       const { data, error } = await query
-        .select("id, title, gtd_status, completed_at")
+        .select("id, title, owner, gtd_status, completed_at")
         .maybeSingle();
 
       if (error) {
@@ -1583,11 +1584,28 @@ export function registerTools(
         };
       }
 
+      // D-205 (REQ-GOV-151): gtd_complete is a real close path too — the agent
+      // that just finished something is exactly the agent about to choose
+      // continue/clear/kill. Informational only, never blocks (REQ-GOV-152);
+      // returns nothing when loomy completes someone else's item.
+      const { computePendingInbox } = await import("./pendingInbox.js");
+      const pendingInbox = await computePendingInbox(
+        db,
+        { slugToCode, codeToSlug },
+        (data as { owner?: string }).owner ?? selfSlug,
+        selfSlug,
+        now
+      );
+
       return {
         content: [
           {
             type: "text",
-            text: JSON.stringify({ ok: true, ...data }, null, 2),
+            text: JSON.stringify(
+              { ok: true, ...data, ...(pendingInbox ? { pending_inbox: pendingInbox } : {}) },
+              null,
+              2
+            ),
           },
         ],
       };
@@ -2869,6 +2887,7 @@ export function registerTools(
       "'waiting' maps to WI.status='paused' (DB CHECK constraint — see CLAUDE.md WI section).",
       "Phase 1 D-074 gate (REQ-033): durable WIs (non-ephemeral template) closing as 'done' require ≥1 REQ/SDES/decision linked via doc_item_wi_links (decision covers governance/coordination WIs whose durable output is itself a decision).",
       "Use force_ephemeral=true to bypass (audit-logged). Phase 1 D-074: arm_gtd_ids arms follow-on GTDs post-close (soft-warn). GTD 6bbc293b: arming preserves an existing autopilot_model, fills it from arm_gtd_model when absent, and otherwise warns explicitly (never a silent undispatchable arm). platform_contribution triggers pull enabler D-045.",
+      "D-205: when you close your own WI the response carries pending_inbox — the actionable messages (task/question/blocker) still queued for you: count, plus the oldest few. Informational, never blocks; it is there to feed your continue/clear/kill choice. Absent when someone else closes the WI for you (orphan sweep).",
     ].join(" "),
     {
       wi_id: z.string().uuid().describe("Work Item id"),
