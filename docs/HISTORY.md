@@ -2038,3 +2038,16 @@ Reconciler/LA fermi: nessun re-arm.
 **Obiettivo:** WI d96189bf su GTD 8eada1ca (dispatch autopilot) — il codice della sessione #ping-pivot sopra era pronto ma non committato.
 **Completato:** verificato tsc/80 test verdi, build dist locale, commit 9e3b5b6. Chiuso GTD 8eada1ca (superseded — task originale D-092 sostituito dal pivot D-093) e GTD 5177f528 (task it-manager) come done. board_send done a loomy (ref 36705bdb).
 **Blocchi / note:** invariato — `board_messages.wake_priority` resta da migrare lato DBA; follow-on già tracciato in GTD 7e896506.
+
+## Sessione #ondata-0.2 — 2026-08-23 (D-206, GTD 1b793e87)
+
+**Obiettivo:** Autopilot dispatch — GTD `1b793e87` (Ondata 0.2, DEL-014): le gap-check `req_without_sdes`/`sdes_without_uat` di `doc_query` contavano solo `doc_item_links` (project-scoped), ignorando i legami cross-progetto (`doc_item_xproject_links`, D-074/D-155) diventati legittimi con D-206.
+**Completato:**
+- Misurato PRIMA di estendere (mandato esplicito del GTD): 239 righe cross-progetto nel corpus, dominate da `decision↔requirement` (159, asse nuovo requisito→origine D-206) e `decision↔section` (35). Per le due check qui in oggetto: 1 solo link `requirement↔sdes_entry` (già ridondante con un legame same-project → 0 requisiti guadagnano copertura), 0 link `sdes_entry↔uat_case`. Effetto sui numeri odierni: zero — il difetto strutturale era reale ma non era la causa dei numeri temuti sbagliati.
+- `docTraceability` (`src/docs.ts`) estesa: scandisce anche `doc_item_xproject_links`, risolvendo l'`item_type` dell'altro capo del link (che può vivere in QUALSIASI progetto, la tabella non ha `project_id`). Risultato porta un campo `coverage` (`total_sources/covered_same_project/covered_cross_project_only/covered_total`) — same-project e cross-project restano distinguibili, mai fusi in un numero solo (richiesta esplicita #3 del GTD).
+- 2 nuovi test in `tests/docs.test.ts` (REQ coperto da SDES cross-progetto non è più un falso gap; niente doppio conteggio quando la stessa sorgente è coperta sia same-project sia da un link cross-progetto irrilevante). 204/204 test verdi, `tsc` pulito.
+- `D-BM-016` (decisione locale) e tool description di `doc_query` aggiornate.
+- Commit `bbd7af9`, v0.21.0 → v0.21.1.
+**Decisioni prese:** D-BM-016 (locale, board-mcp) — vedi doc DECISIONS.
+**Blocchi / note:** nessuna terza gap-check per l'asse requisito→origine di D-206 (`decision↔requirement`, il gap più consistente misurato: 159+35 righe) — fuori mandato del GTD, segnalato a loomy come probabile prossimo passo. Coordinamento con dba (punto #4 del GTD) fatto via board message con i numeri misurati, per cross-check contro il censimento di stamattina.
+**Prossima sessione:** nessuna prevista — GTD chiuso.
