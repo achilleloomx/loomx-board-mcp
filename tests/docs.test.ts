@@ -505,6 +505,61 @@ test("doc_query traceability: req_without_sdes flags uncovered REQ then clears a
   assert.equal((after as any).data.count, 0, "REQ-001 now covered by SDES-001");
 });
 
+test("doc_query traceability: a REQ satisfied by an SDES entry in a DIFFERENT project is covered, not a gap (GTD 1b793e87, D-206)", async () => {
+  // The original check only scanned doc_item_links (project_id-scoped by
+  // construction), so a satisfies/verifies link that crossed a project
+  // boundary — routed to doc_item_xproject_links (D-074/D-155) — left the
+  // requirement showing as an uncovered gap even though it was linked
+  // correctly. This is the exact defect Ondata 0.2 reports against D-206
+  // (requirements now legitimately subscribe to things living elsewhere).
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const reqDoc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req A" }, ctx);
+  const sdesDoc = await docCreate(db, { project_id: PROJ_B, document_type: "sdes", title: "Sdes B" }, ctx);
+  const req = await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-100" }, ctx);
+  const sdes = await docItemUpsert(db, { project_id: PROJ_B, document_id: (sdesDoc as any).data.document_id, item_type: "sdes_entry", code: "SDES-100" }, ctx);
+
+  const before = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_sdes" }, ctx);
+  assert.ok(before.ok);
+  assert.equal((before as any).data.count, 1, "REQ-100 not yet linked to anything");
+  assert.deepEqual((before as any).data.coverage, { total_sources: 1, covered_same_project: 0, covered_cross_project_only: 0, covered_total: 0 });
+
+  const cross = await docLink(db, {
+    target_kind: "doc",
+    from_id: (req as any).data.item_id,
+    to_id: (sdes as any).data.item_id,
+    relation_type: "satisfies",
+  }, ctx);
+  assert.ok(cross.ok, `cross-project link ok: ${JSON.stringify(cross)}`);
+  assert.equal(store.doc_item_xproject_links.length, 1, "routed cross-project, not into doc_item_links");
+
+  const after = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_sdes" }, ctx);
+  assert.ok(after.ok);
+  assert.equal((after as any).data.count, 0, "REQ-100 now covered via the cross-project link — not a false gap");
+  assert.deepEqual((after as any).data.coverage, { total_sources: 1, covered_same_project: 0, covered_cross_project_only: 1, covered_total: 1 }, "same-project and cross-project coverage stay distinguishable, never merged into one opaque number");
+});
+
+test("doc_query traceability: same-project coverage still counted as same-project even when an unrelated cross-project link exists (coverage split doesn't double-count)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const reqDoc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req A" }, ctx);
+  const sdesDocA = await docCreate(db, { project_id: PROJ_A, document_type: "sdes", title: "Sdes A" }, ctx);
+  const sdesDocB = await docCreate(db, { project_id: PROJ_B, document_type: "sdes", title: "Sdes B" }, ctx);
+  const req = await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-200" }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: (sdesDocA as any).data.document_id, item_type: "sdes_entry", code: "SDES-200" }, ctx);
+  const sdesB = await docItemUpsert(db, { project_id: PROJ_B, document_id: (sdesDocB as any).data.document_id, item_type: "sdes_entry", code: "SDES-201" }, ctx);
+
+  await docLinkByCode(db, { project_id: PROJ_A, from_code: "SDES-200", to_code: "REQ-200", link_type: "satisfies" }, ctx);
+  await docLink(db, { target_kind: "doc", from_id: (req as any).data.item_id, to_id: (sdesB as any).data.item_id, relation_type: "relates_to" }, ctx);
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_sdes" }, ctx);
+  assert.ok(res.ok);
+  assert.equal((res as any).data.count, 0);
+  assert.deepEqual((res as any).data.coverage, { total_sources: 1, covered_same_project: 1, covered_cross_project_only: 0, covered_total: 1 }, "already covered same-project — the cross-project link must not be double-counted as an extra 'covered_cross_project_only'");
+});
+
 test("doc_query summary: compact rows with body_chars, headline, link counts (no full body)", async () => {
   const store: Store = {};
   seedProjects(store);

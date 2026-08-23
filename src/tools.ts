@@ -3606,6 +3606,7 @@ export function registerTools(
       `Filter mode: by document_type / item_type / status / code. ` +
       `Lean modes (avoid dumping bodies on large docs): summary=true → per item {code,document_id,status,body_chars,headline,links:{doc_out,doc_in,gtd,wi}} plus a top-level documents legend {document_id→title,type} — a project can span several documents, and the legend makes the split visible at a glance (GTD 4a591cfe); or fields="code,status,..." → projection over chosen columns only. ` +
       `Traceability mode: traceability='req_without_sdes' (REQ rows with no linked SDES) or 'sdes_without_uat'. ` +
+      `Counts BOTH same-project links (doc_item_links) and cross-project links (doc_item_xproject_links, D-074/D-206) as coverage — a requirement satisfied by an SDES entry in a different project is not a gap. The 'coverage' object in the response keeps the two paths distinguishable ({total_sources, covered_same_project, covered_cross_project_only, covered_total}) — they are never merged into one opaque number (GTD 1b793e87). ` +
       `D-167: a 0-row result carries visibility_gap:true + a note when you have no membership/visibility on project_id — ` +
       `that 0 may be an RLS block, not an empty corpus (verify before treating it as a clean gap-check pass). ` +
       `Example (filter): doc_query({project_id:"<uuid>", item_type:"requirement"}). ` +

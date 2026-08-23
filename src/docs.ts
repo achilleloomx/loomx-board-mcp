@@ -1472,11 +1472,29 @@ async function docSummarize(
 
 // Traceability: items of a "source" type in the project with no link to a
 // "target" type. Computed in JS (portable across supabase-js + pg shim).
+//
+// GTD 1b793e87 (Ondata 0.2, D-206): a "satisfies"/"verifies" link between a
+// source and target of these types is NOT necessarily same-project — routing
+// (SDES-SUB-005, D-155) sends it to doc_item_xproject_links whenever the two
+// endpoints live in different projects. The original version of this check
+// only scanned doc_item_links (project-scoped by construction, `project_id`
+// FK), so a source correctly linked to a cross-project target still showed as
+// a gap. Fixed by scanning both tables; the two coverage paths are kept
+// distinguishable in `coverage` (never merged into one opaque number) because
+// they carry different meaning — same-project is the ordinary case, cross-
+// project means the source subscribes to something owned elsewhere.
 async function docTraceability(
   db: SupabaseClient,
   args: DocQueryArgs,
   ctx: DocContext
-): Promise<DocResult<{ mode: string; count: number; items: unknown[]; visibility_gap?: true; note?: string }>> {
+): Promise<DocResult<{
+  mode: string;
+  count: number;
+  items: unknown[];
+  coverage?: { total_sources: number; covered_same_project: number; covered_cross_project_only: number; covered_total: number };
+  visibility_gap?: true;
+  note?: string;
+}>> {
   const map: Record<string, { source: ItemType; target: ItemType; label: string }> = {
     req_without_sdes: { source: "requirement", target: "sdes_entry", label: "REQ without a linked SDES" },
     sdes_without_uat: { source: "sdes_entry", target: "uat_case", label: "SDES without a linked UAT" },
@@ -1496,8 +1514,9 @@ async function docTraceability(
     const gap = await visibilityGap(db, args.project_id, ctx.selfSlug);
     return { ok: true, data: { mode: `traceability:${args.traceability}`, count: 0, items: [], ...gap } };
   }
+  const sourceIds = new Set(sources.map((s) => s.id as string));
 
-  // Target item ids in the project.
+  // Target item ids in the project (same-project coverage path).
   const { data: tgtRows, error: tgtErr } = await db
     .from(DOC_ITEMS)
     .select("id")
@@ -1515,17 +1534,70 @@ async function docTraceability(
   const links = Array.isArray(linkRows) ? (linkRows as any[]) : [];
 
   // A source is "covered" if any link connects it (either direction) to a target item.
-  const covered = new Set<string>();
+  const coveredSameProject = new Set<string>();
   for (const l of links) {
-    if (targetIds.has(l.to_item)) covered.add(l.from_item);
-    if (targetIds.has(l.from_item)) covered.add(l.to_item);
+    if (targetIds.has(l.to_item)) coveredSameProject.add(l.from_item);
+    if (targetIds.has(l.from_item)) coveredSameProject.add(l.to_item);
   }
 
+  // Cross-project coverage: doc_item_xproject_links has no project_id column
+  // (D-074), so a target there can live in ANY project — fetch the item_type
+  // of whatever is on the other end of each link that touches one of our
+  // sources, rather than reusing the (same-project) targetIds set.
+  const coveredCrossProject = new Set<string>();
+  {
+    const idList = Array.from(sourceIds);
+    const [fromHits, toHits] = await Promise.all([
+      db.from(DOC_ITEM_XPROJECT_LINKS).select("from_item, to_item").in("from_item", idList),
+      db.from(DOC_ITEM_XPROJECT_LINKS).select("from_item, to_item").in("to_item", idList),
+    ]);
+    if (fromHits.error) return err(`Traceability cross-project link query failed: ${fromHits.error.message}`);
+    if (toHits.error) return err(`Traceability cross-project link query failed: ${toHits.error.message}`);
+    const xlinks = [...(fromHits.data ?? []), ...(toHits.data ?? [])] as { from_item: string; to_item: string }[];
+
+    const otherIds = new Set<string>();
+    for (const l of xlinks) {
+      if (sourceIds.has(l.from_item) && !sourceIds.has(l.to_item)) otherIds.add(l.to_item);
+      if (sourceIds.has(l.to_item) && !sourceIds.has(l.from_item)) otherIds.add(l.from_item);
+    }
+    if (otherIds.size > 0) {
+      const { data: otherRows, error: oErr } = await db
+        .from(DOC_ITEMS)
+        .select("id, item_type")
+        .in("id", Array.from(otherIds));
+      if (oErr) return err(`Traceability cross-project target lookup failed: ${oErr.message}`);
+      const targetTypeById = new Map<string, string>();
+      for (const r of (Array.isArray(otherRows) ? (otherRows as any[]) : [])) targetTypeById.set((r as any).id, (r as any).item_type);
+      for (const l of xlinks) {
+        const srcId = sourceIds.has(l.from_item) ? l.from_item : (sourceIds.has(l.to_item) ? l.to_item : null);
+        if (!srcId) continue;
+        const otherId = srcId === l.from_item ? l.to_item : l.from_item;
+        if (targetTypeById.get(otherId) === cfg.target) coveredCrossProject.add(srcId);
+      }
+    }
+  }
+
+  const coveredTotal = new Set([...coveredSameProject, ...coveredCrossProject]);
   const gaps = sources
-    .filter((s) => !covered.has(s.id))
+    .filter((s) => !coveredTotal.has(s.id))
     .map((s) => ({ id: s.id, code: s.code, status: s.status, gap: cfg.label, body_preview: typeof s.body === "string" ? s.body.slice(0, 120) : null }));
 
-  return { ok: true, data: { mode: `traceability:${args.traceability}`, count: gaps.length, items: gaps } };
+  const coveredCrossProjectOnly = Array.from(coveredCrossProject).filter((id) => !coveredSameProject.has(id)).length;
+
+  return {
+    ok: true,
+    data: {
+      mode: `traceability:${args.traceability}`,
+      count: gaps.length,
+      items: gaps,
+      coverage: {
+        total_sources: sources.length,
+        covered_same_project: coveredSameProject.size,
+        covered_cross_project_only: coveredCrossProjectOnly,
+        covered_total: coveredTotal.size,
+      },
+    },
+  };
 }
 
 // ---------------------------------------------------------------------------
