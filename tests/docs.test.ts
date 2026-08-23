@@ -560,6 +560,120 @@ test("doc_query traceability: same-project coverage still counted as same-projec
   assert.deepEqual((res as any).data.coverage, { total_sources: 1, covered_same_project: 1, covered_cross_project_only: 0, covered_total: 1 }, "already covered same-project — the cross-project link must not be double-counted as an extra 'covered_cross_project_only'");
 });
 
+// ---------------------------------------------------------------------------
+// doc_query traceability: req_without_origin (D-206 third axis, GTD 1b793e87
+// follow-on, msg 28e9aa98) — upstream check, distinct from req_without_sdes.
+// ---------------------------------------------------------------------------
+
+test("doc_query traceability req_without_origin: SoW element (capitolato) covers a requirement, bucketed as 'capitolato'", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const reqDoc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const sowDoc = await docCreate(db, { project_id: PROJ_A, document_type: "sow", title: "SoW" }, ctx);
+  const req = await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-300" }, ctx);
+  const del = await docItemUpsert(db, { project_id: PROJ_A, document_id: (sowDoc as any).data.document_id, item_type: "deliverable", code: "DEL-300" }, ctx);
+
+  const before = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_origin" }, ctx);
+  assert.ok(before.ok);
+  assert.equal((before as any).data.count, 1, "REQ-300 has no origin yet");
+  assert.deepEqual((before as any).data.coverage.covered_by, { capitolato: 0, decision_cross: 0, decision_project: 0, inspiration_document: 0 });
+
+  await docLink(db, { target_kind: "doc", from_id: (req as any).data.item_id, to_id: (del as any).data.item_id, relation_type: "refines" }, ctx);
+
+  const after = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_origin" }, ctx);
+  assert.ok(after.ok);
+  assert.equal((after as any).data.count, 0, "REQ-300 now subscribes to a SoW deliverable");
+  assert.equal((after as any).data.coverage.covered_by.capitolato, 1);
+  assert.equal((after as any).data.coverage.covered_total, 1);
+});
+
+test("doc_query traceability req_without_origin: a project-local decision and a cross-project decision are bucketed separately", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const reqDoc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req A" }, ctx);
+  const decDocA = await docCreate(db, { project_id: PROJ_A, document_type: "decisions", title: "Decisions A" }, ctx);
+  const decDocB = await docCreate(db, { project_id: PROJ_B, document_type: "decisions", title: "Decisions B" }, ctx);
+  const req1 = await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-301" }, ctx);
+  const req2 = await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-302" }, ctx);
+  const decLocal = await docItemUpsert(db, { project_id: PROJ_A, document_id: (decDocA as any).data.document_id, item_type: "decision", code: "D-LOCAL-1" }, ctx);
+  const decCross = await docItemUpsert(db, { project_id: PROJ_B, document_id: (decDocB as any).data.document_id, item_type: "decision", code: "D-CROSS-1" }, ctx);
+
+  await docLink(db, { target_kind: "doc", from_id: (req1 as any).data.item_id, to_id: (decLocal as any).data.item_id, relation_type: "relates_to" }, ctx);
+  await docLink(db, { target_kind: "doc", from_id: (req2 as any).data.item_id, to_id: (decCross as any).data.item_id, relation_type: "relates_to" }, ctx);
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_origin" }, ctx);
+  assert.ok(res.ok);
+  assert.equal((res as any).data.count, 0);
+  assert.deepEqual((res as any).data.coverage.covered_by, { capitolato: 0, decision_cross: 1, decision_project: 1, inspiration_document: 0 });
+});
+
+test("doc_query traceability req_without_origin: a linked prose/section item counts as 'inspiration_document'", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const reqDoc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const blogDoc = await docCreate(db, { project_id: PROJ_A, document_type: "blog_post", title: "Inspiration post" }, ctx);
+  const req = await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-303" }, ctx);
+  const prose = await docItemUpsert(db, { project_id: PROJ_A, document_id: (blogDoc as any).data.document_id, item_type: "prose", code: "PROSE-303" }, ctx);
+
+  await docLink(db, { target_kind: "doc", from_id: (req as any).data.item_id, to_id: (prose as any).data.item_id, relation_type: "relates_to" }, ctx);
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_origin" }, ctx);
+  assert.ok(res.ok);
+  assert.equal((res as any).data.count, 0);
+  assert.equal((res as any).data.coverage.covered_by.inspiration_document, 1);
+});
+
+test("doc_query traceability req_without_origin: a link ONLY to the downstream chain (SDES) does not count as an origin — still a gap", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const reqDoc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const sdesDoc = await docCreate(db, { project_id: PROJ_A, document_type: "sdes", title: "Sdes" }, ctx);
+  const req = await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-304" }, ctx);
+  const sdes = await docItemUpsert(db, { project_id: PROJ_A, document_id: (sdesDoc as any).data.document_id, item_type: "sdes_entry", code: "SDES-304" }, ctx);
+  await docLink(db, { target_kind: "doc", from_id: (sdes as any).data.item_id, to_id: (req as any).data.item_id, relation_type: "satisfies" }, ctx);
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_origin" }, ctx);
+  assert.ok(res.ok);
+  assert.equal((res as any).data.count, 1, "req→sdes is the downstream chain, not a D-206 origin");
+  assert.deepEqual((res as any).data.coverage.covered_by, { capitolato: 0, decision_cross: 0, decision_project: 0, inspiration_document: 0 });
+});
+
+test("doc_query traceability req_without_origin: an unresolvable cross-project link is an ABSTENTION, never counted as a gap (D-206 blindness-as-absence)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const reqDoc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const req = await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-305" }, ctx);
+
+  // Simulate a cross-project link whose target can't be resolved from here
+  // (RLS-invisible in production; here, simply a doc_items row that isn't in
+  // the store — same code path as a SELECT that comes back empty for that id).
+  store.doc_item_xproject_links.push({ id: uuid(), from_item: (req as any).data.item_id, to_item: uuid(), relation_type: "references" });
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_origin" }, ctx);
+  assert.ok(res.ok);
+  assert.equal((res as any).data.count, 0, "not a gap — it's unmeasurable, not absent");
+  assert.equal((res as any).data.coverage.gap, 0);
+  assert.equal((res as any).data.coverage.abstained, 1);
+  assert.equal((res as any).data.abstained_items.length, 1);
+  assert.equal((res as any).data.abstained_items[0].code, "REQ-305");
+});
+
+test("doc_query traceability req_without_origin: empty project + no membership flags visibility_gap (D-167)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store); // no memberships granted
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_origin" }, { selfSlug: "auditor", isLoomy: false });
+  assert.ok(res.ok);
+  assert.equal((res as any).data.count, 0);
+  assert.equal((res as any).data.visibility_gap, true);
+});
+
 test("doc_query summary: compact rows with body_chars, headline, link counts (no full body)", async () => {
   const store: Store = {};
   seedProjects(store);

@@ -3605,20 +3605,22 @@ export function registerTools(
     `Query doc_items in a project, or run a traceability check. ` +
       `Filter mode: by document_type / item_type / status / code. ` +
       `Lean modes (avoid dumping bodies on large docs): summary=true → per item {code,document_id,status,body_chars,headline,links:{doc_out,doc_in,gtd,wi}} plus a top-level documents legend {document_id→title,type} — a project can span several documents, and the legend makes the split visible at a glance (GTD 4a591cfe); or fields="code,status,..." → projection over chosen columns only. ` +
-      `Traceability mode: traceability='req_without_sdes' (REQ rows with no linked SDES) or 'sdes_without_uat'. ` +
-      `Counts BOTH same-project links (doc_item_links) and cross-project links (doc_item_xproject_links, D-074/D-206) as coverage — a requirement satisfied by an SDES entry in a different project is not a gap. The 'coverage' object in the response keeps the two paths distinguishable ({total_sources, covered_same_project, covered_cross_project_only, covered_total}) — they are never merged into one opaque number (GTD 1b793e87). ` +
+      `Traceability mode: traceability='req_without_sdes' (REQ rows with no linked SDES), 'sdes_without_uat' (downstream chain), or 'req_without_origin' (D-206 upstream axis — REQ rows with no admitted origin). ` +
+      `req_without_sdes/sdes_without_uat count BOTH same-project links (doc_item_links) and cross-project links (doc_item_xproject_links, D-074/D-206) as coverage — a requirement satisfied by an SDES entry in a different project is not a gap. The 'coverage' object keeps the two paths distinguishable ({total_sources, covered_same_project, covered_cross_project_only, covered_total}) — never merged into one opaque number (GTD 1b793e87). ` +
+      `req_without_origin (GTD 1b793e87 follow-on, msg 28e9aa98) checks D-206's separate upstream axis — every requirement must SUBSCRIBE to the thing it comes from, one of 4 admitted origins: a SoW element (objective/deliverable/stop_condition — "il capitolato"), a cross-project decision, a project-local decision, or a document it draws on. 'coverage.covered_by' breaks the total down by origin type (never fused). A cross-project link whose target can't be resolved (RLS-invisible from here) never counts as "no origin" — it lands in 'abstained_items'/'coverage.abstained' instead, distinct from a true gap in 'items'/'coverage.gap': per D-206, a true gap means the SoW is incomplete, not that the requirement is defective. ` +
       `D-167: a 0-row result carries visibility_gap:true + a note when you have no membership/visibility on project_id — ` +
       `that 0 may be an RLS block, not an empty corpus (verify before treating it as a clean gap-check pass). ` +
       `Example (filter): doc_query({project_id:"<uuid>", item_type:"requirement"}). ` +
       `Example (lean): doc_query({project_id:"<uuid>", document_type:"req", summary:true}). ` +
-      `Example (gap): doc_query({project_id:"<uuid>", traceability:"req_without_sdes"}).`,
+      `Example (gap): doc_query({project_id:"<uuid>", traceability:"req_without_sdes"}). ` +
+      `Example (D-206 origin): doc_query({project_id:"<uuid>", traceability:"req_without_origin"}).`,
     {
       project_id: z.string().uuid().describe("Project scope — mandatory"),
       document_type: z.string().optional().describe(`Filter by document type: ${DOC_TYPES_LIST}`),
       item_type: z.string().optional().describe(`Filter by item type: ${ITEM_TYPES_LIST}`),
       status: z.string().optional().describe("Filter by item status"),
       code: z.string().optional().describe("Filter by exact code"),
-      traceability: z.enum(["req_without_sdes", "sdes_without_uat"]).optional().describe("Run a traceability gap check instead of a plain filter"),
+      traceability: z.enum(["req_without_sdes", "sdes_without_uat", "req_without_origin"]).optional().describe("Run a traceability gap check instead of a plain filter"),
       summary: z.boolean().optional().describe("Lean output: code+status+body_chars+headline(120c)+link counts (doc_out/doc_in/gtd/wi), no full body. For review-at-scale."),
       fields: z.string().optional().describe("Comma-separated projection, e.g. 'code,status'. Returns only those columns (id always included). Skips body when not listed. Ignored if summary=true."),
       limit: z.number().int().min(1).max(500).optional().describe("Max rows (default: 50)"),

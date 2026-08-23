@@ -1283,7 +1283,7 @@ export interface DocQueryArgs {
   item_type?: string;
   status?: string;
   code?: string;
-  traceability?: "req_without_sdes" | "sdes_without_uat";
+  traceability?: "req_without_sdes" | "sdes_without_uat" | "req_without_origin";
   summary?: boolean;
   fields?: string;
   limit?: number;
@@ -1327,6 +1327,9 @@ export async function docQuery(
   args: DocQueryArgs,
   ctx: DocContext
 ): Promise<DocResult<{ mode: string; count: number; items: unknown[]; documents?: Record<string, { title: string; document_type: string }>; visibility_gap?: true; note?: string }>> {
+  if (args.traceability === "req_without_origin") {
+    return docTraceabilityOrigin(db, args, ctx);
+  }
   if (args.traceability) {
     return docTraceability(db, args, ctx);
   }
@@ -1595,6 +1598,197 @@ async function docTraceability(
         covered_same_project: coveredSameProject.size,
         covered_cross_project_only: coveredCrossProjectOnly,
         covered_total: coveredTotal.size,
+      },
+    },
+  };
+}
+
+// D-206 third traceability axis: requirement → ORIGIN (upstream), distinct
+// from req_without_sdes/sdes_without_uat which check the DOWNSTREAM chain
+// (req→sdes→uat). Four admitted origins: a SoW element (objective/
+// deliverable/stop_condition — "il capitolato"), a cross-project decision, a
+// project-local decision, or a document the requirement draws on (modeled as
+// any item_type outside the downstream chain and the other three buckets —
+// section/prose/etc., the item types used for narrative documents).
+const CAPITOLATO_ORIGIN_TYPES = new Set(["objective", "deliverable", "stop_condition"]);
+const DOWNSTREAM_CHAIN_TYPES = new Set(["requirement", "sdes_entry", "uat_case", "test_step"]);
+type OriginBucket = "capitolato" | "decision_cross" | "decision_project" | "inspiration_document";
+
+function classifyOrigin(itemType: string, crossProject: boolean): OriginBucket | null {
+  if (CAPITOLATO_ORIGIN_TYPES.has(itemType)) return "capitolato";
+  if (itemType === "decision") return crossProject ? "decision_cross" : "decision_project";
+  if (DOWNSTREAM_CHAIN_TYPES.has(itemType)) return null; // never an origin — D-206 "non estende l'obbligo agli altri tipi"
+  return "inspiration_document"; // any remaining item_type — recepisce qualcosa scritto altrove
+}
+
+// GTD 28e9aa98 (msg loomy, D-206 follow-on): three shape requirements from the
+// mandate, all enforced here:
+//  1. Origin distinguished BY TYPE in the result (`coverage.covered_by`), same
+//     spirit as the same-project/cross-project split already kept apart on the
+//     other two checks — never fused into one opaque number.
+//  2. "No origin" (`items`, true gaps) kept distinct from "not measurable"
+//     (`abstained_items`): a cross-project link whose target item_type can't
+//     be resolved (RLS-invisible, or otherwise unreadable from here) is an
+//     ABSTENTION, not a zero — counting it as a gap would repeat the exact
+//     blindness-dressed-as-absence mistake D-206 itself names (two cases
+//     measured in the same 24h window it was written).
+//  3. Its own mode (`req_without_origin`), never merged with req_without_sdes
+//     / sdes_without_uat — three distinct axes for the dashboard.
+async function docTraceabilityOrigin(
+  db: SupabaseClient,
+  args: DocQueryArgs,
+  ctx: DocContext
+): Promise<DocResult<{
+  mode: string;
+  count: number;
+  items: unknown[];
+  abstained_items?: unknown[];
+  coverage?: {
+    total_sources: number;
+    covered_total: number;
+    covered_by: { capitolato: number; decision_cross: number; decision_project: number; inspiration_document: number };
+    abstained: number;
+    gap: number;
+  };
+  visibility_gap?: true;
+  note?: string;
+}>> {
+  const { data: srcRows, error: srcErr } = await db
+    .from(DOC_ITEMS)
+    .select("id, code, body, status, attrs")
+    .eq("project_id", args.project_id)
+    .eq("item_type", "requirement");
+  if (srcErr) return err(`Traceability source query failed: ${srcErr.message}`);
+  const sources = Array.isArray(srcRows) ? (srcRows as any[]) : [];
+  if (sources.length === 0) {
+    const gap = await visibilityGap(db, args.project_id, ctx.selfSlug);
+    return { ok: true, data: { mode: "traceability:req_without_origin", count: 0, items: [], ...gap } };
+  }
+  const sourceIds = new Set(sources.map((s) => s.id as string));
+
+  // Same-project links: doc_item_links carries a project_id FK enforced on
+  // BOTH endpoints (see fakeDb.ts checkConstraints / migration 20260627020000),
+  // so the other end of any such link is guaranteed to live in this project —
+  // a single project-scoped type lookup covers every same-project origin.
+  const { data: sameTypeRows, error: sameTypeErr } = await db
+    .from(DOC_ITEMS)
+    .select("id, item_type")
+    .eq("project_id", args.project_id);
+  if (sameTypeErr) return err(`Traceability item-type query failed: ${sameTypeErr.message}`);
+  const sameProjectTypeById = new Map<string, string>();
+  for (const r of (Array.isArray(sameTypeRows) ? (sameTypeRows as any[]) : [])) {
+    sameProjectTypeById.set((r as any).id, (r as any).item_type);
+  }
+
+  const { data: linkRows, error: linkErr } = await db
+    .from(DOC_ITEM_LINKS)
+    .select("from_item, to_item")
+    .eq("project_id", args.project_id);
+  if (linkErr) return err(`Traceability link query failed: ${linkErr.message}`);
+  const links = Array.isArray(linkRows) ? (linkRows as any[]) : [];
+
+  const originsBySource = new Map<string, Set<OriginBucket>>();
+  const abstainedBySource = new Set<string>();
+  const addOrigin = (srcId: string, bucket: OriginBucket | null) => {
+    if (!bucket) return;
+    if (!originsBySource.has(srcId)) originsBySource.set(srcId, new Set());
+    originsBySource.get(srcId)!.add(bucket);
+  };
+
+  for (const l of links) {
+    if (!sourceIds.has(l.from_item) && !sourceIds.has(l.to_item)) continue;
+    const srcId = sourceIds.has(l.from_item) ? l.from_item : l.to_item;
+    const otherId = srcId === l.from_item ? l.to_item : l.from_item;
+    const otherType = sameProjectTypeById.get(otherId);
+    if (!otherType) continue; // dangling under the FK guarantee above — ignore defensively
+    addOrigin(srcId, classifyOrigin(otherType, false));
+  }
+
+  // Cross-project links: doc_item_xproject_links has no project_id column
+  // (D-074), so the other end can live in ANY project and — unlike the
+  // req_without_sdes/sdes_without_uat check, which only cares whether the
+  // target matches ONE fixed item_type — every resolvable other-end type
+  // must be classified individually here.
+  {
+    const idList = Array.from(sourceIds);
+    const [fromHits, toHits] = await Promise.all([
+      db.from(DOC_ITEM_XPROJECT_LINKS).select("from_item, to_item").in("from_item", idList),
+      db.from(DOC_ITEM_XPROJECT_LINKS).select("from_item, to_item").in("to_item", idList),
+    ]);
+    if (fromHits.error) return err(`Traceability cross-project link query failed: ${fromHits.error.message}`);
+    if (toHits.error) return err(`Traceability cross-project link query failed: ${toHits.error.message}`);
+    const xlinks = [...(fromHits.data ?? []), ...(toHits.data ?? [])] as { from_item: string; to_item: string }[];
+
+    const otherIds = new Set<string>();
+    for (const l of xlinks) {
+      if (sourceIds.has(l.from_item) && !sourceIds.has(l.to_item)) otherIds.add(l.to_item);
+      if (sourceIds.has(l.to_item) && !sourceIds.has(l.from_item)) otherIds.add(l.from_item);
+    }
+    const targetTypeById = new Map<string, string>();
+    if (otherIds.size > 0) {
+      const { data: otherRows, error: oErr } = await db
+        .from(DOC_ITEMS)
+        .select("id, item_type")
+        .in("id", Array.from(otherIds));
+      if (oErr) return err(`Traceability cross-project target lookup failed: ${oErr.message}`);
+      for (const r of (Array.isArray(otherRows) ? (otherRows as any[]) : [])) {
+        targetTypeById.set((r as any).id, (r as any).item_type);
+      }
+    }
+
+    for (const l of xlinks) {
+      const srcId = sourceIds.has(l.from_item) ? l.from_item : (sourceIds.has(l.to_item) ? l.to_item : null);
+      if (!srcId) continue;
+      const otherId = srcId === l.from_item ? l.to_item : l.from_item;
+      const otherType = targetTypeById.get(otherId);
+      if (!otherType) {
+        // Link exists but the other end didn't come back — RLS-invisible, or
+        // otherwise unreadable from here. Abstain: never let this read as "no origin".
+        abstainedBySource.add(srcId);
+        continue;
+      }
+      addOrigin(srcId, classifyOrigin(otherType, true));
+    }
+  }
+
+  const coveredBy = { capitolato: 0, decision_cross: 0, decision_project: 0, inspiration_document: 0 };
+  const gaps: unknown[] = [];
+  const abstainedItems: unknown[] = [];
+  let coveredTotal = 0;
+
+  for (const s of sources) {
+    const origins = originsBySource.get(s.id);
+    if (origins && origins.size > 0) {
+      coveredTotal += 1;
+      for (const b of origins) coveredBy[b] += 1;
+      continue;
+    }
+    if (abstainedBySource.has(s.id)) {
+      abstainedItems.push({ id: s.id, code: s.code, status: s.status });
+      continue;
+    }
+    gaps.push({
+      id: s.id,
+      code: s.code,
+      status: s.status,
+      gap: "requirement without a D-206 origin — per D-206 this marks the SoW as incomplete, not the requirement as defective",
+      body_preview: typeof s.body === "string" ? s.body.slice(0, 120) : null,
+    });
+  }
+
+  return {
+    ok: true,
+    data: {
+      mode: "traceability:req_without_origin",
+      count: gaps.length,
+      items: gaps,
+      ...(abstainedItems.length > 0 ? { abstained_items: abstainedItems } : {}),
+      coverage: {
+        total_sources: sources.length,
+        covered_total: coveredTotal,
+        covered_by: coveredBy,
+        abstained: abstainedItems.length,
+        gap: gaps.length,
       },
     },
   };

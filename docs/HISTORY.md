@@ -2051,3 +2051,17 @@ Reconciler/LA fermi: nessun re-arm.
 **Decisioni prese:** D-BM-016 (locale, board-mcp) — vedi doc DECISIONS.
 **Blocchi / note:** nessuna terza gap-check per l'asse requisito→origine di D-206 (`decision↔requirement`, il gap più consistente misurato: 159+35 righe) — fuori mandato del GTD, segnalato a loomy come probabile prossimo passo. Coordinamento con dba (punto #4 del GTD) fatto via board message con i numeri misurati, per cross-check contro il censimento di stamattina.
 **Prossima sessione:** nessuna prevista — GTD chiuso.
+
+## Sessione #ondata-0.3 — 2026-08-23 (D-206, GTD 1b793e87 follow-on, msg loomy 28e9aa98)
+
+**Obiettivo:** Wake cold-start su mandato esplicito di loomy: costruire la terza verifica di tracciabilità, l'asse D-206 (requisito→origine), dopo che la sessione #ondata-0.2 aveva chiuso solo le due gap-check a valle (req→sdes→uat) e segnalato l'asse a monte come fuori mandato.
+**Completato:**
+- Nuovo valore `traceability='req_without_origin'` su `doc_query`, implementato in `docTraceabilityOrigin()` (`src/docs.ts`). Le 4 origini D-206 mappate su bucket distinti (mai fusi): `capitolato` (objective/deliverable/stop_condition), `decision_cross`/`decision_project` (item_type decision, split per project_id del link — stesso principio di D-BM-016), `inspiration_document` (ogni altro item_type — section/prose/etc.). Un legame verso requirement/sdes_entry/uat_case/test_step non conta come origine (catena a valle, esclusa esplicitamente da D-206).
+- **Astensione esplicita**: un legame cross-progetto (`doc_item_xproject_links`) il cui `item_type` non si risolve alla lettura (RLS-invisibile o irraggiungibile) finisce in `abstained_items`/`coverage.abstained`, mai in `items`/`coverage.gap` — la fedeltà ai due requisiti espliciti del mandato di loomy (#1 origine distinta per tipo, #2 "nessuna origine" ≠ "non misurabile").
+- Terza modalità tenuta separata dalle prime due (mai fusa), come richiesto (#3 del mandato).
+- 6 nuovi test in `tests/docs.test.ts` (capitolato, decision cross vs project, inspiration_document, downstream-chain esclusa dal conteggio, astensione su link irrisolvibile, visibility_gap). 210/210 test verdi, `tsc` pulito, build OK.
+- `CLAUDE.md` (riga `doc_query` + tool description in `src/tools.ts`) e `D-BM-017` (decisione locale) aggiornati.
+- v0.21.1 → v0.22.0.
+**Decisioni prese:** D-BM-017 (locale, board-mcp) — vedi doc DECISIONS.
+**Blocchi / note:** Nessuno smoke test live sulla nuova enum in questa sessione — il processo MCP di questa finestra gira ancora sul build precedente (nessun hot-reload, vedi CLAUDE.md "Rollout di un nuovo build"); verificato solo via test suite + tsc + build. Il numero aggregato sui 75 progetti NON è stato ricostruito qui — fuori mandato, giro il contratto a dba (che ha già lo strumentario del censimento di stamattina) perché rilegga la colonna mancante.
+**Prossima sessione:** nessuna prevista — GTD chiuso. A restart di finestra (nuovo processo MCP), smoke test live di `doc_query(traceability='req_without_origin')` su un progetto reale.
