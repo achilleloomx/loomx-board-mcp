@@ -605,7 +605,7 @@ test("wi_checkpoint (error): fails loud on a WI already closed done/failed inste
     const res = await wiCheckpoint(db, { wi_id: "wi-1", tool_use_count: 1 }, ctxOwn);
     assert.equal(res.ok, false);
     if (res.ok) continue;
-    assert.match(res.error, new RegExp(`status=${status}`));
+    assert.match(res.error, new RegExp(`'wi-1'.*status=${status}`));
     // No silent write: in_flight_state must stay untouched.
     assert.equal((store.loomx_work_items[0].in_flight_state as any).tool_uses, 5);
   }

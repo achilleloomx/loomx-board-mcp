@@ -794,7 +794,7 @@ export async function wiCheckpoint(
     // 2026-08-09): the caller believes it is tracking progress on a WI the
     // reconciler already closed underneath it. Fail loud and name the real
     // status instead of writing a checkpoint nobody will read.
-    return { ok: false, error: `WI already closed (status=${row.status}) — checkpoint not recorded. Use wi_status to check your active WI.` };
+    return { ok: false, error: `WI '${row.id}' already closed (status=${row.status}) — checkpoint not recorded. Use wi_status to check your active WI.` };
   }
 
   const state = row.in_flight_state ?? { files_touched: [], tool_uses: 0 };
