@@ -4,6 +4,20 @@
 
 ---
 
+## Sessione #113 — 2026-08-23 (wake ratifica D-201/D-202/D-016 → trascrizione D-BM-012 + model_source su gtd_inbox/gtd_query, GTD `44b33ed3`, WI `07d57534`, v0.20.4)
+
+**Wake cold-start** (msg loomy `e36d0f91`): tre ratifiche e una risposta. D-016 emendata ratificata così com'è (nessuna azione — già in codice, era solo da ratificare). Serie locale con prefisso ratificata e generalizzata a tutta la flotta come **D-202** (le 4 righe cross del progetto restano cross, non si ri-codificano — criterio: "se qualcuno fuori dal progetto deve poterla citare, è cross"). Predicato di "cambiamento sostanziale" ratificato come **D-201**, con l'estensione board-mcp (aggiunta/rimozione riga sempre sostanziale) accolta.
+
+**Trascritta D-201 come decisione locale, per mandato esplicito dello stesso atto** ("board-mcp la trascrive... citando questo codice come atto di ratifica"): **D-BM-012** (prossimo libero dopo D-BM-011), linkata a D-201 (cross, `references`) e al WI di questa sessione. Chiude il punto PM-9 del registro punti aperti.
+
+**Punto collaterale del wake, deciso con it-manager** (msg `827bb62e`, tag CP-3/model-provenance, GTD 08330e32 loro): circa metà dei GTD armati non porta `autopilot_model` esplicito — dalla coda "non ho scelto" e "ho scelto il default" erano indistinguibili. Accettata la proposta di apertura di it-manager (zero scritture aggiuntive): aggiunto **`model_source: "explicit"|"default"|null`** calcolato a lettura in `gtd_inbox`/`gtd_query` (`null` se `autopilot=false`, `"default"` se armato senza `autopilot_model`, `"explicit"` altrimenti) — nessuna colonna nuova, nessun impatto sulle righe esistenti. Documentato in **D-BM-013**. `npx tsc --noEmit` pulito, `npm test` 190/190 verde, versione bumpata a 0.20.4.
+
+**Non risolto, girato a it-manager:** la seconda parte del wake ("guardia sul modello riattivabile" — `LOOMX_MODEL_GUARDS_ENABLED`, gated sul catalogo eval `E2E-MODEL-*` in `loomx_evals`, D-118/D-101 stesso mandato eval-first) non è verificabile da qui — board-mcp non ha un tool di lettura su `loomx_evals` (solo `eval_run_add`, che scrive) per confermare se il seeding richiesto è avvenuto. La ratifica CV-6 citata da it-manager sblocca la misurabilità, non conferma da sola che le righe `E2E-MODEL-*` esistano: rimbalzato a it-manager/dba per la conferma prima di qualunque flip.
+
+**Notifiche:** `board_ack` sul wake + sui messaggi informativi già superati dallo stesso (`b91e171a`, `55062739`). `done`/risposta a it-manager su `827bb62e` con la scelta fatta. `done` a loomy con l'esito D-BM-012/D-BM-013 e il rimbalzo sul guard modello.
+
+---
+
 ## Sessione #112 — 2026-08-23 (fix wi_end arm_gtd_ids senza autopilot_model, GTD `6bbc293b`, WI `6f906f24`, v0.20.3)
 
 **Autopilot dispatch: bug segnalato da loomy (msg `b8eb2e69`, 23/08) — `wi_end(arm_gtd_ids=[...])` settava `autopilot=true` ma lasciava `autopilot_model` a `null`.** Il GTD risultava armato in ogni vista (flag corretto, risposta `ok`) ma non veniva mai dispacciato dal reconciler, che non ha un modello con cui evocarlo — fallimento silenzioso nella direzione peggiore: chi arma crede di aver delegato, il lavoro resta fermo senza errore. Sospettato (non confermato) essere la causa reale del caso 17/08 (`f135aae4`, sicurezza VPS, all'epoca attribuito al re-arm del reconciler).

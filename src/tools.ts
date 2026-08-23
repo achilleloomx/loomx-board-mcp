@@ -967,10 +967,20 @@ export function registerTools(
   // EXCEPT anagrafica (agents/clients/projects) and governance decisions (loomy-only)
   const isBroker = selfSlug === "loomy-assistant";
 
+  // model_source: distinguishes "no model chosen" (falls to class-based default,
+  // D-164, at dispatch) from "model chosen explicitly" on armed items — "not
+  // ready to arm" and "armed with the default" were indistinguishable reading
+  // the queue. Computed at read time, nothing persisted (it-manager coord,
+  // GTD 08330e32; zero-write design proposed by it-manager, accepted as-is).
+  const withModelSource = (row: any) => ({
+    ...row,
+    model_source: row.autopilot ? (row.autopilot_model ? "explicit" : "default") : null,
+  });
+
   // --- gtd_inbox ---
   server.tool(
     "gtd_inbox",
-    "Read GTD items owned by this agent, ordered by priority_rank DESC then deadline ASC. By default omits body and adds body_preview (200 chars) — use gtd_get(id) for full content.",
+    "Read GTD items owned by this agent, ordered by priority_rank DESC then deadline ASC. By default omits body and adds body_preview (200 chars) — use gtd_get(id) for full content. Every row carries model_source ('explicit'|'default', null when autopilot=false): 'default' means autopilot=true with no autopilot_model — it will resolve to the class-based default at dispatch, not that dispatch was skipped.",
     {
       status: GtdStatusSchema.optional().describe(
         "Filter by GTD status (default: all except done/trash)"
@@ -1016,11 +1026,10 @@ export function registerTools(
 
       const omitBody = preview_only !== false;
       const rows = omitBody
-        ? (data ?? []).map(({ body, ...meta }: any) => ({
-            ...meta,
-            body_preview: body ? body.slice(0, 200) : null,
-          }))
-        : (data ?? []);
+        ? (data ?? []).map(({ body, ...meta }: any) =>
+            withModelSource({ ...meta, body_preview: body ? body.slice(0, 200) : null })
+          )
+        : (data ?? []).map(withModelSource);
 
       return {
         content: [
@@ -1381,7 +1390,7 @@ export function registerTools(
   // --- gtd_query ---
   server.tool(
     "gtd_query",
-    `Flexible query for GTD items. ${isLoomy || isBroker ? "Cross-agent read enabled (loomy/broker)." : "Filters to your own items."} By default omits body and adds body_preview (200 chars) — use gtd_get(id) for full content.`,
+    `Flexible query for GTD items. ${isLoomy || isBroker ? "Cross-agent read enabled (loomy/broker)." : "Filters to your own items."} By default omits body and adds body_preview (200 chars) — use gtd_get(id) for full content. Every row carries model_source ('explicit'|'default', null when autopilot=false): 'default' means autopilot=true with no autopilot_model — it will resolve to the class-based default at dispatch, not that dispatch was skipped.`,
     {
       owner: z.string().optional().describe("Filter by owner agent slug"),
       gtd_status: GtdStatusSchema.optional().describe("Filter by GTD status"),
@@ -1459,8 +1468,10 @@ export function registerTools(
 
         const omitBodyP = preview_only !== false;
         const rowsP = omitBodyP
-          ? (data ?? []).map(({ body, ...meta }: any) => ({ ...meta, body_preview: body ? body.slice(0, 200) : null }))
-          : (data ?? []);
+          ? (data ?? []).map(({ body, ...meta }: any) =>
+              withModelSource({ ...meta, body_preview: body ? body.slice(0, 200) : null })
+            )
+          : (data ?? []).map(withModelSource);
 
         return {
           content: [
@@ -1507,8 +1518,10 @@ export function registerTools(
 
       const omitBody = preview_only !== false;
       const rows = omitBody
-        ? (data ?? []).map(({ body, ...meta }: any) => ({ ...meta, body_preview: body ? body.slice(0, 200) : null }))
-        : (data ?? []);
+        ? (data ?? []).map(({ body, ...meta }: any) =>
+            withModelSource({ ...meta, body_preview: body ? body.slice(0, 200) : null })
+          )
+        : (data ?? []).map(withModelSource);
 
       return {
         content: [
