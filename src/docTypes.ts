@@ -217,6 +217,14 @@ export const DOC_ITEM_TYPE_REGISTRY: Record<ItemType, ItemTypeSpec> = {
         steps: { type: "array", items: { type: "string" } },
         expected: { type: "string" },
         pass_fail: { type: "string", enum: ["pass", "fail", "pending"] },
+        // D-201/DEL-008 decay (GTD 1dffa01e, ddb6815c): decay_status is a layer on TOP
+        // of pass_fail, never a rewrite of it — the historical verdict stays true, it is
+        // just no longer trustworthy. Absent = current; only "decayed" is a valid value
+        // written here (doc_decay_apply) — a rerun that supersedes the finding clears it
+        // by omitting the key, never by inventing a third pass_fail value.
+        decay_status: { type: "string", enum: ["decayed"] },
+        decay_since: { type: "string" },      // gov.doc_subscription_staleness.changed_at that caused it
+        decay_cause_item: { type: "string" }, // code of the row whose substantive change triggered it
       },
     },
     example: { project_id: "<uuid>", document_id: "<uuid>", item_type: "uat_case", code: "UAT-001", body: "Send a board message and read it back", attrs: { steps: ["call board_send", "call board_inbox"], expected: "message appears", pass_fail: "pending" } },

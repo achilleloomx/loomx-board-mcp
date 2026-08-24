@@ -10,6 +10,7 @@ import {
 } from "./docTypes.js";
 import { rwGuardsEnabled, modelGuardsEnabled } from "./flags.js";
 import { SUBSCRIBE_INTENTS, SUBSCRIPTION_OUTCOMES, BUMP_CLASSES } from "./subscriptions.js";
+import { STALENESS_STATUS_FILTERS, STALENESS_CLOSE_OUTCOMES } from "./staleness.js";
 
 const TABLE = "board_messages";
 const OVERVIEW_VIEW = "board_overview";
@@ -3750,6 +3751,80 @@ export function registerTools(
     async (args) => {
       const { docPublish } = await import("./subscriptions.js");
       return runDocTool((db) => docPublish(db, args, docCtx));
+    }
+  );
+
+  // =========================================================================
+  // Staleness/decay tools (DEL-008/M2 exposure + D-201 decay ring, GTD
+  // 1dffa01e/ddb6815c/03ffb9f5). Read the detector, close a marking, or apply
+  // the decay it doesn't write back on its own (uat_case subscribers only —
+  // vertical slice, see src/staleness.ts header for the full boundary).
+  // =========================================================================
+
+  const STALE_STATUS_LIST = STALENESS_STATUS_FILTERS.join("|");
+  const STALE_OUTCOME_LIST = STALENESS_CLOSE_OUTCOMES.join("|");
+
+  // --- doc_staleness_query ---
+  server.tool(
+    "doc_staleness_query",
+    `Read the DEL-008/M2 detector for a project: open/closed subscription-staleness markings (a subscribed row was ` +
+      `rewritten AND substantively changed, D-201), frozen-row-touches (a PUBLISHED row rewritten outside publication — ` +
+      `same detector, other side), and the current decay picture (decayed uat_case rows + governance thresholds from ` +
+      `loomx_governance_params: pg_rilancio_soglia_decaduti/pg_rilancio_giorni_max/pg_rilancio_classi_esenti). ` +
+      `status ∈ {${STALE_STATUS_LIST}} (default open). Read-only — never writes. ` +
+      `Example: doc_staleness_query({project_id:"<uuid>"}).`,
+    {
+      project_id: z.string().uuid().describe("Project to scope the query to (subscriber side)"),
+      status: z.enum(STALENESS_STATUS_FILTERS).optional().describe(`Marking status filter: ${STALE_STATUS_LIST} (default open)`),
+      limit: z.number().int().min(1).max(200).optional().describe("Max markings returned (default 50)"),
+    },
+    async (args) => {
+      const { docStalenessQuery } = await import("./staleness.js");
+      return runDocTool((db) => docStalenessQuery(db, args, docCtx));
+    }
+  );
+
+  // --- doc_staleness_close ---
+  server.tool(
+    "doc_staleness_close",
+    `Close an open gov.doc_subscription_staleness marking with a recorded outcome (DEL-008 §4 ask, GTD 03ffb9f5). ` +
+      `closed_outcome ∈ {${STALE_OUTCOME_LIST}}. closed_note is REQUIRED for 'no_impact' (DB floor: ` +
+      `doc_subscription_staleness_no_impact_motivated). A closed marking cannot be reopened (DB trigger rejects it ` +
+      `outright) — re-closing the same marking is a no-op (already_closed:true), never an error. Closing is the ` +
+      `subscriber's own act, on their own project (DEL-008 RLS: doc_subscription_staleness_close_own). ` +
+      `Example: doc_staleness_close({staleness_id:"<uuid>", closed_outcome:"updated"}).`,
+    {
+      staleness_id: z.string().uuid().describe("The gov.doc_subscription_staleness row to close"),
+      closed_outcome: z.enum(STALENESS_CLOSE_OUTCOMES).describe(`Outcome: ${STALE_OUTCOME_LIST}`),
+      closed_note: z.string().optional().describe("Required for no_impact — the motivation"),
+    },
+    async (args) => {
+      const { docStalenessClose } = await import("./staleness.js");
+      return runDocTool((db) => docStalenessClose(db, args, docCtx));
+    }
+  );
+
+  // --- doc_decay_apply ---
+  server.tool(
+    "doc_decay_apply",
+    `The missing ring in "riga cambia → sostanziale → chi sottoscrive è avvisato → [QUI] il collaudo decade" ` +
+      `(GTD 1dffa01e/ddb6815c). For every OPEN staleness marking in project_id whose subscriber is a uat_case with ` +
+      `intent ∈ {critical, module} (informative is FYI-only, never decays anything), writes attrs.decay_status='decayed' ` +
+      `+ decay_since + decay_cause_item onto the subscriber row — a distinct, visible state, layered on top of ` +
+      `attrs.pass_fail, never overwriting it. The marking is left OPEN (closing it is the separate act of whoever ` +
+      `reruns the UAT — use doc_staleness_close). Idempotent: an already-decayed row is reported, not rewritten. ` +
+      `dry_run=true previews without writing. Returns a verdict (decayed_count vs threshold/max_days from ` +
+      `loomx_governance_params) — the exempt-class gate is NOT applied yet (no check-class attribute on uat_case, ` +
+      `declared gap in the response, not invented). Cascade is "by waves" by construction: writing attrs here is ` +
+      `itself a significant-column change, so the same M2 trigger fires again for whoever subscribes to THIS row — ` +
+      `no hand-rolled recursion. Example: doc_decay_apply({project_id:"<uuid>"}).`,
+    {
+      project_id: z.string().uuid().describe("Project to scope the sweep to (subscriber side)"),
+      dry_run: z.boolean().optional().describe("Preview only, no writes (default false)"),
+    },
+    async (args) => {
+      const { docDecayApply } = await import("./staleness.js");
+      return runDocTool((db) => docDecayApply(db, args, docCtx));
     }
   );
 }

@@ -123,6 +123,15 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
       if (op === "update") {
         const matched = apply(store[table]);
         matched.forEach((r) => Object.assign(r, updateData));
+        // Mimics gov.doc_subscription_staleness_guard_update (DEL-008 migration
+        // 20260822090000): the trigger stamps closed_at when status transitions to
+        // 'closed' and the tool didn't set it itself — application code never sets
+        // this column directly (see src/staleness.ts docStalenessClose).
+        if (table === "gov.doc_subscription_staleness") {
+          for (const r of matched) {
+            if (r.status === "closed" && !r.closed_at) r.closed_at = "2026-08-25T00:00:00.000Z";
+          }
+        }
         return finalize(matched);
       }
       if (op === "delete") {

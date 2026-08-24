@@ -98,7 +98,7 @@ loomx-board-mcp/
 
 ## MCP Tools
 
-37 tool base esposti a ogni agente (24 board/gtd/wi/runtime/ping + 9 doc_* document model + 3 subscription tool + 1 `org_lookup`) + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
+41 tool base esposti a ogni agente (24 board/gtd/wi/runtime/ping + 9 doc_* document model + 4 subscription tool + 3 staleness/decay tool + 1 `org_lookup`) + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
 
 ### Board Tools (board_messages)
 
@@ -311,6 +311,18 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 | `doc_publish` | (v0.20.0, SDES-SUB-003) L'atto esplicito di pubblicazione: verifica il changelog (`changelog_entry_id` deve essere `item_type='changelog_entry'` in un documento `document_type='changelog'` dello stesso progetto, con `attrs.version === new_version` — changelog-by-construction), poi chiama `gov.doc_publish(document_id, new_version, bump_class, changelog_entry_id, delta_summary)` — SECURITY DEFINER del dba, **unico writer** che `gov.doc_versions` concederà mai (mai INSERT diretto). Legittimazione: owner del documento o loomy (doppia, anche lato funzione). Ripubblicare la stessa `(document_id, new_version)` è un **rifiuto**, non un no-op. Rilegge ENTRAMBE le superfici (documents.version + riga ledger) prima dell'`ok` (D-132). Errori tipati: `no_data_found`/`invalid_parameter_value`/`unique_violation`/`insufficient_privilege` (dba msg `401811d8`) | CALL gov.doc_publish() → UPDATE documents + INSERT gov.doc_versions |
 
 > **Fix registry collegato (SDES-SUB-005, D-155):** `doc_link` instrada per **confine di progetto reale** (project_id di from/to), non più per etichetta `relation_type` — un link cross-progetto con `relates_to`/`amends`/etc. ora va su `doc_item_xproject_links` invece di fallire con FK error. `'references'` resta sempre cross-project (D-074). `amends` aggiunto a `DB_DOC_ITEM_LINK_TYPES` (ammesso in entrambe le tabelle, misurato col dba).
+
+### Staleness/Decay Tools (gov.doc_subscription_staleness / gov.doc_frozen_row_touches — D-201/DEL-008, v0.23.0)
+
+3 tool sopra il rilevatore M2 del dba (migration `20260822090000`, predicato `gov.doc_item_substantive_diff` = D-201/D8). Girano sotto `doc_rw` (`src/staleness.ts`). Nati dal mandato GTD `ddb6815c`/`1dffa01e`: il rilevatore marca la **sottoscrizione** stale; nulla prima di v0.23.0 scriveva indietro sul **sottoscrittore**.
+
+| Tool | Descrizione | Operazione DB |
+|---|---|---|
+| `doc_staleness_query` | Lettura: marcature `gov.doc_subscription_staleness` (open/closed/all) scoped a un progetto, con codici risolti; `gov.doc_frozen_row_touches` (riscrittura di una riga di un documento **pubblicato** fuori dall'atto di pubblicazione — stesso rilevatore, altro lato — "secondo difetto" del mandato, stesso meccanismo confermato per lettura del codice, non ancora acceso dal vivo); soglie/giorni/classi-esenti da `loomx_governance_params` (`pg_rilancio_soglia_decaduti`/`pg_rilancio_giorni_max`/`pg_rilancio_classi_esenti`, seminati 2026-08-24, owner `board-mcp`); conteggio `uat_case` decaduti nel progetto. Mai una scrittura | SELECT gov.doc_subscription_staleness / gov.doc_frozen_row_touches / loomx_governance_params |
+| `doc_staleness_close` | Chiude una marcatura aperta con un esito registrato (ask esplicito DEL-008, GTD `03ffb9f5`). `closed_outcome∈{updated,no_impact,feedback_sent}`, nota obbligatoria per `no_impact`. Una marcatura chiusa non si riapre (trigger DB) — richiudere la stessa è un no-op (`already_closed`), mai un errore | UPDATE gov.doc_subscription_staleness (colonne closed_*) |
+| `doc_decay_apply` | **L'anello mancante** del mandato: per ogni marcatura aperta con sottoscrittore `uat_case` e intent∈{critical,module} (informative = solo FYI, non decade mai), scrive `attrs.decay_status='decayed'`+`decay_since`+`decay_cause_item` sul collaudo — layer sopra `attrs.pass_fail`, mai una sovrascrittura. La marcatura resta aperta (chiuderla è l'atto separato di chi ri-esegue). Idempotente. `dry_run` per l'anteprima. Verdetto (`decayed_count` vs soglia/giorni) nella risposta; il gate delle **classi esenti** non è applicato — `uat_case` non ha ancora un attributo di classe nello schema (gap dichiarato, non un contratto inventato, D-136 §5). La cascata è "per onde" per costruzione: scrivere `attrs` è di per sé colonna significativa (D-201) — lo stesso trigger M2 rifira da solo per chi sottoscrive la riga appena decaduta, nessuna ricorsione a mano | UPDATE doc_items (attrs) |
+
+> **Verificato dal vivo (non solo per lettura del codice), 2026-08-24/25, progetto board-mcp, coppia reale `SDES-DECAY-001`/`UAT-DECAY-001`:** sottoscrizione critical → riscrittura sostanziale del SDES → marcatura M2 reale rilevata → `doc_decay_apply` porta il UAT a `decayed` preservando `pass_fail` → idempotenza sul rilancio → `doc_staleness_close` chiude, ri-chiudere è no-op. Un bug reale trovato SOLO dal giro dal vivo (mai dai test unitari con fake DB): `node-pg` ritorna `timestamptz` come `Date` e `numeric` come stringa — `decay_since` andava normalizzato a ISO string prima della validazione attrs, altrimenti lo schema JSON lo rifiutava (fix in `toIsoString()`/coercizione numerica, `src/staleness.ts`). **Non ancora verificato dal vivo:** `gov.doc_frozen_row_touches` (richiede un ciclo `doc_publish` reale, non innescato in questa WI) e la propagazione oltre il primo salto (nessun secondo sottoscrittore agganciato al UAT appena decaduto).
 
 ### Tipi di messaggio
 
