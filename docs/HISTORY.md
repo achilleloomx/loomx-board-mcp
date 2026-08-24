@@ -4,6 +4,18 @@
 
 ---
 
+## Sessione #118 — 2026-08-24 (wake fast-track loomy `3effbb10`, catch-up commit sessioni #116/#117, WI `f7a9324c`)
+
+**Wake cold-start** (msg loomy `3effbb10`): autorizzato l'ordine fast-track proposto — (1) dba: storico header `documents_history`+trigger (SDES-DOCM-017), (2) dba: item type `working_doc` con controllo di parità da catalogo (SDES-DOCM-018/014), poi (3) board-mcp: tool `doc_update`/rinomina + le due consegne (elenco funzioni doc_*, indice item type). Verificato prima di agire (enum `document_type` via `doc_create`/`doc_query`, GTD `f89cec32`/`9cbf4e5e`): nessuna delle due consegne dba è ancora atterrata — restano `waiting`, nessuna costruzione possibile ora senza violare REQ-DOCM-017 (audit trail) o ripiegare su `exec_summary` (l'errore che il messaggio stesso segnala di aver evitato).
+
+**Domanda forge inoltrata da loomy, verificata prima di rispondere:** esiste un modo di ritirare un intero progetto? No — né lato board-mcp (`project_list` è dichiaratamente read-only, nessun write path su `loomx_projects`) né un meccanismo equivalente a `doc_supersede` (erede obbligatorio + rifiuto su riferimenti scoperti) a grana progetto. Risposta inviata a loomy: è il risultato atteso di uno scenario di collaudo, non un gap da colmare ora.
+
+**Trovato in stato pendente:** due sessioni precedenti (#116 ISS-001 `doc_supersede`, #117 `is_sandbox`) avevano lavoro completo, testato (211/211) e già documentato in questo file, ma mai committato — probabilmente sessione terminata senza `git commit` prima del `wi_end`/`kill`. Verificato di nuovo (tsc pulito, 211/211 test verdi) e committato in questa sessione, invariato nel contenuto: `43b3019` (fix hook `governance-gate` v1.7, datato 17/08, anch'esso mai committato) e `9df891b` (ISS-001 + `is_sandbox`, v0.22.2).
+
+**Nessuna implementazione nuova in questo WI** (gate su dba, mandato è "aspetta e conferma"). GTD `f89cec32`/`9cbf4e5e` restano `waiting`, invariati.
+
+---
+
 ## Sessione #117 — 2026-08-24 (`is_sandbox` in `project_list`, wake da forge, GTD `4f06c944` broken_refs pianificato, WI `6c21efd4`)
 
 **Cold-wake** da forge (msg `162add27`): dba ha applicato `20260824190000_loomx_projects_sandbox_marker_and_registry.sql` — `loomx_projects.is_sandbox` (NOT NULL DEFAULT false) live, ma `project_list` continuava a restituire `id, name, short_name, status, agent_id`. UAT-PG-009 rosso sul passo 2a per questo.
