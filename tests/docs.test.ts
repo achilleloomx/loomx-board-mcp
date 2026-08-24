@@ -439,6 +439,52 @@ test("doc_supersede: transfers doc_item_links (forward + reverse) and doc_item_g
   assert.equal(gtdOnOld, undefined, "no doc_item_gtd_link left on old item");
 });
 
+test("doc_supersede: the heir supersedes edge is absent while gov.relink_superseded runs (ISS-001 regression, dba msg e0f11a04)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const real = makeDb(store) as any;
+  let sawHeirEdgeDuringRelink: boolean | null = null;
+  // Real gov.relink_superseded (migration 20260816100000) unconditionally rewrites
+  // every doc_item_links row with to_item=old_id to point at new_id instead — with
+  // no relation_type exclusion. If the heir edge (relation_type='supersedes',
+  // from=new, to=old) already exists when it runs, relink tries to turn it into a
+  // self-loop (from=new, to=new), which the real doc_item_links_no_self_link CHECK
+  // (from_item<>to_item) then rejects, aborting the whole doc_supersede transaction.
+  // fakeDb's relinkSuperseded doesn't enforce that CHECK, so this test asserts the
+  // precondition directly instead of relying on the fake to reproduce the crash.
+  const db = {
+    ...real,
+    relinkSuperseded: async (oldItemId: string, newItemId: string) => {
+      sawHeirEdgeDuringRelink = (store.doc_item_links as any[]).some(
+        (l) => l.relation_type === "supersedes" && l.to_item === oldItemId
+      );
+      return real.relinkSuperseded(oldItemId, newItemId);
+    },
+  } as unknown as SupabaseClient;
+
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "sdes", title: "Sdes" }, ctx);
+  const upOld = await docItemUpsert(db, { project_id: PROJ_A, document_id: (doc as any).data.document_id, item_type: "sdes_entry", code: "SDES-030", body: "v1" }, ctx);
+  const oldId = (upOld as any).data.item_id;
+
+  // An incoming "verifies"-style reference on old — the exact shape of ISS-001's
+  // repro (SDES-GOV-116): a row citing old.id is what makes
+  // gov.doc_items_require_successor_on_terminal demand a declared heir at all.
+  const reqDoc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const upTarget = await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-030" }, ctx);
+  await docLink(db, { target_kind: "doc", from_id: (upTarget as any).data.item_id, to_id: oldId, relation_type: "verifies" }, ctx);
+
+  const sup = await docSupersede(db, { old_item_id: oldId, body: "v2" }, ctx);
+  assert.ok(sup.ok, `supersede ok: ${JSON.stringify(sup)}`);
+  assert.equal(sawHeirEdgeDuringRelink, false, "heir edge must not exist while relink runs, or the real DB's self-link CHECK rejects it");
+
+  // And the permanent edge is (re)created afterward, correctly directed.
+  const newId = (sup as any).data.new_item_id;
+  const edge = store.doc_item_links.find((l) => l.relation_type === "supersedes");
+  assert.ok(edge, "permanent supersedes edge exists after relink");
+  assert.equal(edge!.from_item, newId);
+  assert.equal(edge!.to_item, oldId);
+});
+
 test("doc_supersede: fails loud (not ok:true) when gov.relink_superseded fails (D-133 regression of msg 40ef3e30's RLS-gap finding)", async () => {
   const store: Store = {};
   seedProjects(store);

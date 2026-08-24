@@ -1888,21 +1888,26 @@ export function registerTools(
   // --- project_list ---
   server.tool(
     "project_list",
-    "Read-only list of projects (loomx_projects) — id, name, short_name, status, agent_id. Use to discover project_id without the Management API.",
+    "Read-only list of projects (loomx_projects) — id, name, short_name, status, agent_id, is_sandbox. Use to discover project_id without the Management API. Sandbox projects (is_sandbox=true, DEL-003/SDES-009) are excluded by default — pass include_sandbox=true to see them.",
     {
       status: z.string().optional().describe("Filter by status (default: all)"),
       agent_id: z.string().optional().describe("Filter by responsible agent slug"),
       limit: z.number().int().min(1).max(200).optional().describe("Max rows (default: 50)"),
+      include_sandbox: z
+        .boolean()
+        .optional()
+        .describe("Include sandbox projects (is_sandbox=true) in the result (default: false, excluded)"),
     },
-    async ({ status, agent_id, limit }) => {
+    async ({ status, agent_id, limit, include_sandbox }) => {
       const db = getSupabaseClient();
       let query = db
         .from(PROJECTS_TABLE)
-        .select("id, name, short_name, status, agent_id")
+        .select("id, name, short_name, status, agent_id, is_sandbox")
         .order("name")
         .limit(limit ?? 50);
       if (status) query = query.eq("status", status);
       if (agent_id) query = query.eq("agent_id", agent_id);
+      if (!include_sandbox) query = query.eq("is_sandbox", false);
 
       const { data, error } = await query;
       if (error) {

@@ -1201,14 +1201,7 @@ export async function docSupersede(
     if (detachErr) return err(`Failed to detach code from old item: ${detachErr.message}`);
   }
 
-  // Mark old row superseded (immutable after this — trigger blocks body/attrs edits).
-  const { error: supErr } = await db
-    .from(DOC_ITEMS)
-    .update({ status: "superseded", updated_at: nowIso() })
-    .eq("id", old.id);
-  if (supErr) return err(`Failed to mark old item superseded: ${supErr.message}`);
-
-  // Insert the new version.
+  // Insert the new version FIRST (old row is untouched — still its original status).
   const { data: newRow, error: insErr } = await db
     .from(DOC_ITEMS)
     .insert({
@@ -1228,21 +1221,67 @@ export async function docSupersede(
   if (insErr || !newRow) return err(`Failed to insert new version: ${insErr?.message ?? "no row"}`);
   const created = newRow as { id: string; code: string | null };
 
-  // Repoint every link direction (doc_item_links from/to, doc_item_gtd_links,
+  // Heir edge, new --supersedes--> old: needed TWICE, for two different DB-owned
+  // mechanisms that conflict if the same row tries to satisfy both at once.
+  //  (1) gov.doc_items_require_successor_on_terminal (migration 20260822091000) is
+  //      a BEFORE UPDATE OF status trigger on doc_items that rejects the transition
+  //      into a terminal status when the row has incoming references (e.g.
+  //      "verifies") and no declared heir — it looks for this exact edge
+  //      (relation_type='supersedes', to_item=old.id) at the moment of the
+  //      transition. It must therefore exist BEFORE old is marked superseded.
+  //  (2) gov.relink_superseded (migration 20260816100000) unconditionally repoints
+  //      every doc_item_links row with to_item=old.id to new.id, no relation_type
+  //      exclusion — so if the heir edge above is still around when relink runs,
+  //      relink tries to rewrite it into a self-loop (from=new, to=new), which
+  //      doc_item_links_no_self_link (CHECK from_item<>to_item) then rejects,
+  //      aborting the whole transaction.
+  // Resolution: insert a throwaway copy to satisfy (1), delete it right after the
+  // status transition so relink in (2) never sees it, then insert the real,
+  // permanent edge AFTER relink — same spot the original (pre-ISS-001) code used,
+  // which is exactly why relink never used to touch it.
+  const { data: placeholderLink, error: placeholderErr } = await db
+    .from(DOC_ITEM_LINKS)
+    .insert({ from_item: created.id, to_item: old.id, project_id: old.project_id, relation_type: "supersedes" })
+    .select("id")
+    .maybeSingle();
+  if (placeholderErr || !placeholderLink) return err(`New version created (${created.id}) but supersede edge failed: ${placeholderErr?.message ?? "no row"}`);
+  const placeholderId = (placeholderLink as any).id as string;
+
+  // Mark old row superseded (immutable after this — trigger blocks body/attrs edits).
+  // The placeholder heir edge above already exists, so
+  // aa_doc_items_require_successor_on_terminal finds it and lets the transition through.
+  const { error: supErr } = await db
+    .from(DOC_ITEMS)
+    .update({ status: "superseded", updated_at: nowIso() })
+    .eq("id", old.id);
+  if (supErr) return err(`New version created (${created.id}) and supersede edge (${placeholderId}) exist, but marking old item superseded failed: ${supErr.message}`);
+
+  // Remove the placeholder now that its only job (satisfying the trigger above) is
+  // done — it must be gone before relink runs, or relink corrupts it (see (2) above).
+  const { error: placeholderDelErr } = await db.from(DOC_ITEM_LINKS).delete().eq("id", placeholderId);
+  if (placeholderDelErr) {
+    return err(
+      `New version created (${created.id}) and old item marked superseded, but removing the placeholder ` +
+      `supersede edge (${placeholderId}) before relink failed: ${placeholderDelErr.message}. Link transfer ` +
+      `was NOT run to avoid corrupting it — retry not safe; needs manual repair.`
+    );
+  }
+
+  // Repoint every OTHER link direction (doc_item_links from/to, doc_item_gtd_links,
   // doc_item_wi_links, doc_item_xproject_links from/to) atomically via
   // gov.relink_superseded (D-133, dba msg 2b4acbcc, migration 20260816100000).
   // SECURITY DEFINER — bypasses the RLS gap where doc_rw has no UPDATE policy on
   // these tables (a direct .update() used to silently affect 0 rows, no error).
-  // MUST run after old is marked superseded and new is inserted: the function
-  // REJECTS (23514) unless old.status='superseded' — the "occasion" constraint
-  // (a repoint outside a supersede has no meaning, loomy-decided).
+  // MUST run after old is marked superseded: the function REJECTS (23514) unless
+  // old.status='superseded' — the "occasion" constraint (a repoint outside a
+  // supersede has no meaning, loomy-decided).
   const relinkDb = db as unknown as {
     __docRw?: boolean;
     relinkSuperseded?: (oldItemId: string, newItemId: string) => Promise<number>;
   };
   if (!relinkDb.__docRw || !relinkDb.relinkSuperseded) {
     return err(
-      `New version created (${created.id}) but link transfer could not run: db is not a DocRwDb. ` +
+      `New version created (${created.id}) and marked superseded but link transfer could not run: db is not a DocRwDb. ` +
       `gov.relink_superseded lives in the gov schema and is only reachable via the doc_rw direct-pg ` +
       `path (runDocRw) — route doc_supersede through it. Test fakes must implement relinkSuperseded.`
     );
@@ -1252,16 +1291,22 @@ export async function docSupersede(
     relinkedRows = await relinkDb.relinkSuperseded(old.id, created.id);
   } catch (ex) {
     const msg = ex instanceof Error ? ex.message : String(ex);
-    return err(`New version created (${created.id}) but link transfer (gov.relink_superseded) failed: ${msg}`);
+    return err(`New version created (${created.id}) and marked superseded but link transfer (gov.relink_superseded) failed: ${msg}`);
   }
 
-  // Edge: new --supersedes--> old (same project → FK satisfied).
+  // Insert the permanent heir edge now — after relink, so relink never sees (and
+  // can't corrupt) it. This is the edge doc_item_chain walks (§6bis warning).
   const { data: linkRow, error: linkErr } = await db
     .from(DOC_ITEM_LINKS)
     .insert({ from_item: created.id, to_item: old.id, project_id: old.project_id, relation_type: "supersedes" })
     .select("id")
     .maybeSingle();
-  if (linkErr || !linkRow) return err(`New version created (${created.id}) but supersede edge failed: ${linkErr?.message ?? "no row"}`);
+  if (linkErr || !linkRow) {
+    return err(
+      `New version created (${created.id}) and marked superseded, link transfer ran (${relinkedRows} rows), ` +
+      `but re-creating the permanent supersede edge failed: ${linkErr?.message ?? "no row"}`
+    );
+  }
 
   return { ok: true, data: { new_item_id: created.id, old_item_id: old.id, link_id: (linkRow as any).id, code: created.code, relinked_rows: relinkedRows } };
 }

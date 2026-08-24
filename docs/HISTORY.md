@@ -4,6 +4,47 @@
 
 ---
 
+## Sessione #117 — 2026-08-24 (`is_sandbox` in `project_list`, wake da forge, GTD `4f06c944` broken_refs pianificato, WI `6c21efd4`)
+
+**Cold-wake** da forge (msg `162add27`): dba ha applicato `20260824190000_loomx_projects_sandbox_marker_and_registry.sql` — `loomx_projects.is_sandbox` (NOT NULL DEFAULT false) live, ma `project_list` continuava a restituire `id, name, short_name, status, agent_id`. UAT-PG-009 rosso sul passo 2a per questo.
+
+**Fix (`src/tools.ts`, v0.22.2):** `project_list` seleziona ora anche `is_sandbox` ed esclude `is_sandbox=true` per difetto — nuovo param `include_sandbox=true` per vederli. Verso deliberato (come chiesto): l'esclusione è ciò che accade se non chiedi niente, non il contrario. Schema confermato leggendo direttamente la migrazione DBA (non dedotto) — grant SELECT a `loomx_agent` già presente, nessun gap di permessi. Build + 211 test verdi.
+
+**Seconda richiesta nello stesso messaggio, non implementata qui:** forge misurando UAT-PG-008 non riesce a verificare "nessun riferimento rotto" — query dirette su `doc_item_links`/`doc_item_xproject_links` col proprio ruolo nativo falliscono `permission denied`, e `doc_query(summary=true)` espone `doc_out`/`doc_in` solo come conteggi (un link rotto conta come uno sano). Propone `doc_query(traceability='broken_refs')` con la stessa tripartizione gap/abstained/covered di `req_without_origin` (D-206, sessione precedente) — concordo, permission-denied è sul ruolo nativo forge, non su `doc_rw` (già usato dai doc_*, già grantato). Parcheggiato come GTD `4f06c944`, non armato: da concordare forma esatta con forge/dba come fatto per D-206 prima di committare.
+
+---
+
+## Sessione #116 — 2026-08-23 (ISS-001 `doc_supersede` su item con incoming refs "verifies", GTD `53306955`, WI `88c0c0e1`)
+
+**Autopilot dispatch** su blocker dba (msg `e0f11a04`): `doc_supersede` falliva su item con riferimenti in entrata (es. `verifies`), riprodotto su SDES-GOV-116, bloccava PM-8 già ratificato da loomy.
+
+**Causa reale (letta dalle migrazioni DBA, non dedotta):** `gov.doc_items_require_successor_on_terminal` (migration `20260822091000`) è un trigger `BEFORE UPDATE OF status` su `doc_items` che rifiuta la transizione a `superseded` se la riga ha riferimenti in entrata e nessun erede dichiarato — cerca l'edge `doc_item_links(relation_type='supersedes', to_item=old.id)` **al momento della transizione**. `docSupersede` marcava `old` superseded PRIMA di creare quell'edge (arrivava per ultimo, dopo `gov.relink_superseded`) → la riga trigger non trovava mai l'erede in tempo.
+
+**Riordino non banale — secondo vincolo scoperto durante il fix:** creare l'edge erede PRIMA della transizione di stato risolve (1), ma `gov.relink_superseded` (migration `20260816100000`) ri-punta INCONDIZIONATAMENTE ogni riga `doc_item_links` con `to_item=old.id` verso `new.id`, senza esclusione per `relation_type` — se l'edge erede esiste già quando gira, lo riscrive in un self-loop (`from=new, to=new`), che il vincolo reale `doc_item_links_no_self_link` (CHECK `from_item<>to_item`) rifiuta, abortendo l'intera transazione. Risolto senza toccare lo schema (D-005, fuori competenza board-mcp): edge "usa e getta" creato per soddisfare il trigger, cancellato subito dopo la transizione di stato (prima che `relink` giri), edge permanente reinserito DOPO `relink` — nello stesso punto in cui il codice originale lo creava, che è esattamente perché prima funzionava per item senza riferimenti in entrata.
+
+**Bug collaterale segnalato, non risolto in questo WI (fuori scope ISS-001, stesso meccanismo):** `gov.relink_superseded` ri-punta anche gli edge `supersedes` PREESISTENTI (es. `old` che a sua volta è successore di un item ancora più vecchio) — ri-supersedendo una riga che è già un "new" di un supersede precedente, la catena storica si corrompe silenziosamente (`from_item` dell'edge più vecchio viene spostato sul nuovo `new`). Riproducibile indipendentemente dal fix di oggi. Proposta inviata a dba: escludere `relation_type='supersedes'` da entrambe le direzioni del repoint in `gov.relink_superseded` — risolverebbe anche il vincolo (2) sopra, semplificando il workaround lato board-mcp.
+
+**Verificato:** 1 nuovo test di regressione in `tests/docs.test.ts` (asserisce che l'edge erede è assente mentre `relinkSuperseded` gira, riproducendo lo scenario "verifies" di SDES-GOV-116) — 211/211 test verdi, `tsc` pulito. Non testabile end-to-end contro Supabase reale da questa sessione (nessun accesso diretto); la conferma sulla vera istanza resta a dba.
+
+---
+
+## Sessione #115 — 2026-08-23 (wake CV-8 → inventario tool-elenchi silenziosi, GTD `28879527`, WI `7f816e0d`)
+
+**Wake cold-start** (msg loomy `dfcab20c`, tag CV-8/D-203/troncamento): rilievo (mio, di un audit precedente) registrato come cantiere titolare board-mcp — «ogni strumento che restituisce un elenco dichiara se ha troncato, oppure è scritto quali non lo fanno». Chiesta la lista vera misurata sul codice (non ricordata), la partizione costo-basso/costo-alto per aggiungere il segnale, e una forma unica se ce n'è una. Esplicitamente NON richiesta la paginazione completa né un piano di implementazione.
+
+**Misurato (grep + lettura diretta, non da memoria) su tutti i `server.tool(...)` di `src/tools.ts`, `src/wi.ts`, `src/docs.ts`, `src/humanTools.ts`:**
+- **10 tool con `.limit()` e nessun segnale di troncamento** (superficie agente): `board_inbox`, `board_overview`, `gtd_inbox`, `gtd_query` (due rami), `gtd_overview`, `project_list`, `home_grocery_list`, `home_school_menu_read`, `wi_query`, `doc_query` (mode items/summary).
+- **2 in più identici sulla superficie human/remote** (`src/humanTools.ts`, montata da `src/remote.ts`, fuori dal tool-set agente che CLAUDE.md documenta): `loomy_replies`, `decisions_inbox`.
+- **8 tool esenti per costruzione** (nessun `.limit()`, cardinalità piccola per il dominio): `board_thread`, `gtd_list_agents`, `org_lookup`, `runtime_status`, `home_grocery_categories`, `home_menu_read`, `doc_item_types`. `doc_item_chain` è il caso già a posto — fallisce esplicitamente oltre `max_hops` invece di troncare in silenzio, seconda forma di chiusura valida per CV-8.
+
+**Scoperta collaterale non richiesta, segnalata come la riga più urgente del report:** `wi_query` (`src/wi.ts:776`) e `doc_query` (`src/docs.ts:1394,1397`) rispondono con un campo `count` che è `rows.length` (dimensione pagina), non il totale reale — simula completezza invece di tacere. Non rinominato di iniziativa (cambio firma tool = notificare Loomy prima, D-005); solo segnalato.
+
+**Partizione:** costo basso e identico per tutti e 12 i tool del gruppo A — stessa query con un solo `.limit(N)`; fix meccanico `.limit(N+1)` + slice + `truncated:true` solo se vero, zero query aggiuntive. **Forma unica proposta: non nuova** — riuso as-is del contratto già vivo in `src/pendingInbox.ts` (D-205): `truncated?: boolean`, presente solo se true, mai un finto false.
+
+**Nessuna implementazione in questo WI** (misura + partizione + proposta, per mandato esplicito del wake). Report inviato a loomy (`done`, msg `2190b6ae`, ref `dfcab20c`). Aperto GTD follow-on pianificato **non armato** (`81ab75f8`, linkato al progetto board-mcp) per applicare `truncated` sui 12 tool una volta confermata la forma, e per decidere come trattare il campo `count` mislabeled.
+
+---
+
 ## Sessione #114 — 2026-08-23 (wake D-205 ratificato → `pending_inbox` su wi_end + gtd_complete, GTD `905513ab`, WI `1af7c9fe`, v0.21.0)
 
 **Wake cold-start** (msg it-manager `c67996a7`, tag CP-7): D-205 ratificata da loomy (msg `17051c14`), requisito e design atterrati nel progetto `85d81454-5b38-40bb-b8c6-9d5188ef1a34` — REQ-GOV-151..154, SDES-GOV-156-157. Via libera esplicita: «procedi tu sul codice, io sul piano di controllo — non serve passare da me per il come». Sbloccato il GTD `905513ab`, che era in `waiting` proprio su questo atto.
