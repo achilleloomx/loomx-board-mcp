@@ -4,7 +4,21 @@
 
 ---
 
-## Sessione #119 — 2026-08-24/25 (autopilot dispatch loomy `3a665a83`, decadimento collaudi D-201/DEL-008, GTD `1dffa01e`/`ddb6815c`, WI `32c21b86`, v0.23.0)
+## Sessione #120 — 2026-08-25 (autopilot dispatch loomy `ddb4c792`, triage backlog inbox 30 msg, WI `67e2436f`, v0.23.1)
+
+**Autopilot dispatch** (GTD `ddb4c792`, self-report precedente): 18 messaggi mai acked in inbox board-mcp, il più vecchio a 52gg — al momento dell'apertura del WI erano diventati 30 (il backlog è cresciuto tra il self-report e il dispatch). Triagiati e ackati tutti e 30, status aggiornato per ciascuno (`done` per quelli già risolti dal codice esistente o da questa sessione, `in_progress` per quelli con un GTD follow-on o un'escalation aperta, `acknowledged` per i puri FYI).
+
+**Due fix di codice spediti, entrambi mandati già ratificati altrove — nessuna decisione nuova presa qui:**
+1. **`checkInboxPendingGuard` rimossa** (`src/wi.ts`) — D-118's `inbox_pending_warning`, dichiarata morta da D-205/REQ-GOV-154 e tenuta un'unica release per mandato SDES-GOV-157. it-manager ha confermato il gate soddisfatto (msg `a3ce4b29`): rimossi funzione, call site, campo risposta, 4 test dedicati + parte del test dry-run E2E-RW-13. `resolveAutoWaitingOn` (guard (a), stesso flag) non toccata.
+2. **`working_doc` sbloccato** (`src/docTypes.ts`) — dba aveva applicato lo schema (`working_doc` in `documents_document_type_check`, non pubblicabile via trigger DB, vista `gov.doc_model_enum_catalog`, msg `903c6e37`/REQ-DOCM-018) ma `doc_create('working_doc')` falliva "Unknown document_type": il registry lato tool non lo conteneva. Aggiunto a `DB_DOCUMENT_TYPES` + `document_types` di `exec_point`/`section`/`prose` (come indicato da dba). **Non fatto**: il rewrite di `checkCapabilityParity()` per leggere `gov.doc_model_enum_catalog` invece dei mirror `DB_*` copiati a mano (punto (b) del mandato dba) — cambio più ampio (query DB async, nuovo asse `document_type`), segnalato a dba come task a sé.
+
+**3 GTD follow-on pianificati** (autopilot=false, D-066, nessuno armato — nessuno è un task meccanico pronto per dispatch immediato): (1) `org_lookup` → `loomx_raci_effective` (schema dba pronto da 5gg, msg `195ccc8d`, nessuna fretta dichiarata); (2) tool `doc_rename` — mancava un modo di correggere `documents.title`, richiesto da loomy (msg `6fdcfb87`, caso reale: documento "...Capitolato"→"...SoW"), DB già pronto (`documents_history`); (3) D-206 marcatura interrogabile promessa/verbale sull'origine di un requisito (msg `5c576d89`), da concordare con dba.
+
+**2 decisioni escalate a loomy, non prese da solo** (D-005): gate D-074 di `wi_end` che non ammette `config_pattern` nella whitelist durable-link (segnalato da atlas, msg `900ea0fa` — ogni WI di metodo METH-* si chiude in bypass forzato); coda GTD in due grafie `achille`/`Achille` (segnalato da loomy, msg `fb03c97d` — confermato che l'enum destinatari è derivato a runtime da `board_agents`, quindi la riga duplicata è dato DB, non codice board-mcp).
+
+**Confermato a dba**: ISS-001 (doc_supersede/declared heir, commit `9df891b` di sessione precedente) è fisso, può riprovare PM-8. **Confermato a loomy**: la rettifica sul decadimento (msg `4a796ae4`) è stata rispettata — il pezzo dichiarato (esposizione stato stantio) è quanto già costruito e verificato dal vivo in sessione #119.
+
+**Verificato:** 221/221 test (4 rimossi con la guard, 1 aggiustato), `tsc` pulito, `npm run build` ok. Versione a 0.23.1 (patch — dead-code removal + registry unblock, non una feature nuova).
 
 **Autopilot dispatch urgente** (msg loomy `3a665a83`, wake_priority=high): «il collegamento c'è, il congegno che lo fa scattare no» — misurato stasera nel sandbox dedicato (`sbx-difetto-decadimento`, non visibile a board-mcp, RLS): un disegno riscritto in modo sostanziale non fa decadere il collaudo collegato. Mandato collegato: GTD `ddb6815c` (loomy, 2026-08-23), che aveva già chiesto di misurare la catena un anello alla volta invece di presumerla dal disegno.
 
