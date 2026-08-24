@@ -122,58 +122,10 @@ interface BoardMsgRow {
   created_at: string;
 }
 
-// SUPERSEDED — D-205 (REQ-GOV-154, ratified msg 17051c14). This guard is dead,
-// not merely switched off: pending_inbox (src/pendingInbox.ts) replaces it on
-// every close path, unflagged and without the warning framing. It is left in
-// place for exactly one release because SDES-GOV-157 forbids bundling the
-// removal with the commit that makes pending_inbox live; deleting it is a
-// separate follow-up. Do not build on it, and do not switch off
-// resolveAutoWaitingOn (guard (a)) alongside it — that one shares the flag but
-// does a different job, and killing it by adjacency is the mistake D-205 corrects.
-//
-// (a+) At wi_end, warn (never block) if the WI owner has actionable
-// (task/question/blocker) pending messages sitting in their board inbox —
-// the class of bug behind the 2026-08-10 it-manager/board-mcp deadlock: two
-// crossed messages, neither side declared a wait, nobody woke up. This is
-// the one guard that would have caught exactly that case: at close time the
-// agent is still alive and gets to decide with the information in front of it.
-async function checkInboxPendingGuard(
-  db: SupabaseClient,
-  ctx: WiContext,
-  ownerSlug: string,
-  now: string
-): Promise<string | undefined> {
-  if (!ctx.slugToCode || !ctx.codeToSlug) return undefined;
-  const ownerCode = ctx.slugToCode.get(ownerSlug);
-  if (!ownerCode) return undefined;
-
-  const { data } = await db
-    .from(BOARD_MESSAGES_TABLE)
-    .select("id, from_agent, to_agent, type, subject, status, created_at")
-    .eq("to_agent", ownerCode)
-    .eq("status", "pending");
-
-  const rows = (Array.isArray(data) ? data : []) as BoardMsgRow[];
-  const actionable = rows
-    .filter((m) => ACTIONABLE_INBOX_TYPES.has(m.type))
-    .sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0));
-
-  if (actionable.length === 0) return undefined;
-
-  const oldest = actionable[0];
-  const fromSlug = ctx.codeToSlug.get(oldest.from_agent) ?? oldest.from_agent;
-  const ageMin = Math.max(0, Math.round((Date.parse(now) - Date.parse(oldest.created_at)) / 60000));
-  const plural = actionable.length > 1 ? `${actionable.length} pending actionable messages` : "1 pending actionable message";
-  const msg =
-    `${plural} in inbox — oldest: "${oldest.subject ?? "(no subject)"}" (${oldest.type}) from ${fromSlug}, ${ageMin}m ago. ` +
-    `Process it (board_get/board_ack) or declare waiting before closing (D-118 a+).`;
-
-  if (!rwGuardsEnabled()) {
-    process.stderr.write(`[wi_end][dry-run] would-warn (inbox-pending, D-118): ${msg}\n`);
-    return undefined;
-  }
-  return msg;
-}
+// D-118 (a+) guard-inbox-pending (checkInboxPendingGuard) removed (SDES-GOV-157,
+// it-manager gate confirmation msg a3ce4b29): pending_inbox (src/pendingInbox.ts,
+// D-205) fully superseded it on every close path. resolveAutoWaitingOn (guard (a)
+// below) is a different job on the same flag and was not touched by this removal.
 
 export interface AutoWaitingOnResult {
   waiting_on?: string;
@@ -438,10 +390,9 @@ export interface WiEndData {
   // D-205 (REQ-GOV-151/152/153): what is still waiting for the closing agent —
   // informational, feeds the continue/clear/kill choice. See computePendingInbox.
   pending_inbox?: PendingInboxInfo;
-  // D-118 reply-wake structural guards (see resolveAutoWaitingOn / checkInboxPendingGuard):
-  // NOTE: inbox_pending_warning is SUPERSEDED by pending_inbox (D-205, REQ-GOV-154).
-  // Kept for one release; removed with checkInboxPendingGuard in a follow-up commit.
-  inbox_pending_warning?: string;              // (a+) actionable messages left unprocessed in inbox
+  // D-118 (a) reply-wake structural guard (see resolveAutoWaitingOn). Sibling
+  // guard (a+, checkInboxPendingGuard/inbox_pending_warning) removed
+  // (SDES-GOV-157) — fully superseded by pending_inbox (D-205).
   waiting_on_auto_set?: { waiting_on: string; block_scope: string }; // (a) auto-detected blocker
   waiting_on_warning?: string;                 // (a) ambiguous — caller must declare manually
 }
@@ -694,9 +645,6 @@ export async function wiEnd(
     if (!rr.ok) runtimeRequestWarning = `runtime_request not posted: ${rr.error}`;
   }
 
-  // D-118 (a+): guard-inbox-pending — informational only, never blocks close.
-  const inboxPendingWarning = await checkInboxPendingGuard(db, ctx, row.agent_slug, now);
-
   return {
     ok: true,
     data: {
@@ -709,7 +657,6 @@ export async function wiEnd(
       ...(args.platform_contribution ? { platform_contribution_pending: args.platform_contribution } : {}),
       ...(runtimeRequestWarning ? { runtime_request_warning: runtimeRequestWarning } : {}),
       ...(pendingInbox ? { pending_inbox: pendingInbox } : {}),
-      ...(inboxPendingWarning ? { inbox_pending_warning: inboxPendingWarning } : {}),
       ...(waitingOnAutoSet ? { waiting_on_auto_set: waitingOnAutoSet } : {}),
       ...(waitingOnWarning ? { waiting_on_warning: waitingOnWarning } : {}),
     },

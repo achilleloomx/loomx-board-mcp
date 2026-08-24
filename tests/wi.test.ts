@@ -1129,86 +1129,9 @@ async function withRwGuardsEnabled<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-test("D-118 (a+, E2E-RW-06): wi_end warns when WI owner has a pending actionable message in inbox", async () => {
-  await withRwGuardsEnabled(async () => {
-    const store: Store = {
-      loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
-      loomx_work_items: [
-        { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-10T08:00:00Z" },
-      ],
-      board_messages: [
-        { id: "m1", from_agent: "045", to_agent: "010", type: "task", subject: "process the queue", status: "pending", created_at: "2026-08-10T09:00:00Z" },
-      ],
-    };
-    const db = makeDb(store);
-    const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxRw);
-    assert.equal(res.ok, true);
-    if (!res.ok) return;
-    assert.match(res.data.inbox_pending_warning ?? "", /process the queue/);
-    assert.match(res.data.inbox_pending_warning ?? "", /it-manager/);
-  });
-});
-
-test("D-118 (a+, E2E-RW-06): no pending actionable messages -> no warning (no false positive)", async () => {
-  await withRwGuardsEnabled(async () => {
-    const store: Store = {
-      loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
-      loomx_work_items: [
-        { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-10T08:00:00Z" },
-      ],
-      board_messages: [],
-    };
-    const db = makeDb(store);
-    const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxRw);
-    assert.equal(res.ok, true);
-    if (!res.ok) return;
-    assert.equal(res.data.inbox_pending_warning, undefined);
-  });
-});
-
-test("D-118 (a+, E2E-RW-06): done/info/ack'd/other-recipient messages don't trigger the guard", async () => {
-  await withRwGuardsEnabled(async () => {
-    const store: Store = {
-      loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
-      loomx_work_items: [
-        { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-10T08:00:00Z" },
-      ],
-      board_messages: [
-        { id: "m1", from_agent: "045", to_agent: "010", type: "info", subject: "fyi", status: "pending", created_at: "2026-08-10T09:00:00Z" },
-        { id: "m2", from_agent: "045", to_agent: "010", type: "task", subject: "already acked", status: "acknowledged", created_at: "2026-08-10T09:00:00Z" },
-        { id: "m3", from_agent: "045", to_agent: "002", type: "task", subject: "not mine", status: "pending", created_at: "2026-08-10T09:00:00Z" },
-      ],
-    };
-    const db = makeDb(store);
-    const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxRw);
-    assert.equal(res.ok, true);
-    if (!res.ok) return;
-    assert.equal(res.data.inbox_pending_warning, undefined);
-  });
-});
-
-test("D-118 (a+, E2E-RW-07): crossed messages with no ref_id still trigger the guard (the 2026-08-10 deadlock class)", async () => {
-  await withRwGuardsEnabled(async () => {
-    // Both sides sent a fresh task within a minute of each other, neither is a
-    // reply (ref_id null on both) — exactly the deadlock precondition. Whoever
-    // closes their WI afterwards must see the other's message sitting pending.
-    const store: Store = {
-      loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
-      loomx_work_items: [
-        { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-10T07:50:00Z" },
-      ],
-      board_messages: [
-        { id: "m1", from_agent: "010", to_agent: "045", type: "task", subject: "A->B", status: "pending", created_at: "2026-08-10T07:50:27Z", ref_id: null },
-        { id: "m2", from_agent: "045", to_agent: "010", type: "task", subject: "B->A", status: "pending", created_at: "2026-08-10T07:51:39Z", ref_id: null },
-      ],
-    };
-    const db = makeDb(store);
-    const res = await wiEnd(db, { wi_id: "wi-1", status: "waiting" }, ctxRw);
-    assert.equal(res.ok, true);
-    if (!res.ok) return;
-    assert.match(res.data.inbox_pending_warning ?? "", /B->A/);
-  });
-});
+// D-118 (a+, checkInboxPendingGuard / inbox_pending_warning) removed
+// (SDES-GOV-157, it-manager gate confirmation msg a3ce4b29) — fully superseded
+// by D-205's pending_inbox. Former E2E-RW-06/07 coverage lived here.
 
 test("D-118 (a, E2E-RW-05): auto-sets waiting_on+block_scope='reply-wake' on wi_end(waiting) for an unanswered outbound question", async () => {
   await withRwGuardsEnabled(async () => {
@@ -1296,7 +1219,7 @@ test("D-118 (a): tied unanswered outbounds -> warning instead of a guessed auto-
   });
 });
 
-test("D-118 (E2E-RW-13, dry-run): flag OFF computes but never touches response or DB, logs would-warn/would-set", async () => {
+test("D-118 (E2E-RW-13, dry-run): flag OFF computes but never touches response or DB, logs would-set", async () => {
   // LOOMX_RW_GUARDS_ENABLED intentionally left unset (default OFF).
   delete process.env.LOOMX_RW_GUARDS_ENABLED;
   const store: Store = {
@@ -1305,7 +1228,6 @@ test("D-118 (E2E-RW-13, dry-run): flag OFF computes but never touches response o
       { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-10T08:00:00Z" },
     ],
     board_messages: [
-      { id: "m1", from_agent: "045", to_agent: "010", type: "task", subject: "process me", status: "pending", created_at: "2026-08-10T09:00:00Z" },
       { id: "q1", from_agent: "010", to_agent: "045", type: "question", status: "pending", created_at: "2026-08-10T08:05:00Z", ref_id: null },
     ],
   };
@@ -1315,14 +1237,12 @@ test("D-118 (E2E-RW-13, dry-run): flag OFF computes but never touches response o
   assert.equal(res.ok, true);
   if (!res.ok) return;
   // No side-effect on the response...
-  assert.equal(res.data.inbox_pending_warning, undefined);
   assert.equal(res.data.waiting_on_auto_set, undefined);
   assert.equal(res.data.waiting_on_warning, undefined);
   // ...nor on the DB.
   assert.equal(store.loomx_items[0].waiting_on, null);
   assert.equal(store.loomx_items[0].block_scope, undefined);
-  // ...but both guards still ran and logged what they would have done.
-  assert.ok(logs.some((l) => l.includes("[wi_end][dry-run] would-warn") && l.includes("process me")));
+  // ...but the guard still ran and logged what it would have done.
   assert.ok(logs.some((l) => l.includes("[wi_end][dry-run] would-set") && l.includes("waiting_on=it-manager")));
 });
 

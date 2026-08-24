@@ -20,6 +20,7 @@ export const DB_DOCUMENT_TYPES = [
   "release_notes", "changelog", "test_scenario",
   "editorial_calendar", "blog_post",
   "config_pattern",      // D-070 onda-3
+  "working_doc",         // REQ-DOCM-018 (dba msg 903c6e37): never publishable, enforced DB-floor
 ] as const;
 
 export const DB_DOCUMENT_STATUSES = [
@@ -270,7 +271,7 @@ export const DOC_ITEM_TYPE_REGISTRY: Record<ItemType, ItemTypeSpec> = {
   // ---- exec_summary ----
   exec_point: {
     item_type: "exec_point",
-    document_types: ["exec_summary"],
+    document_types: ["exec_summary", "working_doc"],
     statuses: ["draft", "active", "archived"],
     default_status: "draft",
     attrs_schema: { type: "object", properties: { highlight: { type: "boolean" } } },
@@ -363,7 +364,7 @@ export const DOC_ITEM_TYPE_REGISTRY: Record<ItemType, ItemTypeSpec> = {
   // ---- generic (blog_post, prose) ----
   section: {
     item_type: "section",
-    document_types: ["blog_post", "sow", "exec_summary"],
+    document_types: ["blog_post", "sow", "exec_summary", "working_doc"],
     statuses: S_GENERIC,
     default_status: "draft",
     attrs_schema: { type: "object", properties: { heading: { type: "string" } } },
@@ -372,7 +373,7 @@ export const DOC_ITEM_TYPE_REGISTRY: Record<ItemType, ItemTypeSpec> = {
   },
   prose: {
     item_type: "prose",
-    document_types: ["blog_post", "exec_summary", "sow"],
+    document_types: ["blog_post", "exec_summary", "sow", "working_doc"],
     statuses: S_GENERIC,
     default_status: "draft",
     attrs_schema: { type: "object", properties: {} },
