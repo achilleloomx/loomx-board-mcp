@@ -76,6 +76,17 @@
 #     mancava la capacita' di giudicarli. Fix: jq assente -> BLOCK immediato in
 #     sezione 0 (stesso principio v1.5); solo un payload vuoto/non ispezionabile
 #     con jq presente resta permissive.
+# v1.7 (2026-08-17, fix testo GTD 4f05821c / board msg b4ff5966, it-manager):
+#   il messaggio di BLOCK sul ramo done/failed attribuiva SEMPRE la causa alla
+#   skill session-manager v2 ("la cache non e' stata aggiornata correttamente
+#   dalla skill session-manager v2") anche quando l'agente chiamava i tool
+#   wi_* direttamente (nessuna skill in gioco) — diagnosi fuorviante, stessa
+#   famiglia dell'errore "document not found, crealo" girato a board-mcp lo
+#   stesso giorno. Root cause vera (fixata separatamente in loomx-board-mcp
+#   src/wiCache.ts): syncWiCache mirrava il WI piu' recente per started_at,
+#   non quello effettivamente active — un wi_resume su un WI piu' vecchio di
+#   un WI gia' chiuso restava scavalcato dal chiuso. Testo ora generico
+#   (rimanda a wi-status/wi-resume/wi-switch), niente colpa pre-assegnata.
 #
 # Spec: hub/initiatives/governance-compliance/design.md sezione 6
 #
@@ -83,7 +94,9 @@
 # - Implementazione minimale-ma-funzionale (no parsing YAML complesso, no dipendenze esterne oltre jq)
 # - Richiede jq installato (gia presente in ambiente Windows/Git Bash standard LoomX)
 # - Politica: legge SOLO la cache locale (no round-trip DB per latency)
-# - La skill session-manager v2 scrive la cache a wi-start / wi-end / wi-checkpoint
+# - La cache e' scritta da board-mcp (src/wiCache.ts) su ogni wi_start/wi_end/
+#   wi_pause/wi_resume/wi_checkpoint/wi_link_template/wi_switch, indipendentemente
+#   da quale skill (se alcuna) ha chiamato il tool.
 
 set -euo pipefail
 
@@ -323,9 +336,19 @@ EOF
 
 Work Item corrente e gia chiuso (status=$WI_STATUS).
 
-La cache non e stata aggiornata correttamente dalla skill session-manager v2.
-Apri un nuovo WI con:
+La cache locale (.claude/cache/current-work-item.json) non riflette lo stato
+reale in DB. Verifica con:
+  wi-status
+
+Se in DB risulta un WI diverso attivo o in pausa, riallinea con:
+  wi-resume <id>      # se paused
+  wi-switch <id> ...   # per riallineare la cache al volo
+
+Altrimenti apri un nuovo WI con:
   wi-start --new --intent "..."
+
+Se wi-status mostra un WI 'active' MENTRE questo messaggio appare (cache e DB
+in disaccordo), e' un falso positivo noto (GTD 4f05821c) — segnala a it-manager.
 EOF
     fi
     exit 2
@@ -427,12 +450,19 @@ GENERATED_WARN
 fi
 
 # ------------------------------------------------------------------------------
-# 6. Append a in_flight_state.files_touched (best-effort)
+# 6. Increment in_flight_state.tool_uses (best-effort)
 # ------------------------------------------------------------------------------
-# L'hook non conosce il path del file che sta per essere scritto (Claude Code
-# non lo passa in $* per ora). La skill session-manager v2 popola questo campo
-# in Mode 3 (Checkpoint) leggendo la conversazione. Qui incrementiamo solo
-# tool_uses counter come euristica per checkpoint periodico.
+# tool_uses conta OGNI chiamata gated (Edit/Write/MultiEdit/NotebookEdit + MCP
+# write + Bash write) — un'euristica di attivita', volutamente piu' larga di
+# files_touched. files_touched/lines_changed NON sono piu' a discrezione
+# dell'agente (F1 decision-enforcement, loomy msg b7975288, 2026-08-14): li
+# popola automaticamente wi_instrument.py, un hook separato — PostToolUse su
+# Edit/Write/MultiEdit/NotebookEdit (record, legge tool_input.file_path/
+# notebook_path dal payload che l'hook RICEVE GIA' — usato qui sotto in 5.5 per
+# il GENERATED guard) e PreToolUse su wi_checkpoint/wi_end/wi_pause (sync,
+# spinge la cache locale nel DB prima che il WI chiuda). Vedi hub/scripts/
+# wi_instrument.py. Questo script resta cosi' com'e' — non duplica quella
+# logica, aggiunge solo il counter qui sotto.
 # mktemp NELLA STESSA DIRECTORY di WI_CACHE (non /tmp): garantisce che la `mv`
 # sia una rename atomica sullo stesso filesystem, non un copy+unlink cross-device
 # (che lascerebbe una finestra di file parziale/assente leggibile da un altro

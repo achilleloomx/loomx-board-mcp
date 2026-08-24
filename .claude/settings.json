@@ -62,7 +62,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "echo '[governance D-024] Pre-flight: leggi CLAUDE.md + AGENT-STANDARD \u00a70/\u00a70bis, verifica wi_status, apri wi_start prima di scritture persistenti. Template WI in hub/templates/work-items/.'"
+            "command": "echo '[governance D-024] Pre-flight: leggi CLAUDE.md + AGENT-STANDARD §0/§0bis, verifica wi_status, apri wi_start prima di scritture persistenti. Template WI in hub/templates/work-items/.'"
           },
           {
             "type": "command",
