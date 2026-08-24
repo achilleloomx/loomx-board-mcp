@@ -606,6 +606,29 @@ test("doc_query traceability: same-project coverage still counted as same-projec
   assert.deepEqual((res as any).data.coverage, { total_sources: 1, covered_same_project: 1, covered_cross_project_only: 0, covered_total: 1 }, "already covered same-project — the cross-project link must not be double-counted as an extra 'covered_cross_project_only'");
 });
 
+test("doc_query traceability: a superseded REQ is history, not a gap (msg 040fe721)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const reqDoc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-300" }, ctx);
+
+  const before = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_sdes" }, ctx);
+  assert.ok(before.ok);
+  assert.equal((before as any).data.count, 1, "REQ-300 uncovered — a real gap");
+
+  const old = await docItemResolve(db, { project_id: PROJ_A, code: "REQ-300" }, ctx);
+  const supersede = await docSupersede(db, { old_item_id: (old as any).data.item_id }, ctx);
+  assert.ok(supersede.ok, JSON.stringify(supersede));
+
+  const after = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_sdes" }, ctx);
+  assert.ok(after.ok);
+  // REQ-300 lives on now on the NEW (non-superseded) row, still uncovered —
+  // count stays 1, but total_sources must not double-count the retired row.
+  assert.equal((after as any).data.count, 1);
+  assert.equal((after as any).data.coverage.total_sources, 1, "superseded row excluded from total_sources");
+});
+
 // ---------------------------------------------------------------------------
 // doc_query traceability: req_without_origin (D-206 third axis, GTD 1b793e87
 // follow-on, msg 28e9aa98) — upstream check, distinct from req_without_sdes.

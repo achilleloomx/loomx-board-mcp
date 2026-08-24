@@ -1550,14 +1550,16 @@ async function docTraceability(
   const cfg = map[args.traceability!];
   if (!cfg) return err(`Unknown traceability check '${args.traceability}'. Valid: ${Object.keys(map).join(", ")}.`);
 
-  // Source items in the project.
+  // Source items in the project. Superseded rows are history, not gaps (msg
+  // 040fe721): a superseded requirement/sdes_entry is retired, not "missing
+  // coverage" — counting it as a gap is noise on every project that supersedes.
   const { data: srcRows, error: srcErr } = await db
     .from(DOC_ITEMS)
     .select("id, code, body, status, attrs")
     .eq("project_id", args.project_id)
     .eq("item_type", cfg.source);
   if (srcErr) return err(`Traceability source query failed: ${srcErr.message}`);
-  const sources = Array.isArray(srcRows) ? (srcRows as any[]) : [];
+  const sources = (Array.isArray(srcRows) ? (srcRows as any[]) : []).filter((s) => s.status !== "superseded");
   if (sources.length === 0) {
     const gap = await visibilityGap(db, args.project_id, ctx.selfSlug);
     return { ok: true, data: { mode: `traceability:${args.traceability}`, count: 0, items: [], ...gap } };
@@ -1698,13 +1700,15 @@ async function docTraceabilityOrigin(
   visibility_gap?: true;
   note?: string;
 }>> {
+  // Superseded rows are history, not gaps — same fix as req_without_sdes/
+  // sdes_without_uat (msg 040fe721), applied here for the same reason.
   const { data: srcRows, error: srcErr } = await db
     .from(DOC_ITEMS)
     .select("id, code, body, status, attrs")
     .eq("project_id", args.project_id)
     .eq("item_type", "requirement");
   if (srcErr) return err(`Traceability source query failed: ${srcErr.message}`);
-  const sources = Array.isArray(srcRows) ? (srcRows as any[]) : [];
+  const sources = (Array.isArray(srcRows) ? (srcRows as any[]) : []).filter((s) => s.status !== "superseded");
   if (sources.length === 0) {
     const gap = await visibilityGap(db, args.project_id, ctx.selfSlug);
     return { ok: true, data: { mode: "traceability:req_without_origin", count: 0, items: [], ...gap } };
