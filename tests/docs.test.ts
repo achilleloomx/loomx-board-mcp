@@ -955,6 +955,28 @@ test("doc_query traceability req_without_sdes: empty project + no membership fla
   assert.equal((res as any).data.visibility_gap, true);
 });
 
+test("doc_query (CV-8, D-203): count is the page size and truncated:true signals more beyond the cap (msg 2190b6ae)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const docId = (doc as any).data.document_id;
+  for (const code of ["REQ-A", "REQ-B", "REQ-C"]) {
+    await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "requirement", code }, ctx);
+  }
+
+  const capped = await docQuery(db, { project_id: PROJ_A, item_type: "requirement", limit: 2 }, ctx);
+  assert.ok(capped.ok);
+  assert.equal((capped as any).data.count, 2, "count is the page size, not the true total of 3");
+  assert.equal((capped as any).data.items.length, 2);
+  assert.equal((capped as any).data.truncated, true);
+
+  const uncapped = await docQuery(db, { project_id: PROJ_A, item_type: "requirement", limit: 3 }, ctx);
+  assert.ok(uncapped.ok);
+  assert.equal((uncapped as any).data.count, 3);
+  assert.equal((uncapped as any).data.truncated, undefined, "exactly at the cap — never a false sentinel");
+});
+
 test("doc_item_types returns schema + example for a type, and parity in full mode", () => {
   const one = docItemTypes({ item_type: "requirement" });
   assert.ok(one.ok);

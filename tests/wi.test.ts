@@ -555,6 +555,29 @@ test("wi_query (happy): loomy sees other agents when filter set", async () => {
   assert.equal((res.data.items[0] as any).agent_slug, "dba");
 });
 
+test("wi_query (CV-8, D-203): count is the page size and truncated:true signals more beyond the cap (msg 2190b6ae)", async () => {
+  const store: Store = {
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "loomy", status: "done", started_at: "2026-01-01" },
+      { id: "wi-2", agent_slug: "loomy", status: "done", started_at: "2026-01-02" },
+      { id: "wi-3", agent_slug: "loomy", status: "done", started_at: "2026-01-03" },
+    ],
+  };
+  const db = makeDb(store);
+  const capped = await wiQuery(db, { limit: 2 }, ctxLoomy);
+  assert.equal(capped.ok, true);
+  if (!capped.ok) return;
+  assert.equal(capped.data.count, 2, "count is the page size, not the true total of 3");
+  assert.equal(capped.data.items.length, 2);
+  assert.equal(capped.data.truncated, true);
+
+  const uncapped = await wiQuery(db, { limit: 3 }, ctxLoomy);
+  assert.equal(uncapped.ok, true);
+  if (!uncapped.ok) return;
+  assert.equal(uncapped.data.count, 3);
+  assert.equal(uncapped.data.truncated, undefined, "exactly at the cap — never a false sentinel");
+});
+
 // ---- wi_checkpoint ------------------------------------------------------
 
 test("wi_checkpoint (happy): appends files + increments tool_uses", async () => {

@@ -10,6 +10,7 @@ import { checkTemplateName } from "./wiTemplates.js";
 import { runDocRw, type DocRwDb } from "./docDb.js";
 import { rwGuardsEnabled } from "./flags.js";
 import { computePendingInbox, type PendingInboxInfo } from "./pendingInbox.js";
+import { paginate } from "./pagination.js";
 
 const WI_TABLE = "loomx_work_items";
 const GTD_TABLE = "loomx_items";
@@ -702,7 +703,7 @@ export async function wiQuery(
   db: SupabaseClient,
   args: WiQueryArgs,
   ctx: WiContext
-): Promise<WiResult<{ count: number; items: unknown[] }>> {
+): Promise<WiResult<{ count: number; items: unknown[]; truncated?: true }>> {
   let q = db.from(WI_TABLE).select("*").order("started_at", { ascending: false });
 
   // Scope: non-loomy agents can only query their own WIs.
@@ -715,12 +716,15 @@ export async function wiQuery(
   if (args.status) q = q.eq("status", args.status);
   if (args.template_name) q = q.eq("template_name", args.template_name);
   if (args.since) q = q.gte("started_at", args.since);
-  q = q.limit(args.limit ?? 50);
+  const effectiveLimit = args.limit ?? 50;
+  q = q.limit(effectiveLimit + 1);
 
   const { data, error } = await q;
   if (error) return { ok: false, error: error.message };
-  const items = Array.isArray(data) ? data : [];
-  return { ok: true, data: { count: items.length, items } };
+  // CV-8 (D-203): count is the page size, never a full-table total (msg
+  // 2190b6ae) — `truncated` is the honest signal that there is more beyond it.
+  const { page, truncated } = paginate(Array.isArray(data) ? data : [], effectiveLimit);
+  return { ok: true, data: { count: page.length, items: page, ...(truncated ? { truncated } : {}) } };
 }
 
 // --- wi_checkpoint -------------------------------------------------------

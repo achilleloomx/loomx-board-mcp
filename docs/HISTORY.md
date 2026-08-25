@@ -4,6 +4,20 @@
 
 ---
 
+## Sessione #121 — 2026-08-25 (autopilot dispatch CV-8, `truncated?` su 12 tool, GTD `d543a311`, WI `d4da387f`, v0.24.0)
+
+**Autopilot dispatch** (GTD `d543a311`, via libera esplicito loomy msg `73aef27b` su report `2190b6ae`): estendere `truncated?: boolean` (pattern `pendingInbox.ts`, D-205) a tutti e 12 i tool del Gruppo A/A-bis che troncano liste in silenzio senza dichiararlo — `board_inbox`, `board_overview`, `gtd_inbox`, `gtd_query` (due rami: con/senza `project_id`), `gtd_overview`, `project_list`, `home_grocery_list`, `home_school_menu_read`, `wi_query`, `doc_query`, `loomy_replies`, `decisions_inbox` (due liste indipendenti → `board_truncated`/`gtd_truncated` separati, mai fusi).
+
+**Helper condiviso** (`src/pagination.ts`, `paginate<T>(rows, limit)`): stesso pattern in 12 punti — fetch `.limit(N+1)`, se tornano N+1 righe tieni le prime N e `truncated:true`, altrimenti niente campo (mai un sentinel `false`). 4 test unitari dedicati.
+
+**Decisione di forma presa autonomamente, non esplicitamente coperta dal via libera**: 9 dei 12 tool rispondevano oggi con un **array nudo** (o testo umano "No X found." quando vuoto) — aggiungere un segnale accanto ai dati richiede necessariamente un oggetto wrapper, non c'è alternativa in JSON. Scelto: stessa forma per tutti, `{count, <lista-nominata-per-dominio>, truncated?}` — `count` è sempre la dimensione di pagina (mai un totale, coerente con la spiegazione di loomy su `wi_query`/`doc_query`), il ramo "vuoto" resta testo umano invariato (nessun cambiamento percepito quando non c'è nulla da segnalare). I 3 tool già a oggetto wrapper (`project_list`, `wi_query`, `doc_query`) hanno solo guadagnato il campo, zero rinomine.
+
+**Verifica (onestà sui suoi limiti, non solo exit code)**: `tsc` pulito, 228/228 test verdi (era 222 a inizio sessione: +4 helper, +1 `doc_query`, +1 `wi_query` — nuovi test end-to-end con fake DB reale che verificano `truncated:true` quando il cap taglia righe e l'assenza del campo quando non taglia). **Limite dichiarato**: 9 dei 12 tool (quelli dentro `tools.ts`/`humanTools.ts`, non `docs.ts`/`wi.ts`) non hanno un'infrastruttura di test unitari — nessuna verifica end-to-end dal vivo è stata possibile nella sessione stessa: il processo MCP di questa finestra gira sul build precedente (nessun hot-reload, vedi CLAUDE.md "Rollout di un nuovo build") e riavviarlo avrebbe interrotto il WI. Rilettura manuale riga per riga di ogni diff eseguita al posto della verifica dal vivo — dichiarata come tale, non spacciata per "verificato".
+
+**Non fatto**: rinomina del campo `count` esistente su `wi_query`/`doc_query` (loomy l'aveva esplicitamente escluso — "si risolve da sé, senza rinominarlo").
+
+---
+
 ## Sessione #120 — 2026-08-25 (autopilot dispatch loomy `ddb4c792`, triage backlog inbox 30 msg, WI `67e2436f`, v0.23.1)
 
 **Autopilot dispatch** (GTD `ddb4c792`, self-report precedente): 18 messaggi mai acked in inbox board-mcp, il più vecchio a 52gg — al momento dell'apertura del WI erano diventati 30 (il backlog è cresciuto tra il self-report e il dispatch). Triagiati e ackati tutti e 30, status aggiornato per ciascuno (`done` per quelli già risolti dal codice esistente o da questa sessione, `in_progress` per quelli con un GTD follow-on o un'escalation aperta, `acknowledged` per i puri FYI).

@@ -11,6 +11,7 @@ import {
 import { rwGuardsEnabled, modelGuardsEnabled } from "./flags.js";
 import { SUBSCRIBE_INTENTS, SUBSCRIPTION_OUTCOMES, BUMP_CLASSES } from "./subscriptions.js";
 import { STALENESS_STATUS_FILTERS, STALENESS_CLOSE_OUTCOMES } from "./staleness.js";
+import { paginate } from "./pagination.js";
 
 const TABLE = "board_messages";
 const OVERVIEW_VIEW = "board_overview";
@@ -450,13 +451,14 @@ export function registerTools(
     },
     async ({ status, tag, limit, preview_only, wake_only }) => {
       const db = getSupabaseClient();
+      const effectiveLimit = limit ?? 20;
       let query = db
         .from(TABLE)
         .select("*")
         .eq("to_agent", selfCode)
         .is("archived_at", null)
         .order("created_at", { ascending: false })
-        .limit(limit ?? 20);
+        .limit(effectiveLimit + 1);
 
       if (status) {
         query = query.eq("status", status);
@@ -481,9 +483,10 @@ export function registerTools(
         };
       }
 
+      const { page, truncated } = paginate(data ?? [], effectiveLimit);
       const omitBody = preview_only !== false;
       // Enrich with slugs for readability; strip body in preview mode
-      const enriched = (data ?? []).map((msg) => {
+      const enriched = page.map((msg) => {
         const { body, ...meta } = msg;
         return {
           ...(omitBody ? meta : msg),
@@ -499,7 +502,7 @@ export function registerTools(
             text:
               enriched.length === 0
                 ? "No messages found."
-                : JSON.stringify(enriched, null, 2),
+                : JSON.stringify({ count: enriched.length, messages: enriched, ...(truncated ? { truncated } : {}) }, null, 2),
           },
         ],
       };
@@ -743,11 +746,12 @@ export function registerTools(
     },
     async ({ status, limit, include_body }) => {
       const db = getSupabaseClient();
+      const effectiveLimit = limit ?? 20;
       let query = db
         .from(OVERVIEW_VIEW)
         .select("*")
         .order("created_at", { ascending: false })
-        .limit(limit ?? 20);
+        .limit(effectiveLimit + 1);
 
       if (status) {
         query = query.eq("status", status);
@@ -764,10 +768,11 @@ export function registerTools(
         };
       }
 
+      const { page, truncated } = paginate(data ?? [], effectiveLimit);
       const omitBody = !include_body;
       const rows = omitBody
-        ? (data ?? []).map(({ body, ...meta }: any) => meta)
-        : (data ?? []);
+        ? page.map(({ body, ...meta }: any) => meta)
+        : page;
 
       return {
         content: [
@@ -776,7 +781,7 @@ export function registerTools(
             text:
               rows.length === 0
                 ? "No messages found."
-                : JSON.stringify(rows, null, 2),
+                : JSON.stringify({ count: rows.length, messages: rows, ...(truncated ? { truncated } : {}) }, null, 2),
           },
         ],
       };
@@ -1000,13 +1005,14 @@ export function registerTools(
     },
     async ({ status, limit, preview_only }) => {
       const db = getSupabaseClient();
+      const effectiveLimit = limit ?? 20;
       let query = db
         .from(GTD_TABLE)
         .select("*")
         .eq("owner", selfSlug)
         .order("priority_rank", { ascending: false })
         .order("deadline", { ascending: true, nullsFirst: false })
-        .limit(limit ?? 20);
+        .limit(effectiveLimit + 1);
 
       if (status) {
         query = query.eq("gtd_status", status);
@@ -1025,12 +1031,13 @@ export function registerTools(
         };
       }
 
+      const { page, truncated } = paginate(data ?? [], effectiveLimit);
       const omitBody = preview_only !== false;
       const rows = omitBody
-        ? (data ?? []).map(({ body, ...meta }: any) =>
+        ? page.map(({ body, ...meta }: any) =>
             withModelSource({ ...meta, body_preview: body ? body.slice(0, 200) : null })
           )
-        : (data ?? []).map(withModelSource);
+        : page.map(withModelSource);
 
       return {
         content: [
@@ -1039,7 +1046,7 @@ export function registerTools(
             text:
               rows.length === 0
                 ? "No GTD items found."
-                : JSON.stringify(rows, null, 2),
+                : JSON.stringify({ count: rows.length, items: rows, ...(truncated ? { truncated } : {}) }, null, 2),
           },
         ],
       };
@@ -1412,6 +1419,7 @@ export function registerTools(
     },
     async ({ owner, gtd_status, priority, source_ref, project_id, limit, preview_only }) => {
       const db = getSupabaseClient();
+      const effectiveLimit = limit ?? 20;
 
       // If project_id is specified, we need to join through loomx_item_projects
       if (project_id) {
@@ -1443,7 +1451,7 @@ export function registerTools(
           .in("id", itemIds)
           .order("priority_rank", { ascending: false })
           .order("deadline", { ascending: true, nullsFirst: false })
-          .limit(limit ?? 20);
+          .limit(effectiveLimit + 1);
 
         // Ownership filter: loomy/broker get cross-agent read; others scoped to self
         if (isLoomy || isBroker) {
@@ -1467,12 +1475,13 @@ export function registerTools(
           };
         }
 
+        const { page: pageP, truncated: truncatedP } = paginate(data ?? [], effectiveLimit);
         const omitBodyP = preview_only !== false;
         const rowsP = omitBodyP
-          ? (data ?? []).map(({ body, ...meta }: any) =>
+          ? pageP.map(({ body, ...meta }: any) =>
               withModelSource({ ...meta, body_preview: body ? body.slice(0, 200) : null })
             )
-          : (data ?? []).map(withModelSource);
+          : pageP.map(withModelSource);
 
         return {
           content: [
@@ -1481,7 +1490,7 @@ export function registerTools(
               text:
                 rowsP.length === 0
                   ? "No GTD items found."
-                  : JSON.stringify(rowsP, null, 2),
+                  : JSON.stringify({ count: rowsP.length, items: rowsP, ...(truncatedP ? { truncated: truncatedP } : {}) }, null, 2),
             },
           ],
         };
@@ -1493,7 +1502,7 @@ export function registerTools(
         .select("*")
         .order("priority_rank", { ascending: false })
         .order("deadline", { ascending: true, nullsFirst: false })
-        .limit(limit ?? 20);
+        .limit(effectiveLimit + 1);
 
       // Ownership filter: loomy/broker get cross-agent read; others scoped to self
       if (isLoomy || isBroker) {
@@ -1517,12 +1526,13 @@ export function registerTools(
         };
       }
 
+      const { page, truncated } = paginate(data ?? [], effectiveLimit);
       const omitBody = preview_only !== false;
       const rows = omitBody
-        ? (data ?? []).map(({ body, ...meta }: any) =>
+        ? page.map(({ body, ...meta }: any) =>
             withModelSource({ ...meta, body_preview: body ? body.slice(0, 200) : null })
           )
-        : (data ?? []).map(withModelSource);
+        : page.map(withModelSource);
 
       return {
         content: [
@@ -1531,7 +1541,7 @@ export function registerTools(
             text:
               rows.length === 0
                 ? "No GTD items found."
-                : JSON.stringify(rows, null, 2),
+                : JSON.stringify({ count: rows.length, items: rows, ...(truncated ? { truncated } : {}) }, null, 2),
           },
         ],
       };
@@ -1901,11 +1911,12 @@ export function registerTools(
     },
     async ({ status, agent_id, limit, include_sandbox }) => {
       const db = getSupabaseClient();
+      const effectiveLimit = limit ?? 50;
       let query = db
         .from(PROJECTS_TABLE)
         .select("id, name, short_name, status, agent_id, is_sandbox")
         .order("name")
-        .limit(limit ?? 50);
+        .limit(effectiveLimit + 1);
       if (status) query = query.eq("status", status);
       if (agent_id) query = query.eq("agent_id", agent_id);
       if (!include_sandbox) query = query.eq("is_sandbox", false);
@@ -1918,8 +1929,9 @@ export function registerTools(
         };
       }
 
+      const { page, truncated } = paginate(data ?? [], effectiveLimit);
       return {
-        content: [{ type: "text", text: JSON.stringify({ projects: data ?? [] }, null, 2) }],
+        content: [{ type: "text", text: JSON.stringify({ count: page.length, projects: page, ...(truncated ? { truncated } : {}) }, null, 2) }],
       };
     }
   );
@@ -2325,12 +2337,13 @@ export function registerTools(
       }
 
       const db = getSupabaseClient();
+      const effectiveLimit = limit ?? 50;
       let query = db
         .from(GTD_TABLE)
         .select("id, owner, title, gtd_status, priority, priority_rank, deadline, autopilot, autopilot_model")
         .order("priority_rank", { ascending: false })
         .order("deadline", { ascending: true, nullsFirst: false })
-        .limit(limit ?? 50);
+        .limit(effectiveLimit + 1);
 
       if (gtd_status) {
         query = query.eq("gtd_status", gtd_status);
@@ -2349,11 +2362,12 @@ export function registerTools(
         };
       }
 
+      const { page, truncated } = paginate(data ?? [], effectiveLimit);
       return {
         content: [
           {
             type: "text",
-            text: (data ?? []).length === 0 ? "No GTD items found." : JSON.stringify(data, null, 2),
+            text: page.length === 0 ? "No GTD items found." : JSON.stringify({ count: page.length, items: page, ...(truncated ? { truncated } : {}) }, null, 2),
           },
         ],
       };
@@ -2495,12 +2509,13 @@ export function registerTools(
           targetListId = result.id;
         }
 
+        const effectiveLimit = limit ?? 100;
         let query = db
           .from(HOME_SHOPPING_ITEMS)
           .select("*")
           .eq("list_id", targetListId)
           .order("created_at", { ascending: false })
-          .limit(limit ?? 100);
+          .limit(effectiveLimit + 1);
 
         if (checked !== undefined) {
           query = query.eq("is_checked", checked);
@@ -2511,12 +2526,13 @@ export function registerTools(
         if (error) {
           return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
         }
+        const { page, truncated } = paginate(data ?? [], effectiveLimit);
         return {
           content: [{
             type: "text",
-            text: (data ?? []).length === 0
+            text: page.length === 0
               ? "No shopping items found."
-              : JSON.stringify(data, null, 2),
+              : JSON.stringify({ count: page.length, items: page, ...(truncated ? { truncated } : {}) }, null, 2),
           }],
         };
       }
@@ -2792,6 +2808,7 @@ export function registerTools(
       async ({ member_id, week_start, limit }) => {
         const db = getSupabaseClient();
 
+        const effectiveLimit = limit ?? 50;
         let query = db
           .from(HOME_SCHOOL_MENUS)
           .select("*")
@@ -2799,7 +2816,7 @@ export function registerTools(
           .eq("member_id", member_id)
           .order("week_start", { ascending: false })
           .order("day_of_week", { ascending: true })
-          .limit(limit ?? 50);
+          .limit(effectiveLimit + 1);
 
         if (week_start) {
           query = query.eq("week_start", week_start);
@@ -2810,12 +2827,13 @@ export function registerTools(
         if (error) {
           return { content: [{ type: "text", text: `Error: ${error.message}` }], isError: true };
         }
+        const { page, truncated } = paginate(data ?? [], effectiveLimit);
         return {
           content: [{
             type: "text",
-            text: (data ?? []).length === 0
+            text: page.length === 0
               ? "No school menu entries found."
-              : JSON.stringify(data, null, 2),
+              : JSON.stringify({ count: page.length, items: page, ...(truncated ? { truncated } : {}) }, null, 2),
           }],
         };
       }

@@ -13,6 +13,7 @@
 import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getSupabaseClient } from "./supabase.js";
+import { paginate } from "./pagination.js";
 
 // Tag conventions for the Achille <-> Loomy bridge.
 const TAG_CHAT = "loomx-chat";
@@ -231,7 +232,7 @@ export function registerHumanTools(
         .eq("from_agent", loomyCode)
         .eq("to_agent", selfCode)
         .order("created_at", { ascending: false })
-        .limit(max);
+        .limit(max + 1);
 
       const orParts: string[] = [`tags.cs.{${TAG_FOR_ACHILLE}}`];
       if (askIds.length > 0) {
@@ -242,10 +243,14 @@ export function registerHumanTools(
       const { data: replies, error: repErr } = await query;
       if (repErr) return fail(`replies read: ${repErr.message}`);
 
+      // CV-8 (D-203, msg 2190b6ae): count is the page size, truncated is the
+      // honest signal that the cap actually cut rows — same pattern as
+      // pendingInbox.ts (D-205), never a false sentinel.
+      const { page, truncated } = paginate(replies ?? [], max);
       return ok({
         ok: true,
-        count: replies?.length ?? 0,
-        replies: (replies ?? []).map((r) => ({
+        count: page.length,
+        replies: page.map((r) => ({
           id: r.id,
           subject: r.subject,
           summary: r.summary,
@@ -255,6 +260,7 @@ export function registerHumanTools(
             : null,
           created_at: r.created_at,
         })),
+        ...(truncated ? { truncated } : {}),
       });
     }
   );
@@ -284,7 +290,7 @@ export function registerHumanTools(
         .in("status", ["pending", "acknowledged", "in_progress"])
         .is("archived_at", null)
         .order("created_at", { ascending: false })
-        .limit(max);
+        .limit(max + 1);
       if (msgErr) return fail(`board read: ${msgErr.message}`);
 
       // 2) High/urgent GTD still to clarify or waiting.
@@ -295,13 +301,18 @@ export function registerHumanTools(
         .in("gtd_status", ["inbox", "next_action", "waiting"])
         .is("deleted_at", null)
         .order("created_at", { ascending: false })
-        .limit(max);
+        .limit(max + 1);
       if (gtdErr) return fail(`gtd read: ${gtdErr.message}`);
+
+      // CV-8 (D-203, msg 2190b6ae): two independent capped lists, each gets
+      // its own honest truncated signal — never fused into one flag.
+      const { page: msgPage, truncated: boardTruncated } = paginate(msgs ?? [], max);
+      const { page: gtdPage, truncated: gtdTruncated } = paginate(gtd ?? [], max);
 
       return ok({
         ok: true,
         note: "Euristica MVP: board (blocker/question/alignment aperti) + GTD high/urgent da chiarire.",
-        board_decisions: (msgs ?? []).map((m) => ({
+        board_decisions: msgPage.map((m) => ({
           id: m.id,
           type: m.type,
           subject: m.subject,
@@ -309,7 +320,8 @@ export function registerHumanTools(
           status: m.status,
           created_at: m.created_at,
         })),
-        gtd_to_clarify: (gtd ?? []).map((g) => ({
+        ...(boardTruncated ? { board_truncated: boardTruncated } : {}),
+        gtd_to_clarify: gtdPage.map((g) => ({
           id: g.id,
           title: g.title,
           status: g.gtd_status,
@@ -317,6 +329,7 @@ export function registerHumanTools(
           priority: g.priority,
           waiting_on: g.waiting_on,
         })),
+        ...(gtdTruncated ? { gtd_truncated: gtdTruncated } : {}),
       });
     }
   );

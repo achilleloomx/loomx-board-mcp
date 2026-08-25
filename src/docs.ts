@@ -23,6 +23,7 @@ import {
   type ItemType,
   type DocumentType,
 } from "./docTypes.js";
+import { paginate } from "./pagination.js";
 
 const DOCUMENTS = "documents";
 const DOC_ITEMS = "doc_items";
@@ -1371,7 +1372,7 @@ export async function docQuery(
   db: SupabaseClient,
   args: DocQueryArgs,
   ctx: DocContext
-): Promise<DocResult<{ mode: string; count: number; items: unknown[]; documents?: Record<string, { title: string; document_type: string }>; visibility_gap?: true; note?: string }>> {
+): Promise<DocResult<{ mode: string; count: number; items: unknown[]; truncated?: true; documents?: Record<string, { title: string; document_type: string }>; visibility_gap?: true; note?: string }>> {
   if (args.traceability === "req_without_origin") {
     return docTraceabilityOrigin(db, args, ctx);
   }
@@ -1398,12 +1399,13 @@ export async function docQuery(
       ? parsedFields.join(", ")
       : "id, document_id, project_id, item_type, code, status, sort_order, priority, body, attrs, updated_at";
 
+  const effectiveLimit = args.limit ?? 50;
   let q = db
     .from(DOC_ITEMS)
     .select(selectCols)
     .eq("project_id", args.project_id)
     .order("sort_order", { ascending: true })
-    .limit(args.limit ?? 50);
+    .limit(effectiveLimit + 1);
 
   if (args.item_type) q = q.eq("item_type", args.item_type);
   if (args.status) q = q.eq("status", args.status);
@@ -1427,7 +1429,10 @@ export async function docQuery(
 
   const { data, error } = await q;
   if (error) return err(`Query failed: ${error.message}`);
-  const rows = Array.isArray(data) ? (data as any[]) : [];
+  const rawRows = Array.isArray(data) ? (data as any[]) : [];
+  // CV-8 (D-203, msg 2190b6ae): count is the page size, never a full-table
+  // total — `truncated` is the honest signal that the cap actually cut rows.
+  const { page: rows, truncated } = paginate(rawRows, effectiveLimit);
   const gap = rows.length === 0 ? await visibilityGap(db, args.project_id, ctx.selfSlug) : undefined;
 
   if (args.summary) {
@@ -1436,10 +1441,10 @@ export async function docQuery(
     // hint of that made the split invisible. Each summary row carries its
     // document_id; this legend maps them to titles without a second query.
     const documents = await documentLegend(db, rows);
-    return { ok: true, data: { mode: "summary", count: summarized.length, items: summarized, ...(documents ? { documents } : {}), ...gap } };
+    return { ok: true, data: { mode: "summary", count: summarized.length, items: summarized, ...(truncated ? { truncated } : {}), ...(documents ? { documents } : {}), ...gap } };
   }
 
-  return { ok: true, data: { mode: "items", count: rows.length, items: rows, ...gap } };
+  return { ok: true, data: { mode: "items", count: rows.length, items: rows, ...(truncated ? { truncated } : {}), ...gap } };
 }
 
 // GTD 4a591cfe: {document_id → title/type} for the documents the result rows
