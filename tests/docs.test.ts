@@ -569,7 +569,7 @@ test("doc_query traceability: a REQ satisfied by an SDES entry in a DIFFERENT pr
   const before = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_sdes" }, ctx);
   assert.ok(before.ok);
   assert.equal((before as any).data.count, 1, "REQ-100 not yet linked to anything");
-  assert.deepEqual((before as any).data.coverage, { total_sources: 1, covered_same_project: 0, covered_cross_project_only: 0, covered_total: 0 });
+  assert.deepEqual((before as any).data.coverage, { total_sources: 1, covered_same_project: 0, covered_cross_project_only: 0, abstained: 0, covered_total: 0 });
 
   const cross = await docLink(db, {
     target_kind: "doc",
@@ -583,7 +583,7 @@ test("doc_query traceability: a REQ satisfied by an SDES entry in a DIFFERENT pr
   const after = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_sdes" }, ctx);
   assert.ok(after.ok);
   assert.equal((after as any).data.count, 0, "REQ-100 now covered via the cross-project link — not a false gap");
-  assert.deepEqual((after as any).data.coverage, { total_sources: 1, covered_same_project: 0, covered_cross_project_only: 1, covered_total: 1 }, "same-project and cross-project coverage stay distinguishable, never merged into one opaque number");
+  assert.deepEqual((after as any).data.coverage, { total_sources: 1, covered_same_project: 0, covered_cross_project_only: 1, abstained: 0, covered_total: 1 }, "same-project and cross-project coverage stay distinguishable, never merged into one opaque number");
 });
 
 test("doc_query traceability: same-project coverage still counted as same-project even when an unrelated cross-project link exists (coverage split doesn't double-count)", async () => {
@@ -603,7 +603,62 @@ test("doc_query traceability: same-project coverage still counted as same-projec
   const res = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_sdes" }, ctx);
   assert.ok(res.ok);
   assert.equal((res as any).data.count, 0);
-  assert.deepEqual((res as any).data.coverage, { total_sources: 1, covered_same_project: 1, covered_cross_project_only: 0, covered_total: 1 }, "already covered same-project — the cross-project link must not be double-counted as an extra 'covered_cross_project_only'");
+  assert.deepEqual((res as any).data.coverage, { total_sources: 1, covered_same_project: 1, covered_cross_project_only: 0, abstained: 0, covered_total: 1 }, "already covered same-project — the cross-project link must not be double-counted as an extra 'covered_cross_project_only'");
+});
+
+test("doc_query traceability: a same-project link to an item this identity cannot read abstains, never presents as a gap (msg loomy 31b5767e, finding auditor aa43f599)", async () => {
+  // Measured live 2026-08-27: with the SAME identity, doc_item_resolve denied
+  // SDES-DOCM-001 ("not a member") while doc_query(traceability=...) on the
+  // same project computed real gap counts over the same rows. Root cause:
+  // doc_item_links is scoped by project_id only (not by the per-document
+  // visibility that gates a plain doc_items SELECT), so a same-project link
+  // can point at a row this identity cannot otherwise read at all — and the
+  // old code treated "not in the visible-targets set" as "not covered".
+  const store: Store = {};
+  seedProjects(store);
+  const dbMember = makeDb(store, new Set([PROJ_A]), { rls: true });
+
+  const reqDocId = seedDocument(store, PROJ_A, "org", "Req doc (public)", "req");
+  const sdesDocId = seedDocument(store, PROJ_A, "project", "Sdes doc (member-only)", "sdes");
+  const setup1 = await docItemUpsert(dbMember, { project_id: PROJ_A, document_id: reqDocId, item_type: "requirement", code: "REQ-300" }, ctx);
+  const setup2 = await docItemUpsert(dbMember, { project_id: PROJ_A, document_id: sdesDocId, item_type: "sdes_entry", code: "SDES-300" }, ctx);
+  assert.ok(setup1.ok && setup2.ok, `setup items ok: ${JSON.stringify(setup1)} / ${JSON.stringify(setup2)}`);
+  const linked = await docLinkByCode(dbMember, { project_id: PROJ_A, from_code: "SDES-300", to_code: "REQ-300", link_type: "satisfies" }, ctx);
+  assert.ok(linked.ok, `setup link ok: ${JSON.stringify(linked)}`);
+
+  // A stranger can read REQ-300 (org-visible document) but not SDES-300 (project-only, not a member).
+  const dbStranger = makeDb(store, new Set(), { rls: true });
+  const asStranger = await docQuery(dbStranger, { project_id: PROJ_A, traceability: "req_without_sdes" }, ctx);
+  assert.ok(asStranger.ok);
+  assert.equal((asStranger as any).data.count, 0, "REQ-300 must NOT show as a gap — the link target merely isn't readable, it isn't missing");
+  assert.equal((asStranger as any).data.abstained_items?.length, 1, "the source is abstained, not silently dropped either");
+  assert.equal((asStranger as any).data.abstained_items[0].code, "REQ-300");
+  assert.equal((asStranger as any).data.coverage.abstained, 1);
+  assert.equal((asStranger as any).data.coverage.covered_same_project, 0, "not a false positive either — genuinely unverifiable, not verified");
+});
+
+test("doc_query traceability: a same-project link to a genuinely different item_type is still a real gap, not an abstention", async () => {
+  // Guards the distinction the fix relies on: "invisible" abstains, but
+  // "visible and simply not the target type" must still count as uncovered.
+  const store: Store = {};
+  seedProjects(store);
+  const dbMember = makeDb(store, new Set([PROJ_A]), { rls: true });
+
+  const reqDocId = seedDocument(store, PROJ_A, "org", "Req doc (public)", "req");
+  const otherDocId = seedDocument(store, PROJ_A, "org", "Decisions doc (public)", "decisions");
+  const setup1 = await docItemUpsert(dbMember, { project_id: PROJ_A, document_id: reqDocId, item_type: "requirement", code: "REQ-301" }, ctx);
+  const setup2 = await docItemUpsert(dbMember, { project_id: PROJ_A, document_id: otherDocId, item_type: "decision", code: "D-301" }, ctx);
+  assert.ok(setup1.ok && setup2.ok, `setup items ok: ${JSON.stringify(setup1)} / ${JSON.stringify(setup2)}`);
+  const linked = await docLinkByCode(dbMember, { project_id: PROJ_A, from_code: "D-301", to_code: "REQ-301", link_type: "relates_to" }, ctx);
+  assert.ok(linked.ok, `setup link ok: ${JSON.stringify(linked)}`);
+
+  const dbStranger = makeDb(store, new Set(), { rls: true });
+  const res = await docQuery(dbStranger, { project_id: PROJ_A, traceability: "req_without_sdes" }, ctx);
+  assert.ok(res.ok);
+  assert.equal((res as any).data.count, 1, "linked only to a decision, not an sdes_entry — a real gap");
+  assert.equal((res as any).data.items[0].code, "REQ-301");
+  assert.equal((res as any).data.abstained_items, undefined, "both endpoints ARE readable (org-visible) — nothing to abstain on");
+  assert.equal((res as any).data.coverage.abstained, 0);
 });
 
 test("doc_query traceability: a superseded REQ is history, not a gap (msg 040fe721)", async () => {
@@ -810,10 +865,10 @@ test("doc_item_upsert on a document that genuinely doesn't exist: plain 404, ora
 // The fakes run with rls:true so `documents` hides what production hides.
 // ---------------------------------------------------------------------------
 
-function seedDocument(store: Store, projectId: string, visibility: string, title: string): string {
+function seedDocument(store: Store, projectId: string, visibility: string, title: string, documentType: string = "decisions"): string {
   const id = uuid();
   (store.documents ??= []).push({
-    id, project_id: projectId, document_type: "decisions", title,
+    id, project_id: projectId, document_type: documentType, title,
     visibility, status: "draft", version: "1.0", owner: "loomy",
   });
   return id;

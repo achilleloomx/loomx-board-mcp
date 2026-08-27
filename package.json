@@ -1,6 +1,6 @@
 {
   "name": "loomx-board-mcp",
-  "version": "0.24.0",
+  "version": "0.24.1",
   "description": "Board MCP Server — inter-agent communication for LoomX Home",
   "type": "module",
   "main": "dist/index.js",

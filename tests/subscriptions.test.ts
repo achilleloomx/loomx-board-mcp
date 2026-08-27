@@ -8,12 +8,15 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 
-import { docSubscribe, docUnsubscribe, docSubscriptionOutcome, docPublish } from "../src/subscriptions.ts";
+import {
+  docSubscribe, docUnsubscribe, docSubscriptionOutcome, docPublish,
+  HUB_PROJECT_ID, HUB_UNSUBSCRIBABLE_DOCUMENT_TYPE,
+} from "../src/subscriptions.ts";
 import { makeDb, uuid, ctx, PROJ_A, PROJ_B, seedProjects, type Store, type Row } from "./fakeDb.ts";
 
-function seedDocument(store: Store, id: string, project_id: string, version = "1.0"): void {
+function seedDocument(store: Store, id: string, project_id: string, version = "1.0", document_type = "req"): void {
   store.documents ??= [];
-  store.documents.push({ id, project_id, version, document_type: "req", title: "Doc", visibility: "project" });
+  store.documents.push({ id, project_id, version, document_type, title: "Doc", visibility: "project" });
 }
 
 function seedDocItem(store: Store, id: string, project_id: string, document_id: string, owner: string): Row {
@@ -183,6 +186,66 @@ test("doc_subscribe: document-level watch (target_document_id) works", async () 
   assert.ok(res.ok, JSON.stringify(res));
   assert.equal((res as any).data.target_kind, "document");
   assert.equal((res as any).data.subscribed_at_version, "3.0");
+});
+
+// ---------------------------------------------------------------------------
+// REQ-SUB-012 / SDES-SUB-012 — hub cross-decisions are never subscribable
+// (declared interim approximation for "core/ambient", loomy correction msg
+// 4162dfb7, 2026-08-27). Every intent is rejected, not just 'critical'.
+// ---------------------------------------------------------------------------
+
+test("doc_subscribe: rejects a row in a hub cross-project decisions document, any intent", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const hubDocId = uuid();
+  seedDocument(store, hubDocId, HUB_PROJECT_ID, "1.0", HUB_UNSUBSCRIBABLE_DOCUMENT_TYPE);
+  const subId = uuid();
+  const localDocId = uuid();
+  seedDocument(store, localDocId, PROJ_A);
+  seedDocItem(store, subId, PROJ_A, localDocId, "board-mcp");
+  const targetId = uuid();
+  seedDocItem(store, targetId, HUB_PROJECT_ID, hubDocId, "loomy");
+
+  for (const intent of ["informative", "module", "critical"] as const) {
+    const res = await docSubscribe(db, { subscriber_item_id: subId, target_item_id: targetId, intent, note: "n" }, ctx);
+    assert.equal(res.ok, false, `intent=${intent} should be rejected`);
+    assert.match((res as any).error, /REQ-SUB-012|not subscribable/i);
+    assert.equal((store["gov.doc_subscriptions"] ?? []).length, 0);
+  }
+});
+
+test("doc_subscribe: rejects a document-level watch on a hub cross-project decisions document", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const hubDocId = uuid();
+  seedDocument(store, hubDocId, HUB_PROJECT_ID, "1.0", HUB_UNSUBSCRIBABLE_DOCUMENT_TYPE);
+  const subId = uuid();
+  const localDocId = uuid();
+  seedDocument(store, localDocId, PROJ_A);
+  seedDocItem(store, subId, PROJ_A, localDocId, "board-mcp");
+
+  const res = await docSubscribe(db, { subscriber_item_id: subId, target_document_id: hubDocId, intent: "informative", note: "n" }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /REQ-SUB-012|not subscribable/i);
+});
+
+test("doc_subscribe: a hub-project document that is NOT document_type='decisions' stays subscribable (e.g. a future domain manifest)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const manifestDocId = uuid();
+  seedDocument(store, manifestDocId, HUB_PROJECT_ID, "1.0", "config_pattern");
+  const subId = uuid();
+  const localDocId = uuid();
+  seedDocument(store, localDocId, PROJ_A);
+  seedDocItem(store, subId, PROJ_A, localDocId, "board-mcp");
+  const targetId = uuid();
+  seedDocItem(store, targetId, HUB_PROJECT_ID, manifestDocId, "loomy");
+
+  const res = await docSubscribe(db, { subscriber_item_id: subId, target_item_id: targetId, intent: "module", note: "n" }, ctx);
+  assert.ok(res.ok, JSON.stringify(res));
 });
 
 // ---------------------------------------------------------------------------
@@ -447,6 +510,31 @@ test("doc_publish: non-owner (and not loomy) is rejected", async () => {
   }, ctx);
   assert.equal(res.ok, false);
   assert.match((res as any).error, /Not legitimated/);
+});
+
+test("doc_publish: working_doc is never publishable (REQ-DOCM-018/SDES-DOCM-018) — rejected before legitimation or changelog checks", async () => {
+  // UAT-DOCM-018 (WI 937a2f43, 2026-08-27) found this documented as "enforced
+  // DB-floor" (src/docTypes.ts comment) with NO test exercising it — exactly
+  // the "a divieto non testato è un commento" the SDES entry warns against.
+  // Tool-floor guard added here as defense in depth; whatever gov.doc_publish()
+  // enforces server-side is unverified from this suite (no DB access from here).
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.0");
+  const doc = store.documents.find((r: Row) => r.id === docId)!;
+  doc.document_type = "working_doc";
+  doc.owner = "board-mcp"; // even the owner cannot publish it — the block is on the type, not on legitimation
+
+  const res = await docPublish(db, {
+    document_id: docId, new_version: "1.1", bump_class: "minor",
+    changelog_entry_id: uuid(), delta_summary: "x",
+  }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /working_doc.*never publishable/);
+  assert.equal(store.documents.find((r: Row) => r.id === docId)!.version, "1.0", "no version bump on a rejected publish");
+  assert.equal((store["gov.doc_versions"] ?? []).length, 0, "no ledger row written");
 });
 
 test("doc_publish: republishing the same (document_id, new_version) is a REFUSAL, not a no-op", async () => {

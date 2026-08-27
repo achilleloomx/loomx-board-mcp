@@ -1544,7 +1544,8 @@ async function docTraceability(
   mode: string;
   count: number;
   items: unknown[];
-  coverage?: { total_sources: number; covered_same_project: number; covered_cross_project_only: number; covered_total: number };
+  abstained_items?: unknown[];
+  coverage?: { total_sources: number; covered_same_project: number; covered_cross_project_only: number; covered_total: number; abstained: number };
   visibility_gap?: true;
   note?: string;
 }>> {
@@ -1571,14 +1572,25 @@ async function docTraceability(
   }
   const sourceIds = new Set(sources.map((s) => s.id as string));
 
-  // Target item ids in the project (same-project coverage path).
-  const { data: tgtRows, error: tgtErr } = await db
+  // Type of EVERY doc_item in the project this identity can read (not just
+  // cfg.target) — needed to tell "linked to something of a different type"
+  // (genuinely not covering) apart from "linked to something invisible"
+  // (msg loomy 31b5767e, finding auditor aa43f599: doc_item_links is scoped by
+  // project_id only, not by the per-document visibility that gates a plain
+  // doc_items SELECT — so a same-project link can point at a row this
+  // identity cannot otherwise read at all, e.g. via doc_item_resolve).
+  // Filtering the old cfg.target-only fetch by "is this id even IN targetIds"
+  // could not distinguish the two cases and silently reported the second as
+  // "not covered" — a gap that isn't real, exactly what REQ-DOCM-012/015
+  // (vuoto ≠ negato) forbid presenting as a definitive count.
+  const { data: typeRows, error: typeErr } = await db
     .from(DOC_ITEMS)
-    .select("id")
-    .eq("project_id", args.project_id)
-    .eq("item_type", cfg.target);
-  if (tgtErr) return err(`Traceability target query failed: ${tgtErr.message}`);
-  const targetIds = new Set((Array.isArray(tgtRows) ? (tgtRows as any[]) : []).map((r) => r.id));
+    .select("id, item_type")
+    .eq("project_id", args.project_id);
+  if (typeErr) return err(`Traceability item-type query failed: ${typeErr.message}`);
+  const typeById = new Map<string, string>();
+  for (const r of (Array.isArray(typeRows) ? (typeRows as any[]) : [])) typeById.set((r as any).id, (r as any).item_type);
+  const targetIds = new Set(Array.from(typeById.entries()).filter(([, t]) => t === cfg.target).map(([id]) => id));
 
   // All doc_item_links in the project.
   const { data: linkRows, error: linkErr } = await db
@@ -1589,10 +1601,21 @@ async function docTraceability(
   const links = Array.isArray(linkRows) ? (linkRows as any[]) : [];
 
   // A source is "covered" if any link connects it (either direction) to a target item.
+  // If the other end of a source's link isn't in typeById at all, this identity
+  // cannot read it — abstain, never count the source as an uncovered gap.
   const coveredSameProject = new Set<string>();
+  const abstainedSources = new Set<string>();
   for (const l of links) {
-    if (targetIds.has(l.to_item)) coveredSameProject.add(l.from_item);
-    if (targetIds.has(l.from_item)) coveredSameProject.add(l.to_item);
+    if (sourceIds.has(l.from_item)) {
+      const otherType = typeById.get(l.to_item);
+      if (otherType === cfg.target) coveredSameProject.add(l.from_item);
+      else if (otherType === undefined) abstainedSources.add(l.from_item);
+    }
+    if (sourceIds.has(l.to_item)) {
+      const otherType = typeById.get(l.from_item);
+      if (otherType === cfg.target) coveredSameProject.add(l.to_item);
+      else if (otherType === undefined) abstainedSources.add(l.to_item);
+    }
   }
 
   // Cross-project coverage: doc_item_xproject_links has no project_id column
@@ -1627,15 +1650,24 @@ async function docTraceability(
         const srcId = sourceIds.has(l.from_item) ? l.from_item : (sourceIds.has(l.to_item) ? l.to_item : null);
         if (!srcId) continue;
         const otherId = srcId === l.from_item ? l.to_item : l.from_item;
-        if (targetTypeById.get(otherId) === cfg.target) coveredCrossProject.add(srcId);
+        const otherType = targetTypeById.get(otherId);
+        if (otherType === cfg.target) coveredCrossProject.add(srcId);
+        // Link exists (readable, project-agnostic table) but the other end
+        // didn't resolve — RLS-invisible from here. Same abstention discipline
+        // as the same-project branch above and as docTraceabilityOrigin's
+        // cross-project branch: never let an unreadable target read as "gap".
+        else if (otherType === undefined) abstainedSources.add(srcId);
       }
     }
   }
 
   const coveredTotal = new Set([...coveredSameProject, ...coveredCrossProject]);
   const gaps = sources
-    .filter((s) => !coveredTotal.has(s.id))
+    .filter((s) => !coveredTotal.has(s.id) && !abstainedSources.has(s.id))
     .map((s) => ({ id: s.id, code: s.code, status: s.status, gap: cfg.label, body_preview: typeof s.body === "string" ? s.body.slice(0, 120) : null }));
+  const abstainedItems = sources
+    .filter((s) => !coveredTotal.has(s.id) && abstainedSources.has(s.id))
+    .map((s) => ({ id: s.id, code: s.code, status: s.status, reason: "a linked item exists but is not readable by this identity — coverage cannot be confirmed" }));
 
   const coveredCrossProjectOnly = Array.from(coveredCrossProject).filter((id) => !coveredSameProject.has(id)).length;
 
@@ -1645,10 +1677,12 @@ async function docTraceability(
       mode: `traceability:${args.traceability}`,
       count: gaps.length,
       items: gaps,
+      ...(abstainedItems.length > 0 ? { abstained_items: abstainedItems } : {}),
       coverage: {
         total_sources: sources.length,
         covered_same_project: coveredSameProject.size,
         covered_cross_project_only: coveredCrossProjectOnly,
+        abstained: abstainedItems.length,
         covered_total: coveredTotal.size,
       },
     },
@@ -1754,7 +1788,17 @@ async function docTraceabilityOrigin(
     const srcId = sourceIds.has(l.from_item) ? l.from_item : l.to_item;
     const otherId = srcId === l.from_item ? l.to_item : l.from_item;
     const otherType = sameProjectTypeById.get(otherId);
-    if (!otherType) continue; // dangling under the FK guarantee above — ignore defensively
+    if (!otherType) {
+      // NOT dangling — the FK guarantees the row exists. Missing from the map
+      // means RLS hid it from this identity (msg loomy 31b5767e/aa43f599:
+      // doc_item_links is project_id-scoped, not per-document-visibility-scoped,
+      // so a same-project link can point at a row this identity cannot
+      // otherwise read). Abstain, same discipline as the cross-project branch
+      // below — silently skipping would read as "no origin here", which isn't
+      // known to be true.
+      abstainedBySource.add(srcId);
+      continue;
+    }
     addOrigin(srcId, classifyOrigin(otherType, false));
   }
 

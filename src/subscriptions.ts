@@ -24,6 +24,20 @@ const GOV_DOC_VERSIONS = "gov.doc_versions";
 const DOC_ITEMS = "doc_items";
 const DOCUMENTS = "documents";
 
+// SDES-SUB-012 (REQ-SUB-012) — "what binds everyone is not subscribable", a
+// declared INTERIM approximation, not the durable rule. Loomy correction
+// 2026-08-27 (msg 4162dfb7, replying to bc24b35f): the real criterion is a
+// core/ambient CLASS read from a category/stream registry — a registry that
+// does not exist in code yet. Gating on project residency is the exact defect
+// class this rejects elsewhere; it is tolerated here ONLY as a transitional
+// stand-in because today every cross-project decision happens to live in the
+// hub project's two `decisions` documents. This decays at the domain-manifest
+// migration — a manifest is also cross-project and MUST stay subscribable, so
+// this check must never widen to "any hub-project item" and must be replaced,
+// not extended, once the class lives in the registry.
+export const HUB_PROJECT_ID = "22ae4e79-1800-4975-ba46-cd2f86734257";
+export const HUB_UNSUBSCRIBABLE_DOCUMENT_TYPE = "decisions";
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // Duck-typed access to the doc_rw SAVEPOINT capability (docDb.ts DocRwDb) — mirrors
@@ -174,6 +188,32 @@ export async function docSubscribe(
     targetProjectId = d.project_id;
   }
 
+  // subscribed_at_version = the target document's CURRENT documents.version —
+  // fetched once, alongside document_type for the REQ-SUB-012 gate below.
+  const { data: docRow, error: docErr } = await db
+    .from(DOCUMENTS)
+    .select("id, version, document_type")
+    .eq("id", targetDocumentId)
+    .maybeSingle();
+  if (docErr) return err(`Failed to load target document: ${docErr.message}`);
+  if (!docRow) return err(`Target document ${targetDocumentId} could not be read for its version.`);
+  const targetDoc = docRow as { id: string; version: unknown; document_type: string };
+  const subscribedAtVersion = String(targetDoc.version ?? "");
+
+  // REQ-SUB-012: what binds the whole org is never subscribable — see
+  // HUB_PROJECT_ID comment above for why this specific gate (SDES-SUB-012).
+  // Applies to every intent, not just 'critical' — an org-wide constraint
+  // opted into voluntarily isn't a constraint (REQ-SUB-012 body).
+  if (targetProjectId === HUB_PROJECT_ID && targetDoc.document_type === HUB_UNSUBSCRIBABLE_DOCUMENT_TYPE) {
+    return err(
+      `Cannot subscribe: the target is a cross-project decision in the hub project (${HUB_PROJECT_ID}) — these bind ` +
+      `the whole fleet without an opt-in act, so they are not subscribable (REQ-SUB-012). This check is a declared ` +
+      `INTERIM approximation (SDES-SUB-012): the durable rule is a core/ambient CLASS read from a category registry, ` +
+      `not project residency — it will replace this gate once that registry exists, and domain manifests (also ` +
+      `cross-project) will stay subscribable when it does.`
+    );
+  }
+
   // Critical cross-project: refused in v1 (SDES-SUB-001 §4, D-186 Q2).
   if (args.intent === "critical" && targetProjectId !== sub.project_id) {
     return err(
@@ -182,16 +222,6 @@ export async function docSubscribe(
       `Use board_send to the target's owning agent instead, or subscribe with intent='module'|'informative'.`
     );
   }
-
-  // subscribed_at_version = the target document's CURRENT documents.version.
-  const { data: docRow, error: docErr } = await db
-    .from(DOCUMENTS)
-    .select("id, version")
-    .eq("id", targetDocumentId)
-    .maybeSingle();
-  if (docErr) return err(`Failed to load target document version: ${docErr.message}`);
-  if (!docRow) return err(`Target document ${targetDocumentId} could not be read for its version.`);
-  const subscribedAtVersion = String((docRow as { version: unknown }).version ?? "");
 
   // Existing active subscription for this exact (subscriber, target) pair?
   let existingQ = db
@@ -655,14 +685,22 @@ export async function docPublish(
   // Document must exist and be readable; legitimation = owner or loomy (SDES-SUB-003 §2).
   const { data: docRow, error: docErr } = await db
     .from(DOCUMENTS)
-    .select("id, project_id, owner, version")
+    .select("id, project_id, owner, version, document_type")
     .eq("id", args.document_id)
     .maybeSingle();
   if (docErr) return err(`Failed to load document: ${docErr.message}`);
   if (!docRow) {
     return err(`document_id '${args.document_id}' is not readable by '${ctx.selfSlug}' (not found, or hidden by RLS).`);
   }
-  const doc = docRow as { id: string; project_id: string; owner: string | null; version: string | null };
+  const doc = docRow as { id: string; project_id: string; owner: string | null; version: string | null; document_type: string };
+
+  // working_doc is never publishable (REQ-DOCM-018, SDES-DOCM-018): scratchpad
+  // material, no `approved` status, deliberately un-tracked. Tool-floor guard,
+  // defense in depth alongside whatever gov.doc_publish() enforces server-side
+  // — same pattern as the changelog gate above, never trust a single layer.
+  if (doc.document_type === "working_doc") {
+    return err(`document_id '${doc.id}' is a working_doc — never publishable (REQ-DOCM-018). Migrate its content into a normative document type first.`);
+  }
 
   if (!ctx.isLoomy && doc.owner !== ctx.selfSlug) {
     return err(

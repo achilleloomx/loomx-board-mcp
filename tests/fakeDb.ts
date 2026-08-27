@@ -144,6 +144,19 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
       if (opts.rls && table === "documents") {
         rows = rows.filter((r) => r.visibility === "org" || members.has(r.project_id as string));
       }
+      // doc_items RLS rides on the parent document's visibility (same
+      // predicate as `documents`, SDES-DOCM-005) — production measured this
+      // 2026-08-27 (msg loomy 31b5767e/aa43f599): a doc_items row is only
+      // readable when its document is. doc_item_links has NO such filter here
+      // (matches production: it's project_id-scoped only, not per-document —
+      // that gap is exactly what the traceability fix above has to work around).
+      if (opts.rls && table === "doc_items") {
+        rows = rows.filter((r) => {
+          const doc = (store.documents as Row[]).find((d) => d.id === r.document_id);
+          if (!doc) return false;
+          return doc.visibility === "org" || members.has(doc.project_id as string);
+        });
+      }
       if (orderCol) {
         rows = [...rows].sort((a, b) => {
           const av = a[orderCol!], bv = b[orderCol!];
