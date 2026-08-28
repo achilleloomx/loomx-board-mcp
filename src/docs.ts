@@ -440,6 +440,13 @@ function diffAgainstRow(intended: Record<string, unknown>, row: Record<string, u
   return out;
 }
 
+// DB CHECK constraints on doc_items (DBA schema) — measured via pg_constraint,
+// GTD 6e82b3b6: an over-length title/summary used to surface as the raw
+// "violates check constraint doc_items_title_len" from Postgres, which names
+// neither the limit nor the length that was actually sent.
+const DOC_ITEM_TITLE_MAX_LEN = 80;
+const DOC_ITEM_SUMMARY_MAX_LEN = 280;
+
 export async function docItemUpsert(
   db: SupabaseClient,
   args: DocItemUpsertArgs,
@@ -451,6 +458,17 @@ export async function docItemUpsert(
       `Unknown item_type '${args.item_type}'. Valid: ${Object.keys(DOC_ITEM_TYPE_REGISTRY).join(", ")}. ` +
       `Call doc_item_types('${args.item_type}') for its schema + example.`
     );
+  }
+
+  // Tool-floor length checks, mirroring the DB constraints — validated before
+  // any write so the caller learns WHICH field and HOW LONG, never the raw
+  // CHECK-violation message. Never truncated silently (GTD 6e82b3b6: a
+  // silently cut title is worse than a rejection).
+  if (args.title !== undefined && args.title.length > DOC_ITEM_TITLE_MAX_LEN) {
+    return err(`title is ${args.title.length} chars, max ${DOC_ITEM_TITLE_MAX_LEN} (DB constraint doc_items_title_len). Shorten it — titles are never truncated silently.`);
+  }
+  if (args.summary !== undefined && args.summary.length > DOC_ITEM_SUMMARY_MAX_LEN) {
+    return err(`summary is ${args.summary.length} chars, max ${DOC_ITEM_SUMMARY_MAX_LEN} (DB constraint doc_items_summary_len). Shorten it — summaries are never truncated silently.`);
   }
 
   // ---- Resolve idempotency target: coded rows FIRST, before touching the

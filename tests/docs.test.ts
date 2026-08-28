@@ -281,6 +281,38 @@ test("doc_item_upsert rejects item_type not legal for the document_type", async 
   assert.match((bad as any).error, /not allowed in a 'req'/);
 });
 
+test("doc_item_upsert rejects title/summary over the DB length limits with an actionable message (GTD 6e82b3b6)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const docId = (doc as any).data.document_id;
+
+  const longTitle = "x".repeat(81);
+  const badTitle = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    code: "REQ-TITLE", title: longTitle,
+  }, ctx);
+  assert.equal(badTitle.ok, false);
+  assert.match((badTitle as any).error, /title is 81 chars, max 80/);
+  assert.equal(store.doc_items.filter((r) => r.code === "REQ-TITLE").length, 0, "rejected upsert did not create a row");
+
+  const longSummary = "y".repeat(281);
+  const badSummary = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    code: "REQ-SUMMARY", summary: longSummary,
+  }, ctx);
+  assert.equal(badSummary.ok, false);
+  assert.match((badSummary as any).error, /summary is 281 chars, max 280/);
+
+  // exactly at the limit must pass
+  const okTitle = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    code: "REQ-OK", title: "x".repeat(80), summary: "y".repeat(280),
+  }, ctx);
+  assert.ok(okTitle.ok, `upsert at the exact limit should pass: ${JSON.stringify(okTitle)}`);
+});
+
 test("doc_item_resolve is project-scoped and errors actionably on miss", async () => {
   const store: Store = {};
   seedProjects(store);
