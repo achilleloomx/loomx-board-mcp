@@ -24,6 +24,7 @@ import {
   type DocumentType,
 } from "./docTypes.js";
 import { paginate } from "./pagination.js";
+import type { FactOnLinkInput, FactOnLinkOutcome } from "./factSync.js";
 
 const DOCUMENTS = "documents";
 const DOC_ITEMS = "doc_items";
@@ -1118,7 +1119,7 @@ export async function docLink(
   db: SupabaseClient,
   args: DocLinkArgs,
   _ctx: DocContext
-): Promise<DocResult<{ link_id: string; target_kind: string; relation_type: string | null }>> {
+): Promise<DocResult<{ link_id: string; target_kind: string; relation_type: string | null; fact_subscription?: FactOnLinkOutcome }>> {
   const route = LINK_TYPE_REGISTRY[args.target_kind];
   if (!route) {
     return err(`Invalid target_kind '${args.target_kind}'. Valid: doc | gtd | wi.`);
@@ -1179,23 +1180,28 @@ export async function docLink(
   // references — dba msg 41fa192b Q6).
   const { data: fromRow, error: fromErr } = await db
     .from(DOC_ITEMS)
-    .select("id, project_id")
+    .select("id, project_id, code")
     .eq("id", args.from_id)
     .maybeSingle();
   if (fromErr) return err(`Failed to load from_id: ${fromErr.message}`);
   if (!fromRow) return err(`from_id '${args.from_id}' is not an existing doc_item.`);
   const fromProjectId = (fromRow as { project_id: string }).project_id;
+  const fromCode = (fromRow as { code?: string | null }).code ?? null;
 
   let toProjectId: string | null = null;
+  let toDocumentId: string | null = null;
+  let toCode: string | null = null;
   if (args.relation_type !== "references") {
     const { data: toRow, error: toErr } = await db
       .from(DOC_ITEMS)
-      .select("id, project_id")
+      .select("id, project_id, document_id, code")
       .eq("id", args.to_id)
       .maybeSingle();
     if (toErr) return err(`Failed to load to_id: ${toErr.message}`);
     if (!toRow) return err(`to_id '${args.to_id}' is not an existing doc_item.`);
     toProjectId = (toRow as { project_id: string }).project_id;
+    toDocumentId = (toRow as { document_id?: string | null }).document_id ?? null;
+    toCode = (toRow as { code?: string | null }).code ?? null;
   }
 
   const crossProject = args.relation_type === "references" || toProjectId !== fromProjectId;
@@ -1213,7 +1219,21 @@ export async function docLink(
       if (/check constraint|doc_item_xproject_links_relation_type/i.test(m)) return err(`relation_type '${args.relation_type}' is not allowed cross-project. Original: ${m}`);
       return err(`Failed to create cross-project link: ${m}`);
     }
-    return { ok: true, data: { link_id: (data as any).id, target_kind: "doc", relation_type: args.relation_type } };
+    const xFact = await deriveFact(db, {
+      from_id: args.from_id,
+      from_project_id: fromProjectId,
+      from_code: fromCode,
+      to_id: args.to_id,
+      to_project_id: toProjectId,
+      to_document_id: toDocumentId,
+      to_code: toCode,
+      relation_type: args.relation_type,
+      cross_project: true,
+    });
+    return {
+      ok: true,
+      data: { link_id: (data as any).id, target_kind: "doc", relation_type: args.relation_type, ...(xFact ? { fact_subscription: xFact } : {}) },
+    };
   }
 
   const { data, error } = await db
@@ -1228,7 +1248,50 @@ export async function docLink(
     if (/check constraint|doc_item_links_relation_type/i.test(m)) return err(`relation_type '${args.relation_type}' is not allowed intra-project (it may be cross-project-only, e.g. 'references'). Original: ${m}`);
     return err(translateLinkError(m));
   }
-  return { ok: true, data: { link_id: (data as any).id, target_kind: "doc", relation_type: args.relation_type } };
+  // D-225/4bis: on a project that has already opted into decay, a new
+  // verifies/satisfies bond derives its own 'fact' subscription here and now.
+  // Never blocking, never silent — see deriveFactOnLink for why both.
+  const fact = await deriveFact(db, {
+    from_id: args.from_id,
+    from_project_id: fromProjectId,
+    from_code: fromCode,
+    to_id: args.to_id,
+    to_project_id: toProjectId,
+    to_document_id: toDocumentId,
+    to_code: toCode,
+    relation_type: args.relation_type,
+    cross_project: false,
+  });
+  return {
+    ok: true,
+    data: { link_id: (data as any).id, target_kind: "doc", relation_type: args.relation_type, ...(fact ? { fact_subscription: fact } : {}) },
+  };
+}
+
+// Dynamic import: factSync.ts → subscriptions.ts → staleness.ts all import types
+// from here, and a static edge back would close a runtime cycle. Same pattern
+// tools.ts uses for every doc surface.
+async function deriveFact(db: SupabaseClient, link: FactOnLinkInput): Promise<FactOnLinkOutcome | null> {
+  // The import itself is inside the guard, not just the call. Found live on
+  // 2026-08-29: a running MCP process had this module from the NEW build and
+  // factSync.js still from the OLD one (dist/ is shared and modules load
+  // lazily, so rebuilding under a live window mixes versions rather than
+  // leaving it wholly on the previous build — G4 is sharper than it reads).
+  // The result was 'deriveFactOnLink is not a function' thrown OUTSIDE the
+  // hook's own try/catch, which failed doc_link and rolled back the link —
+  // exactly the thing this hook promises it can never do.
+  try {
+    const { deriveFactOnLink } = await import("./factSync.js");
+    return await deriveFactOnLink(db, link);
+  } catch (e) {
+    return {
+      created: false,
+      project_opted_in: false,
+      note:
+        `the link was created; the automatic 'fact' derivation (D-225/4bis) could not be loaded or run: ` +
+        `${e instanceof Error ? e.message : String(e)}. Reconcile with doc_fact_sync — it is idempotent.`,
+    };
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1246,7 +1309,15 @@ export async function docLinkByCode(
   db: SupabaseClient,
   args: DocLinkByCodeArgs,
   ctx: DocContext
-): Promise<DocResult<{ link_id: string; from: { code: string; uuid: string }; to: { code: string; uuid: string }; relation_type: string }>> {
+): Promise<
+  DocResult<{
+    link_id: string;
+    from: { code: string; uuid: string };
+    to: { code: string; uuid: string };
+    relation_type: string;
+    fact_subscription?: FactOnLinkOutcome;
+  }>
+> {
   const from = await docItemResolve(db, { project_id: args.project_id, code: args.from_code }, ctx);
   if (!from.ok) return err(`from_code: ${from.error}`);
   const to = await docItemResolve(db, { project_id: args.project_id, code: args.to_code }, ctx);
@@ -1266,6 +1337,7 @@ export async function docLinkByCode(
       from: { code: args.from_code, uuid: from.data.item_id },
       to: { code: args.to_code, uuid: to.data.item_id },
       relation_type: args.link_type,
+      ...(linked.data.fact_subscription ? { fact_subscription: linked.data.fact_subscription } : {}),
     },
   };
 }

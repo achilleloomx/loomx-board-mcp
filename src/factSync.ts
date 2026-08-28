@@ -395,3 +395,267 @@ export async function docFactSync(
   }
   return { ok: true, data: result };
 }
+
+// ---------------------------------------------------------------------------
+// D-225 integration 4bis — automatic MAINTENANCE after a project's opt-in.
+//
+// Loomy's ruling (msg d429d82f, 2026-08-28) closed the question this tool left
+// open. Neither extreme was accepted: deriving facts on every doc_link would
+// create IRREVERSIBLE subscriptions as a side effect on projects that never
+// chose decay (against D-225 point 4), and keeping every derivation manual
+// recreates the drift measured on 2026-08-28 — 927 declared traceability bonds,
+// zero of them able to make anything decay. The rule is therefore:
+//
+//   FIRST activation per project: always manual (dry_run → owner's GO).
+//   FROM THEN ON: maintenance is automatic — new verifies/satisfies links in
+//   that project derive their own 'fact'.
+//
+// The mechanism was left to this server ("è implementazione, non contratto").
+// Two were on the table and this is the one chosen, with its reason:
+//
+//   - A SYNCHRONOUS HOOK on doc_link (this code) closes the window between "the
+//     bond is declared" and "the bond can carry decay" to zero. That window IS
+//     the defect: REG-011 was provoked by a substantive rewrite landing while
+//     nothing was subscribed yet.
+//   - A RECONCILER SWEEP (dev-hq) would have reopened that window by exactly one
+//     cadence, and added a cross-repo dependency for a rule that lives here.
+//
+// The hook only sees links created THROUGH this server. Links inserted by other
+// paths stay uncovered — which is why doc_fact_sync remains: it is both the
+// activation act and the idempotent recovery net, and its dry_run is the measure
+// of any drift the hook missed. Neither surface replaces the other.
+//
+// WHAT COUNTS AS OPT-IN, and why it is not a new flag: a project has opted in
+// iff it already has at least one ACTIVE origin='fact' subscription. That is a
+// measured fact, not an inferred one — doc_fact_sync is the only writer of
+// 'fact' rows and it requires an explicit call by a legitimated owner, and this
+// hook can never bootstrap itself (no facts ⇒ no derivation). Inventing a
+// per-project key in loomx_governance_params (a cross-project registry) or
+// asking for a loomx_projects column would both be contract this server does not
+// own (D-005 / D-136 §5). Declared limits of the choice: the opt-in cannot be
+// revoked (neither can the facts themselves, SEC-011), and it cannot be declared
+// in advance of the first sync — which is precisely what "first activation is
+// the sync" means.
+// ---------------------------------------------------------------------------
+
+function savepointHandle(db: SupabaseClient): {
+  savepoint: (name: string) => Promise<void>;
+  rollbackToSavepoint: (name: string) => Promise<void>;
+} | null {
+  const h = db as unknown as {
+    __docRw?: boolean;
+    savepoint?: (name: string) => Promise<void>;
+    rollbackToSavepoint?: (name: string) => Promise<void>;
+  };
+  if (h.__docRw && h.savepoint && h.rollbackToSavepoint) return { savepoint: h.savepoint, rollbackToSavepoint: h.rollbackToSavepoint };
+  return null;
+}
+
+export interface ProjectDecayOptIn {
+  opted_in: boolean;
+  verified: boolean;
+  reason?: string;
+}
+
+// The opt-in probe. Kept separate and exported so the rule has ONE reader: a
+// second surface re-deriving "has this project opted in" from its own predicate
+// is how two definitions of the same thing drift apart (the reason
+// readAdmissionGate was exported in v0.25.0).
+export async function projectDecayOptIn(db: SupabaseClient, projectId: string): Promise<ProjectDecayOptIn> {
+  const { data, error } = await db
+    .from(GOV_DOC_SUBSCRIPTIONS)
+    .select("id")
+    .eq("subscriber_project_id", projectId)
+    .eq("origin", "fact")
+    .eq("status", "active")
+    .limit(1);
+  if (error) return { opted_in: false, verified: false, reason: `opt-in probe failed: ${error.message}` };
+  return { opted_in: (Array.isArray(data) ? data : []).length > 0, verified: true };
+}
+
+export interface FactOnLinkOutcome {
+  created: boolean;
+  project_opted_in: boolean;
+  subscription_id?: string;
+  intent?: string;
+  // Always present, on both outcomes. A link that will never carry decay is the
+  // exact shape of REG-011 ("collegamento presente, congegno assente"); saying
+  // so at the moment the link is made costs one line and is the whole point.
+  note: string;
+}
+
+export interface FactOnLinkInput {
+  from_id: string;
+  from_project_id: string;
+  from_code?: string | null;
+  to_id: string;
+  to_project_id: string | null;
+  to_document_id?: string | null;
+  to_code?: string | null;
+  relation_type: string;
+  cross_project: boolean;
+}
+
+// Returns null when the relation carries no verdict dependency at all
+// (refines/relates_to/supersedes/amends/references) — those links say nothing
+// about decay and a note on them would be noise, not signal.
+//
+// NEVER throws and NEVER fails the link: the link is the act the caller asked
+// for, the fact is additive. Under doc_rw the whole tool call is ONE
+// transaction, so a failed query here would abort the caller's INSERT too — the
+// hook would be able to destroy the very link it exists to enrich. Hence the
+// SAVEPOINT around everything, not just the write (a failed SELECT aborts a
+// transaction exactly as a failed INSERT does — the defect that made
+// doc_structure answer "0 subscriptions" for a project with 104).
+export async function deriveFactOnLink(db: SupabaseClient, link: FactOnLinkInput): Promise<FactOnLinkOutcome | null> {
+  const intent = FACT_INTENT_BY_RELATION[link.relation_type as FactSyncRelation];
+  if (!intent) return null;
+
+  const sp = savepointHandle(db);
+  const SP = "fact_on_link";
+  try {
+    if (sp) await sp.savepoint(SP);
+    const outcome = await deriveInner(db, link, intent);
+    if (sp && !outcome.created) await sp.rollbackToSavepoint(SP);
+    return outcome;
+  } catch (e) {
+    if (sp) {
+      try {
+        await sp.rollbackToSavepoint(SP);
+      } catch {
+        /* the transaction is already unusable; the caller's own re-read will surface it */
+      }
+    }
+    return {
+      created: false,
+      project_opted_in: false,
+      note:
+        `the link was created; the automatic 'fact' derivation (D-225/4bis) did not run: ${e instanceof Error ? e.message : String(e)}. ` +
+        `Run doc_fact_sync on this project to reconcile — it is idempotent.`,
+    };
+  }
+}
+
+async function deriveInner(db: SupabaseClient, link: FactOnLinkInput, intent: "critical" | "module"): Promise<FactOnLinkOutcome> {
+  const optIn = await projectDecayOptIn(db, link.from_project_id);
+  if (!optIn.verified) {
+    // Abstain, and say so. Creating a 'fact' is irreversible (SEC-011): where
+    // doc_fact_sync may proceed on an unverified admission flag because a human
+    // just gave the GO, this path has no human in it — so an unverified
+    // precondition must stop the write, never wave it through.
+    return {
+      created: false,
+      project_opted_in: false,
+      note: `no 'fact' derived: the project's decay opt-in could NOT be verified (${optIn.reason ?? "unknown"}). Abstained rather than guessed — a derived subscription cannot be undone (SEC-011).`,
+    };
+  }
+  if (!optIn.opted_in) {
+    return {
+      created: false,
+      project_opted_in: false,
+      note:
+        `this project has NOT activated decay yet, so this ${link.relation_type} bond is declared but carries no decay ` +
+        `(the REG-011 defect). Activation is deliberately manual once per project: doc_fact_sync(project_id, dry_run=true) ` +
+        `then, on the owner's GO, without dry_run. From then on links like this one derive their 'fact' automatically (D-225/4bis).`,
+    };
+  }
+  if (link.cross_project || (link.to_project_id != null && link.to_project_id !== link.from_project_id)) {
+    return {
+      created: false,
+      project_opted_in: true,
+      note:
+        `no 'fact' derived: this ${link.relation_type} bond crosses a project boundary. Cross-project subscriptions cannot ` +
+        `be 'critical' in v1 (D-186 Q2) and doc_item_xproject_links carries no version pin at all — the declared debt loomy ` +
+        `registered on 2026-08-28 (design GTD open). The bond is real and will NOT carry decay until that debt is paid.`,
+    };
+  }
+
+  const gate = await readAdmissionGate(db);
+  if (gate.suspended) {
+    return {
+      created: false,
+      project_opted_in: true,
+      note:
+        `no 'fact' derived: admission to subscriptions is SUSPENDED ('${ADMISSION_SUSPENDED_PARAM}' = ${gate.value}). ` +
+        `A derived fact is still an admission (REQ-SUB-013 c.3). Re-run doc_fact_sync once admission reopens.`,
+    };
+  }
+
+  const { data: existing, error: exErr } = await db
+    .from(GOV_DOC_SUBSCRIPTIONS)
+    .select("id, origin, intent")
+    .eq("subscriber_item_id", link.from_id)
+    .eq("target_item_id", link.to_id)
+    .eq("status", "active")
+    .limit(1);
+  if (exErr) throw new Error(`existing-subscription probe failed: ${exErr.message}`);
+  const already = (Array.isArray(existing) ? existing : [])[0] as { id: string; origin: string; intent: string } | undefined;
+  if (already) {
+    return {
+      created: false,
+      project_opted_in: true,
+      note: `no new 'fact' needed: an active ${already.origin} subscription (${already.intent}) already carries this dependency.`,
+    };
+  }
+
+  // The pin, from the same source doc_subscribe and doc_fact_sync use.
+  let documentId = link.to_document_id ?? null;
+  if (!documentId) {
+    const { data: toRow, error: toErr } = await db.from(DOC_ITEMS).select("id, document_id").eq("id", link.to_id).maybeSingle();
+    if (toErr) throw new Error(`target lookup failed: ${toErr.message}`);
+    documentId = (toRow as { document_id: string } | null)?.document_id ?? null;
+  }
+  if (!documentId) {
+    return { created: false, project_opted_in: true, note: `no 'fact' derived: the target's document is not readable, so no version pin can be written.` };
+  }
+  const { data: docRow, error: docErr } = await db.from(DOCUMENTS).select("id, version").eq("id", documentId).maybeSingle();
+  if (docErr) throw new Error(`target document version lookup failed: ${docErr.message}`);
+  const pin = (docRow as { version: unknown } | null)?.version;
+  if (pin == null) {
+    return { created: false, project_opted_in: true, note: `no 'fact' derived: target document ${documentId} is not readable for its version — no pin can be written.` };
+  }
+
+  const note =
+    `derived automatically from the ${link.relation_type} link ${link.from_code ?? link.from_id} → ${link.to_code ?? link.to_id} ` +
+    `at the moment the link was created (doc_link hook, D-225/4bis — the project had already opted into decay).`;
+  const { data: ins, error: insErr } = await db
+    .from(GOV_DOC_SUBSCRIPTIONS)
+    .insert({
+      subscriber_item_id: link.from_id,
+      subscriber_project_id: link.from_project_id,
+      target_item_id: link.to_id,
+      intent,
+      subscribed_at_version: String(pin),
+      note,
+      origin: "fact",
+      status: "active",
+    })
+    .select("id")
+    .maybeSingle();
+  if (insErr || !ins) throw new Error(`insert failed: ${insErr?.message ?? "no row returned"}`);
+  const newId = (ins as { id: string }).id;
+
+  // D-132: re-read before claiming it exists.
+  const { data: after, error: afterErr } = await db
+    .from(GOV_DOC_SUBSCRIPTIONS)
+    .select("id, intent, origin, status, target_item_id")
+    .eq("id", newId)
+    .maybeSingle();
+  if (afterErr) throw new Error(`post-insert re-read failed: ${afterErr.message}`);
+  const a = after as { intent: string; origin: string; status: string; target_item_id: string } | null;
+  if (!a || a.origin !== "fact" || a.intent !== intent || a.status !== "active" || a.target_item_id !== link.to_id) {
+    return {
+      created: false,
+      project_opted_in: true,
+      note: `the insert reported id '${newId}' but the re-read does not confirm it (D-132) — treat as UNCONFIRMED and reconcile with doc_fact_sync.`,
+    };
+  }
+
+  return {
+    created: true,
+    project_opted_in: true,
+    subscription_id: newId,
+    intent,
+    note: `'fact' subscription derived automatically (${link.relation_type} → ${intent}, D-225/4bis): this bond now carries decay.`,
+  };
+}

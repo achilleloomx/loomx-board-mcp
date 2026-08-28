@@ -3599,7 +3599,12 @@ export function registerTools(
       `Example (doc, intra): doc_link({target_kind:"doc", from_id:"<sdes-uuid>", to_id:"<req-uuid>", relation_type:"satisfies"}). ` +
       `Example (doc, cross-project): doc_link({target_kind:"doc", from_id:"<req-uuid>", to_id:"<hub-decision-uuid>", relation_type:"references"}). ` +
       `Example (gtd): doc_link({target_kind:"gtd", from_id:"<doc_item-uuid>", to_id:"<gtd-uuid>"}). ` +
-      `Example (wi): doc_link({target_kind:"wi", from_id:"<doc_item-uuid>", to_id:"<wi-uuid>"}).`,
+      `Example (wi): doc_link({target_kind:"wi", from_id:"<doc_item-uuid>", to_id:"<wi-uuid>"}). ` +
+      `D-225/4bis — 'verifies'/'satisfies' links answer with 'fact_subscription': on a project that has ALREADY opted into ` +
+      `decay (first activation is always manual: doc_fact_sync dry_run + the owner's GO) the bond derives its origin='fact' ` +
+      `subscription right here, so it carries decay from the instant it is declared. On a project that has not opted in, the ` +
+      `field says so instead — a declared bond that cannot make anything decay is the REG-011 defect, and it is stated, not ` +
+      `hidden. NEVER blocks the link; cross-project bonds are never derived (no version pin exists there — declared debt).`,
     {
       target_kind: z.enum(["doc", "gtd", "wi"]).describe("doc = doc_item↔doc_item | gtd = doc_item↔GTD | wi = doc_item↔WI"),
       from_id: z.string().uuid().describe("FROM doc_item UUID (always a doc_item)"),
@@ -3617,7 +3622,8 @@ export function registerTools(
     "doc_link_by_code",
     `Sugar: resolve(from_code) + resolve(to_code) + doc_link in ONE call, project-scoped + audit-logged. ` +
       `Safe-by-construction (sits on the UUID-only floor). For doc_item↔doc_item links only. ` +
-      `Example: doc_link_by_code({project_id:"<uuid>", from_code:"SDES-001", to_code:"REQ-001", link_type:"satisfies"}).`,
+      `Example: doc_link_by_code({project_id:"<uuid>", from_code:"SDES-001", to_code:"REQ-001", link_type:"satisfies"}). ` +
+      `Carries the same 'fact_subscription' outcome as doc_link (D-225/4bis).`,
     {
       project_id: z.string().uuid().describe("Project scope for BOTH codes — cross-app is impossible here"),
       from_code: z.string().min(1).describe("Source item code (e.g. SDES-001)"),
@@ -3939,7 +3945,11 @@ export function registerTools(
       `verifies/satisfies are derivable — 'refines'/'relates_to' are discursive and 'supersedes' is replacement. ` +
       `IRREVERSIBLE: a 'fact' subscription cannot be tombstoned (SEC-011, DB floor) — use dry_run=true first. Over the ` +
       `link ceiling the call is REFUSED, never truncated. Honours the same admission-suspension flag doc_subscribe ` +
-      `reads (a derived fact is still an admission). Example: doc_fact_sync({project_id:"<uuid>", dry_run:true}).`,
+      `reads (a derived fact is still an admission). D-225 point 4 + integration 4bis: this call is the project's FIRST ` +
+      `ACTIVATION and it is always manual (dry_run, then the owner's GO). From that moment MAINTENANCE is automatic — new ` +
+      `verifies/satisfies links in that project derive their own fact inside doc_link — and this tool stays as the ` +
+      `idempotent recovery net for links created outside this server, its dry_run being the measure of any such drift. ` +
+      `Example: doc_fact_sync({project_id:"<uuid>", dry_run:true}).`,
     {
       project_id: z.string().uuid().describe("Project whose links are derived (links carry their own project_id — same-project by construction)"),
       relation_types: z
