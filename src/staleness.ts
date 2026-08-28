@@ -198,6 +198,87 @@ function isDecayed(attrs: Record<string, unknown> | null | undefined): boolean {
   return !!attrs && attrs["decay_status"] === "decayed";
 }
 
+// ---------------------------------------------------------------------------
+// evaluateDecayGate — the "rilancio obbligatorio fuori soglia" verdict (GTD
+// 56a815b4, mandate 1dffa01e point 5), computed here and CONSUMED by doc_publish
+// (subscriptions.ts). It lives in this file because the decay state and the
+// thresholds do: a second implementation of the same rule next to the publish
+// path is how two surfaces start disagreeing about what "over threshold" means.
+//
+// Where the gate lives was the open question in GTD 56a815b4 (never decided
+// alone, cross-tool). Answer taken with loomy's GO to close it inside PR-2b:
+// inside doc_publish, BLOCKING. The mandate says the rerun must be "obbligatorio
+// prima di pubblicare una consegna — non solo visibile nel verdetto", and a gate
+// that only warns is the visibility that already existed. No bypass parameter:
+// the two legitimate exits are to rerun the tests and close the markings, or to
+// close them as no_impact with a written motivation (doc_staleness_close). A
+// force flag here would be a third exit that requires neither.
+//
+// Unreadable parameters never block: a registry that can't be read is not
+// evidence of a threshold being exceeded (same principle as readAdmissionGate
+// and loadDecayParams.missing). It is declared instead, so a gate nobody could
+// verify never passes for a gate that was checked.
+// ---------------------------------------------------------------------------
+
+export interface DecayGateVerdict {
+  decayed_count: number;
+  threshold: number | null;
+  max_days: number | null;
+  oldest_decay_days: number | null;
+  blocking: boolean;
+  reasons: string[];
+  decayed: Array<{ code: string | null; item_id: string; decay_since: string | null }>;
+  params_missing: string[];
+  class_gate_note: string;
+}
+
+export async function evaluateDecayGate(db: SupabaseClient, projectId: string): Promise<DecayGateVerdict> {
+  const params = await loadDecayParams(db);
+  const { data, error } = await db
+    .from(DOC_ITEMS)
+    .select("id, code, item_type, status, attrs")
+    .eq("project_id", projectId)
+    .eq("item_type", "uat_case");
+  const rows = error ? [] : ((data ?? []) as DocItemRow[]).filter((r) => isDecayed(r.attrs));
+
+  const decayed = rows.map((r) => ({
+    code: r.code,
+    item_id: r.id,
+    decay_since: typeof r.attrs?.["decay_since"] === "string" ? (r.attrs["decay_since"] as string) : null,
+  }));
+
+  let oldestDays: number | null = null;
+  for (const d of decayed) {
+    if (!d.decay_since) continue;
+    const t = Date.parse(d.decay_since);
+    if (Number.isNaN(t)) continue;
+    const days = Math.floor((Date.now() - t) / 86_400_000);
+    if (oldestDays == null || days > oldestDays) oldestDays = days;
+  }
+
+  const reasons: string[] = [];
+  if (params.threshold != null && decayed.length >= params.threshold) {
+    reasons.push(`${decayed.length} decayed uat_case rows in this project, at or over the threshold pg_rilancio_soglia_decaduti=${params.threshold}`);
+  }
+  if (params.max_days != null && oldestDays != null && oldestDays > params.max_days) {
+    reasons.push(`the oldest decay is ${oldestDays} days old, over pg_rilancio_giorni_max=${params.max_days}`);
+  }
+  if (error) reasons.length = 0; // couldn't read the rows at all: never block on a failed read
+
+  return {
+    decayed_count: decayed.length,
+    threshold: params.threshold,
+    max_days: params.max_days,
+    oldest_decay_days: oldestDays,
+    blocking: reasons.length > 0,
+    reasons,
+    decayed,
+    params_missing: params.missing,
+    class_gate_note:
+      "exempt-class gate (pg_rilancio_classi_esenti) not applied — no check-class attribute on uat_case yet (declared gap, D-136 §5).",
+  };
+}
+
 // node-pg returns `timestamptz` columns as Date objects, not strings — the
 // uat_case attrs_schema for decay_since declares `type: "string"` (attrs is
 // JSON, it has no native timestamp type), so every write path must normalize

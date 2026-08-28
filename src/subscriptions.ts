@@ -17,6 +17,7 @@
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { DocResult, DocContext } from "./docs.js";
+import { evaluateDecayGate } from "./staleness.js";
 
 const GOV_DOC_SUBSCRIPTIONS = "gov.doc_subscriptions";
 const GOV_DOC_SUBSCRIPTION_OUTCOMES = "gov.doc_subscription_outcomes";
@@ -31,7 +32,10 @@ const GOV_PARAMS = "loomx_governance_params";
 // the admission surface that reads it. Suspension stops ADMITTING NEW targets,
 // never the notifications already flowing — you retune before you extend, you
 // don't switch the system off.
-const ADMISSION_SUSPENDED_PARAM = "sottoscrizioni_ammissione_sospesa";
+// Exported since v0.25.0: doc_fact_sync (factSync.ts) reads the SAME flag from
+// the SAME helper — a derived 'fact' is still an admission, and a second reader
+// with its own copy of the rule is how two surfaces drift apart.
+export const ADMISSION_SUSPENDED_PARAM = "sottoscrizioni_ammissione_sospesa";
 
 // SDES-SUB-012 (REQ-SUB-012) — "what binds everyone is not subscribable", a
 // declared INTERIM approximation, not the durable rule. Loomy correction
@@ -76,7 +80,7 @@ function savepointHandle(db: SupabaseClient): {
 // caller gets `admission_gate` telling them the flag could not be verified, so
 // a suspension nobody can observe cannot pass for a suspension nobody declared
 // (same principle as `missing` in staleness.ts loadDecayParams).
-interface AdmissionGate {
+export interface AdmissionGate {
   suspended: boolean;
   verified: boolean;
   value: number | null;
@@ -84,7 +88,7 @@ interface AdmissionGate {
   reason?: string;
 }
 
-async function readAdmissionGate(db: SupabaseClient): Promise<AdmissionGate> {
+export async function readAdmissionGate(db: SupabaseClient): Promise<AdmissionGate> {
   const { data, error } = await db
     .from(GOV_PARAMS)
     .select("param_key, value_numeric, owner_agent_code, deprecated_at")
@@ -747,6 +751,10 @@ export interface DocPublishResult {
   bump_class: string;
   changelog_entry_id: string;
   published_at: string;
+  // Present when the decay gate did NOT block but had something to say: decayed
+  // tests below threshold, or thresholds that could not be read. A publication
+  // that went through with stale greens under it should say so on the way out.
+  decay_notice?: string;
 }
 
 export async function docPublish(
@@ -788,6 +796,37 @@ export async function docPublish(
     return err(
       `Not legitimated to publish document '${doc.id}': you are not its owner ('${doc.owner ?? "none"}'), and only ` +
       `loomy can publish cross-agent (SDES-SUB-003 §2).`
+    );
+  }
+
+  // Decay gate (GTD 56a815b4, mandate 1dffa01e point 5, closed inside PR-2b).
+  // "Sopra soglia il rilancio dei collaudi decaduti deve essere OBBLIGATORIO
+  // prima di pubblicare una consegna — non solo visibile nel verdetto." The
+  // visibility already existed (doc_staleness_query.decay.forced_rerun); this is
+  // the obligation. Scoped to the document's own project: a project publishes
+  // against its own decayed tests, never against the fleet's.
+  //
+  // Ordered AFTER legitimation (never disclose a project's state to someone who
+  // cannot publish it) but BEFORE the changelog checks, deliberately. The first
+  // live run had it last and the probe came back complaining about a changelog
+  // id instead: between "your parameter is wrong" and "this project cannot
+  // publish right now", the second is the one that changes the caller's plan —
+  // delivering it after they have built a changelog entry delivers it too late.
+  const decayGate = await evaluateDecayGate(db, doc.project_id);
+  if (decayGate.blocking) {
+    const list = decayGate.decayed
+      .slice(0, 10)
+      .map((d) => d.code ?? d.item_id)
+      .join(", ");
+    const more = decayGate.decayed.length > 10 ? ` (+${decayGate.decayed.length - 10} more)` : "";
+    return err(
+      `Publication REFUSED — decayed tests must be rerun first (${decayGate.reasons.join("; ")}). Decayed: ${list}${more}. ` +
+      `A decayed test is one whose subject was substantively rewritten after it passed (D-201/M2): its green is stale, ` +
+      `and publishing over it would ship a verdict nobody has re-earned. Two legitimate ways out, both explicit: rerun ` +
+      `the tests and close their markings with doc_staleness_close(outcome='updated'), or close them as 'no_impact' with ` +
+      `a written motivation. There is deliberately no force flag on this gate. Thresholds come from ` +
+      `loomx_governance_params (pg_rilancio_soglia_decaduti=${decayGate.threshold}, pg_rilancio_giorni_max=${decayGate.max_days}), ` +
+      `not from code. ${decayGate.class_gate_note}`
     );
   }
 
@@ -920,18 +959,27 @@ export async function docPublish(
     return err(`Publish '${result.publication_id}' was recorded but does not match what was sent (D-132) — treat as UNCONFIRMED.`);
   }
 
-  return {
-    ok: true,
-    data: {
-      publication_id: pub.id,
-      document_id: pub.document_id,
-      version_seq: pub.version_seq,
-      version_label: pub.version_label,
-      bump_class: pub.bump_class,
-      changelog_entry_id: pub.changelog_item_id,
-      published_at: pub.published_at,
-    },
+  const published: DocPublishResult = {
+    publication_id: pub.id,
+    document_id: pub.document_id,
+    version_seq: pub.version_seq,
+    version_label: pub.version_label,
+    bump_class: pub.bump_class,
+    changelog_entry_id: pub.changelog_item_id,
+    published_at: pub.published_at,
   };
+  if (decayGate.decayed_count > 0) {
+    published.decay_notice =
+      `${decayGate.decayed_count} decayed uat_case row(s) in this project, below the blocking threshold ` +
+      `(pg_rilancio_soglia_decaduti=${decayGate.threshold}, pg_rilancio_giorni_max=${decayGate.max_days}). ` +
+      `"Decaduto non rieseguito sotto soglia" is not green (PJ-7): this publication carries them.`;
+  } else if (decayGate.params_missing.length > 0) {
+    published.decay_notice =
+      `Decay gate NOT VERIFIED — missing from loomx_governance_params: ${decayGate.params_missing.join(", ")}. ` +
+      `Publication was allowed (an unreadable registry is not evidence of an exceeded threshold), but this call ` +
+      `cannot assert that the rerun obligation was satisfied.`;
+  }
+  return { ok: true, data: published };
 }
 
 // ---------------------------------------------------------------------------

@@ -11,6 +11,7 @@ import {
 import { rwGuardsEnabled, modelGuardsEnabled } from "./flags.js";
 import { SUBSCRIBE_INTENTS, SUBSCRIPTION_OUTCOMES, BUMP_CLASSES } from "./subscriptions.js";
 import { STALENESS_STATUS_FILTERS, STALENESS_CLOSE_OUTCOMES } from "./staleness.js";
+import { FACT_SYNC_RELATIONS, MAX_FACT_SYNC_LINKS } from "./factSync.js";
 import { paginate } from "./pagination.js";
 
 const TABLE = "board_messages";
@@ -3487,6 +3488,28 @@ export function registerTools(
     }
   );
 
+  // --- doc_rename ---
+  server.tool(
+    "doc_rename",
+    `Rename a document — the verb that did not exist (PJ-5; dba msg 6583a8a8: two different agents asked for it by ` +
+      `hand in the same week). TITLE ONLY: status, visibility and owner are different acts with different ` +
+      `legitimations, and a catch-all "doc_update" that writes whatever it is handed is the patch-semantics defect ` +
+      `this server already paid for once. Legitimation: document owner or loomy — a rename changes how the whole fleet ` +
+      `refers to a document. Re-reads the row before answering ok (D-132): under doc_rw a denied write updates 0 rows ` +
+      `silently. Renaming to the same title is a no-op, never an error. A long dash in the new title comes back as a ` +
+      `WARNING citing PG-007 (hyphen with spaces — a long dash breaks when a title is copied into a terminal or a ` +
+      `path), never as a refusal: this server does not own that norm. ` +
+      `Example: doc_rename({document_id:"<uuid>", new_title:"LoomX Framework - Project Governance - SoW"}).`,
+    {
+      document_id: z.string().uuid().describe("Document to rename"),
+      new_title: z.string().min(1).describe("The new title"),
+    },
+    async (args) => {
+      const { docRename } = await import("./docs.js");
+      return runDocTool((db) => docRename(db, args, docCtx));
+    }
+  );
+
   // --- doc_item_upsert ---
   server.tool(
     "doc_item_upsert",
@@ -3899,6 +3922,59 @@ export function registerTools(
     async (args) => {
       const { docDecayApply } = await import("./staleness.js");
       return runDocTool((db) => docDecayApply(db, args, docCtx));
+    }
+  );
+
+  // --- doc_fact_sync ---
+  server.tool(
+    "doc_fact_sync",
+    `The FIRST ring of the decay machine (PJ-7/D-210, REG-011): derives the origin='fact' subscriptions that a ` +
+      `project's traceability links already imply. The detector (gov.doc_items_detect_change) only marks rows somebody ` +
+      `holds an ACTIVE SUBSCRIPTION on — measured on production 2026-08-28: 170 subscriptions, ALL hand-made ` +
+      `origin='choice', against 510 'verifies' + 417 'satisfies' links and ZERO facts. That gap is exactly the recorded ` +
+      `defect: "collegamento presente, predicato presente, congegno assente" — a design rewritten substantively left ` +
+      `its linked test green. This tool reads the links nothing was reading. Grade is DERIVED from the relation, never ` +
+      `chosen per call: verifies → 'critical' (the test falls when its subject moves), satisfies → 'module' (a design ` +
+      `whose requirement moved needs review, it does not fall); the map is echoed back in intent_map. Only ` +
+      `verifies/satisfies are derivable — 'refines'/'relates_to' are discursive and 'supersedes' is replacement. ` +
+      `IRREVERSIBLE: a 'fact' subscription cannot be tombstoned (SEC-011, DB floor) — use dry_run=true first. Over the ` +
+      `link ceiling the call is REFUSED, never truncated. Honours the same admission-suspension flag doc_subscribe ` +
+      `reads (a derived fact is still an admission). Example: doc_fact_sync({project_id:"<uuid>", dry_run:true}).`,
+    {
+      project_id: z.string().uuid().describe("Project whose links are derived (links carry their own project_id — same-project by construction)"),
+      relation_types: z
+        .array(z.enum(FACT_SYNC_RELATIONS))
+        .optional()
+        .describe(`Subset of ${FACT_SYNC_RELATIONS.join("/")} to derive (default: both)`),
+      dry_run: z.boolean().optional().describe("Preview only, no writes (default false) — recommended first, creation is irreversible"),
+      limit: z.number().int().min(1).max(MAX_FACT_SYNC_LINKS).optional().describe(`Max links examined in one sweep (default/ceiling ${MAX_FACT_SYNC_LINKS})`),
+    },
+    async (args) => {
+      const { docFactSync } = await import("./factSync.js");
+      return runDocTool((db) => docFactSync(db, args, docCtx));
+    }
+  );
+
+  // --- doc_structure ---
+  server.tool(
+    "doc_structure",
+    `Read the STRUCTURE of a project: its documents (type, title, status, owner, visibility, declared version, ` +
+      `publications in gov.doc_versions, rows broken out by status and item_type) plus project totals — links by ` +
+      `relation, cross-project links counted separately, active subscriptions by origin AND grade, open staleness ` +
+      `markings. Closes the gap that made a document with no rows indistinguishable from a document that does not ` +
+      `exist: doc_query filters ITEMS, so nothing listed DOCUMENTS (PJ-8 — "chi firma i verdetti non può leggere ciò ` +
+      `su cui firma"). Read-only. A zero says WHICH zero it is: when the caller is not a member of the project, the ` +
+      `response carries a visibility note and the count must be read as "not measurable from here", never as "empty" ` +
+      `(D-167). Counts are never merged into one flattering total — an all-draft corpus and an all-hand-made ` +
+      `subscription set are exactly what a single number hides. include_items=true adds the item codes per document. ` +
+      `Example: doc_structure({project_id:"<uuid>"}).`,
+    {
+      project_id: z.string().uuid().describe("Project to read the structure of"),
+      include_items: z.boolean().optional().describe("Also list item codes per document (default false)"),
+    },
+    async (args) => {
+      const { docStructure } = await import("./structure.js");
+      return runDocTool((db) => docStructure(db, args, docCtx));
     }
   );
 }

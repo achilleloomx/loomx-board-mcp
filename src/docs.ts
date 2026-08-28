@@ -235,6 +235,103 @@ export async function docCreate(
 }
 
 // ---------------------------------------------------------------------------
+// doc_rename — the verb that was missing (PJ-5; dba msg 6583a8a8: "due agenti
+// diversi me l'hanno chiesto a mano nella stessa settimana"). Renaming a
+// document had no tool at all, so every rename was a hand-written UPDATE asked
+// of the DBA — which is how a naming rule ends up unenforced: the corpus cannot
+// obey a norm nobody has a verb for.
+//
+// Title ONLY. Not status, not visibility, not owner: each of those is a
+// different act with a different legitimation, and bundling them into a
+// "doc_update" that writes whatever it is handed is exactly the patch-semantics
+// defect this codebase already paid for once (v0.16.3).
+//
+// The naming norm (PG-007, in the ratified project-governance manifesto D-209)
+// says the separator is a hyphen with spaces, never a long dash — because a
+// long dash breaks when a title is copied into a terminal, a filename or a path,
+// producing two titles that look identical. Checked here as a WARNING, never a
+// refusal: this server is not the owner of that norm, and a tool that enforces
+// somebody else's rule as a hard floor decides for them (D-136 §5).
+// ---------------------------------------------------------------------------
+
+export interface DocRenameArgs {
+  document_id: string;
+  new_title: string;
+}
+
+export interface DocRenameResult {
+  document_id: string;
+  old_title: string;
+  new_title: string;
+  naming_warning?: string;
+}
+
+export async function docRename(
+  db: SupabaseClient,
+  args: DocRenameArgs,
+  ctx: DocContext
+): Promise<DocResult<DocRenameResult>> {
+  const title = (args.new_title ?? "").trim();
+  if (title === "") return err(`new_title is required and cannot be empty.`);
+  if (title.length > 200) return err(`new_title is ${title.length} chars — too long for a document title.`);
+
+  const { data: before, error: beforeErr } = await db
+    .from(DOCUMENTS)
+    .select("id, project_id, owner, title, document_type")
+    .eq("id", args.document_id)
+    .maybeSingle();
+  if (beforeErr) return err(`Failed to load document: ${beforeErr.message}`);
+  if (!before) {
+    return err(`document_id '${args.document_id}' is not readable by '${ctx.selfSlug}' (not found, or hidden by RLS — D-167).`);
+  }
+  const doc = before as { id: string; project_id: string; owner: string | null; title: string; document_type: string };
+
+  // Same legitimation as publishing: renaming a document changes how the whole
+  // fleet refers to it, so it is the owner's act (or loomy's), not a member's.
+  if (!ctx.isLoomy && doc.owner !== ctx.selfSlug) {
+    return err(
+      `Not legitimated to rename document '${doc.id}': you are not its owner ('${doc.owner ?? "none"}'), and only loomy ` +
+      `can rename cross-agent. Ask its owner, or ask loomy.`
+    );
+  }
+
+  // Captured BEFORE the update, by value. Same trap docSubscribe documents for
+  // `existing.intent`: some DB clients hand back live row objects, so reading
+  // `doc.title` after the write would report the NEW title as the old one — a
+  // rename whose "before" is its "after" is a receipt that proves nothing.
+  const oldTitle = String(doc.title);
+
+  if (oldTitle === title) {
+    return { ok: true, data: { document_id: doc.id, old_title: oldTitle, new_title: title } };
+  }
+
+  const { error: updErr } = await db.from(DOCUMENTS).update({ title }).eq("id", doc.id).select("id").maybeSingle();
+  if (updErr) return err(`Failed to rename document: ${updErr.message}`);
+
+  // D-132: an RLS denial under doc_rw affects 0 rows silently — a write that
+  // "succeeded" is not a write that landed.
+  const { data: after, error: afterErr } = await db.from(DOCUMENTS).select("id, title").eq("id", doc.id).maybeSingle();
+  if (afterErr || !after) {
+    return err(`Rename reported success but the document could not be re-read: ${afterErr?.message ?? "row not found"}. Treat as UNCONFIRMED.`);
+  }
+  if ((after as { title: string }).title !== title) {
+    return err(
+      `Write NOT applied to document '${doc.id}': title still reads '${(after as { title: string }).title}'. ` +
+      `Treat as UNCONFIRMED (0 rows updated is what an RLS denial looks like here).`
+    );
+  }
+
+  const result: DocRenameResult = { document_id: doc.id, old_title: oldTitle, new_title: title };
+  if (/[—–]/.test(title)) {
+    result.naming_warning =
+      `The new title contains a long dash. PG-007 (ratified project-governance manifesto) prescribes a hyphen with ` +
+      `spaces as the separator — a long dash breaks when the title is copied into a terminal, a filename or a path, ` +
+      `and produces two titles that read as the same one. Not enforced here: this server does not own that norm.`;
+  }
+  return { ok: true, data: result };
+}
+
+// ---------------------------------------------------------------------------
 // doc_item_upsert — idempotent. Returns the item UUID (§16).
 //   key WITH code:    (project_id, code)
 //   key WITHOUT code: (document_id, client_token) else (document_id, sort_order)
