@@ -1031,6 +1031,30 @@ test("doc_query 0 rows + caller IS a project member: no visibility_gap noise (D-
   assert.equal((res as any).data.visibility_gap, undefined);
 });
 
+test("doc_query traceability req_without_sdes: 0 rows but NON-MEMBER can still read visible rows → no visibility_gap (R3 fix, auditor msg d03ff4c8)", async () => {
+  // Exact shape measured live by the auditor on sbx-documentale: a non-member
+  // identity reading an org-visible document (loomx_document_visibility_predicate,
+  // SELECT-only) sees real rows — 2 in their case — yet the old oracle, anchored
+  // on loomx_agent_in_project() alone, still answered visibility_gap:true. That
+  // was a false abstention (REQ-016 wants "compliant", not "can't tell").
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store, new Set(), { rls: true }); // no membership granted
+  // Zero `requirement` rows in the project (sources.length===0, the branch
+  // that calls visibilityGap) but a visible row of a DIFFERENT type — same
+  // gap between "0 of this type" and "0 visibility" the auditor measured.
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "sdes", title: "Design", visibility: "org" }, ctx);
+  const docId = (doc as any).data.document_id;
+  await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "sdes_entry", code: "SDES-VIS-1",
+  }, ctx);
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_sdes" }, { selfSlug: "auditor", isLoomy: false });
+  assert.ok(res.ok);
+  assert.equal((res as any).data.count, 0, "zero requirements is a real count — nothing to gate");
+  assert.equal((res as any).data.visibility_gap, undefined, "SDES-VIS-1 is readable — this is not a visibility gap");
+});
+
 test("doc_query traceability req_without_sdes: empty project + no membership flags visibility_gap (D-167)", async () => {
   const store: Store = {};
   seedProjects(store);

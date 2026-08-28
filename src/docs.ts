@@ -1471,11 +1471,31 @@ export interface VisibilityGap {
 // Same probe as documentNotFoundError, applied to the query path: not a certainty,
 // a signal — attach it only when rows really are 0, never as noise on populated
 // results.
+//
+// R3 fix (auditor msg d03ff4c8, verdetto-caso-zero v3, 2026-08-28):
+// loomx_agent_in_project() tests MEMBERSHIP, not visibility. dba opened a read
+// path deliberately separate from membership (loomx_document_visibility_predicate,
+// SELECT-only by design — a membership grant would also hand out write). Once
+// that diverged from membership, anchoring here on agentInProject() alone
+// started producing false abstentions: 0 traceability rows + real visibility
+// (2 rows readable via plain doc_query) still came back visibility_gap:true.
+// Fix: probe with the SAME RLS-scoped connection first — if it can read ANY
+// row in this project, the 0-count is a real "zero rows WITH visibility"
+// answer (REQ-016: compliant), not "zero rows AND zero visibility" (the only
+// case this note is for). Membership stays as the fallback signal for that
+// remaining ambiguous case.
 async function visibilityGap(
   db: SupabaseClient,
   projectId: string,
   selfSlug: string
 ): Promise<VisibilityGap | undefined> {
+  const { data: probeRows, error: probeErr } = await db
+    .from(DOC_ITEMS)
+    .select("id")
+    .eq("project_id", projectId)
+    .limit(1);
+  if (!probeErr && Array.isArray(probeRows) && probeRows.length > 0) return undefined;
+
   const rw = docRwHandle(db);
   if (!rw || !rw.agentInProject) return undefined;
   try {

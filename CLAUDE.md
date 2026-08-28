@@ -91,7 +91,7 @@ loomx-board-mcp/
 ├── docs/
 │   ├── DECISIONS.md       ← decisioni architetturali del server
 │   └── HISTORY.md         ← storico sessioni
-└── .skills/               ← skill library (git submodule)
+└── .skills/               ← legacy, non usare (sede reale: ~/.claude/skills, §9)
 ```
 
 ---
@@ -420,7 +420,7 @@ I `.md` in `docs/` con header `<!-- GENERATED — do not edit, source=DB -->` no
 
 | Operazione | Come fare |
 |---|---|
-| Leggi cross-decisions | `doc_query(project_id="22ae4e79-1800-4975-ba46-cd2f86734257", document_id="368fafde-a880-46bd-bf8c-c2ed9c5d9029")` |
+| Leggi cross-decisions | `doc_query(project_id="22ae4e79-1800-4975-ba46-cd2f86734257", item_type="decision")` — `document_id` NON è un parametro di `doc_query` (schema tool: project_id, item_type, document_type, status, code, fields, summary, traceability). Le decisioni core (D-001..D-063, D-095, D-129+) stanno su `7e3dbb35`, D-064..D-128 su `368fafde` — filtrare per un solo documento ne nasconde metà. Singola decisione: `doc_item_resolve(project_id, code)` |
 | Leggi decisioni progetto | `doc_query(project_id="596cd5fc-d385-4763-9c52-6fb48738d7dc", document_type="decisions")` |
 | Proposta cross-decision | `board_send(to_agent="loomy", type="question", tags=["cross-decision-proposal"])` |
 
@@ -466,17 +466,7 @@ NON armare GTD prima di `wi_end` — il reconciler li vede con WI ancora aperto 
 
 ## Skill
 
-```
-SKILL_ROOT = .skills/skills
-```
-
-| Skill | Path | Quando invocare |
-|---|---|---|
-| `session-manager` | `$SKILL_ROOT/session-manager/SKILL.md` | Inizio/fine sessione, checkpoint, status report |
-| `security-auditor` | `$SKILL_ROOT/security-auditor/SKILL.md` | Review sicurezza prima di release |
-| `requirements-engineer` | `$SKILL_ROOT/requirements-engineer/SKILL.md` | Formalizzare requisiti prima di implementare |
-| `audit` | `$SKILL_ROOT/audit/SKILL.md` | Validare codice e PR prima del merge |
-| `sprint-manager` | `$SKILL_ROOT/sprint-manager/SKILL.md` | Pianificazione sprint, tracking, gate verification |
+> Sede reale: symlink globale `~/.claude/skills` (§9 AGENT-STANDARD, rev. 2026-07-30, msg a6de7666). `$SKILL_ROOT`/`.skills` (submodule) sono LEGACY — la libreria globale ha 19 skill contro le 11 di qui, incluse `report-issue` (obbligatoria, §0quinquies/D-192), `gtd`, `gtd-processor`, `meeting-analyst`, `deep-research`, `governance-review`, `source-validator`, `watch-topic`. Usa lo `Skill` tool / `/nome-skill`, non i path sotto.
 
 Quando una situazione matcha il trigger di una skill:
 1. **Leggi** il file SKILL.md corrispondente
