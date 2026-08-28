@@ -3772,6 +3772,33 @@ export function registerTools(
     }
   );
 
+  // --- doc_repoint ---
+  server.tool(
+    "doc_repoint",
+    `Move a subscription's version pin to the target's CURRENT published version (UAT-GOV-029 / REQ-GOV-102, ` +
+      `gov.doc_subscription_repoint). This is the ONLY way: the dba migration 20260828065000 revoked table-level ` +
+      `UPDATE on gov.doc_subscriptions from doc_rw, so writing subscribed_at_version directly now raises 42501. ` +
+      `seen_version_id is the gov.doc_versions.id you have JUST re-read — a UUID, never a label ('1.0' matches 149 ` +
+      `rows of 166: a label can be guessed, a UUID has to be read; the argument IS the proof of re-reading). Get it ` +
+      `from doc_staleness_query, which reports target_current_version_id per marking. Refusals are explicit, never ` +
+      `mute successes: unknown subscription, tombstoned, not your project, target never published, stale read ` +
+      `(says what to re-read), already pinned (a no-op is NOT a success), concurrent repoint. ` +
+      `It does NOT close the staleness debt — that stays doc_staleness_close + the outcomes register; the response ` +
+      `reports how many markings remain open. Example: doc_repoint({subscription_id:"<uuid>", seen_version_id:"<uuid>"}).`,
+    {
+      subscription_id: z.string().uuid().describe("The gov.doc_subscriptions row whose pin moves"),
+      seen_version_id: z
+        .string()
+        .uuid()
+        .describe("gov.doc_versions.id of the version you just re-read (UUID, not a label — see doc_staleness_query.target_current_version_id)"),
+      note: z.string().optional().describe("Appended to the subscription's note as [repointed X -> Y: <note>] — never overwrites"),
+    },
+    async (args) => {
+      const { docRepoint } = await import("./subscriptions.js");
+      return runDocTool((db) => docRepoint(db, args, docCtx));
+    }
+  );
+
   // =========================================================================
   // Staleness/decay tools (DEL-008/M2 exposure + D-201 decay ring, GTD
   // 1dffa01e/ddb6815c/03ffb9f5). Read the detector, close a marking, or apply

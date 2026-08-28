@@ -851,3 +851,209 @@ export async function docPublish(
     },
   };
 }
+
+// ---------------------------------------------------------------------------
+// doc_repoint — UAT-GOV-029 / REQ-GOV-102 (dba msg ac19e421, migration
+// 20260828065000). Moves a subscription's version pin to the target's CURRENT
+// published version.
+//
+// Why a function and not an UPDATE: the same migration revoked table-level
+// UPDATE from doc_rw and re-granted only (intent, status, tombstoned_at, note),
+// so `SET subscribed_at_version` raises 42501 by construction. This is the only
+// door, and that is the point — the pin moves through a guarded act or not at all.
+//
+// Why seen_version_id is a UUID and not a label: '1.0' matches 149 rows out of
+// 166 (dba's measure). A label can be guessed; a UUID has to be read. The
+// argument IS the proof of re-reading — that's what makes this an explicit act
+// rather than a rubber stamp. Get it from doc_staleness_query, which reports
+// each marking's target_current_version_id alongside the pin.
+//
+// What it deliberately does NOT do: close the staleness debt. It returns
+// open_staleness (how many markings are still open on this subscription) and
+// stops there — closing stays in doc_staleness_close + the outcomes ledger. Two
+// distinct acts: one moves the pin, the other settles the debt.
+// ---------------------------------------------------------------------------
+
+export interface DocRepointArgs {
+  subscription_id: string;
+  seen_version_id: string;
+  note?: string;
+}
+
+export interface DocRepointResult {
+  subscription_id: string;
+  from_version: string;
+  to_version: string;
+  version_id: string;
+  open_staleness: number;
+  staleness_note?: string;
+}
+
+export async function docRepoint(
+  db: SupabaseClient,
+  args: DocRepointArgs,
+  ctx: DocContext
+): Promise<DocResult<DocRepointResult>> {
+  if (!UUID_RE.test(args.subscription_id)) return err(`subscription_id must be a UUID.`);
+  if (!UUID_RE.test(args.seen_version_id)) {
+    return err(
+      `seen_version_id must be a UUID — the gov.doc_versions.id of the version you have just re-read, NOT a version ` +
+      `label like '1.0'. A label can be guessed; that is exactly what this signature refuses. ` +
+      `doc_staleness_query reports target_current_version_id for each open marking.`
+    );
+  }
+
+  const rw = db as unknown as {
+    __docRw?: boolean;
+    subscriptionRepoint?: (
+      subscriptionId: string,
+      seenVersionId: string,
+      note?: string
+    ) => Promise<{
+      subscription_id: string; from_version: string; to_version: string;
+      version_id: string; rows: number; open_staleness: number;
+    }>;
+  };
+  if (!rw.__docRw || !rw.subscriptionRepoint) {
+    return err(
+      `doc_repoint: db is not a DocRwDb — refusing to bypass RLS. gov.doc_subscription_repoint lives in the gov ` +
+      `schema and is only reachable via the doc_rw direct-pg path (runDocRw). Test fakes must implement subscriptionRepoint.`
+    );
+  }
+
+  // Tool-floor pre-read: gives a readable message for the common miss instead of
+  // the function's raw P0002, and distinguishes "no such row" from "RLS hides it"
+  // the way D-167 taught us to. Not a substitute for the function's own checks —
+  // it re-verifies everything server-side, and only its verdict writes.
+  const { data: preRow, error: preErr } = await db
+    .from(GOV_DOC_SUBSCRIPTIONS)
+    .select("id, status, subscriber_project_id, subscribed_at_version")
+    .eq("id", args.subscription_id)
+    .maybeSingle();
+  if (preErr) return err(`Failed to read subscription '${args.subscription_id}': ${preErr.message}`);
+  if (!preRow) {
+    return err(
+      `subscription_id '${args.subscription_id}' is not readable by '${ctx.selfSlug}' (not found, or hidden by RLS). ` +
+      `A repoint on a subscription that isn't there is never a silent success (REQ-GOV-102).`
+    );
+  }
+  const pre = preRow as { id: string; status: string; subscriber_project_id: string; subscribed_at_version: string };
+  if (pre.status !== "active") {
+    return err(
+      `Subscription '${args.subscription_id}' has status='${pre.status}' — what is not alive is not repointed. ` +
+      `A tombstoned subscription stays pinned to the version it was tombstoned at, on purpose.`
+    );
+  }
+
+  // The function RAISEs on every refusal, which aborts the surrounding
+  // transaction (handlers run inside one BEGIN…COMMIT, see runWithPool). Without
+  // a savepoint every later read — including the D-132 re-read — would fail with
+  // "current transaction is aborted", masking the real refusal (bug d6a57035).
+  const sp = savepointHandle(db);
+  const SP = "sp_doc_repoint";
+  if (sp) await sp.savepoint(SP);
+
+  let result: { from_version: string; to_version: string; version_id: string; rows: number; open_staleness: number };
+  try {
+    result = await rw.subscriptionRepoint(args.subscription_id, args.seen_version_id, args.note);
+  } catch (ex) {
+    if (sp) await sp.rollbackToSavepoint(SP).catch(() => {});
+    const e = ex as { code?: string; message?: string; detail?: string; hint?: string };
+    const msg = e.message ?? String(ex);
+    const detail = e.detail ? ` ${e.detail}` : "";
+    // Dispatch on the E_REPOINT_* marker, not the SQLSTATE: P0002 alone covers
+    // four distinct refusals, and telling them apart is the whole value here.
+    if (/E_REPOINT_ARGS/.test(msg)) {
+      return err(`doc_repoint: subscription_id and seen_version_id are both required. Original: ${msg}`);
+    }
+    if (/E_REPOINT_NO_SUB/.test(msg)) {
+      return err(
+        `Subscription '${args.subscription_id}' does not exist server-side. This is the case that used to return a ` +
+        `mute success (REQ-GOV-102) — it is now a refusal. Original: ${msg}`
+      );
+    }
+    if (/E_REPOINT_NOT_ACTIVE/.test(msg)) {
+      return err(`Subscription '${args.subscription_id}' is not active — it cannot be repointed. Original: ${msg}`);
+    }
+    if (/E_REPOINT_FORBIDDEN/.test(msg)) {
+      return err(
+        `'${ctx.selfSlug}' is not legitimated to repoint subscription '${args.subscription_id}': the caller must be in ` +
+        `the subscriber's project ${pre.subscriber_project_id} (same predicate as the doc_subscriptions_update_own ` +
+        `policy). Original: ${msg}`
+      );
+    }
+    if (/E_REPOINT_NO_TARGET_DOC/.test(msg)) {
+      return err(`The subscription's target does not resolve to a document — nothing to repoint to. Original: ${msg}`);
+    }
+    if (/E_REPOINT_NO_VERSION/.test(msg)) {
+      return err(
+        `The target document has never been published, so there is no version to repoint to. This is not an edge ` +
+        `case today: a staleness marking is raised by a substantively-changed ROW (D-201/M2), which needs no ` +
+        `publication at all — so a marking can legitimately exist on a target that has no version. Repointing is ` +
+        `simply not applicable here; settle the debt with doc_staleness_close. Original: ${msg}`
+      );
+    }
+    if (/E_REPOINT_STALE_READ/.test(msg)) {
+      return err(
+        `The version you declared is not the target's current one — re-read it and call again with the current ` +
+        `gov.doc_versions.id (that is precisely what this signature demands).${detail} Original: ${msg}`
+      );
+    }
+    if (/E_REPOINT_NOOP/.test(msg)) {
+      return err(
+        `Subscription '${args.subscription_id}' is already pinned to that version — zero rows written is not a ` +
+        `success. If the staleness debt is still open, it is closed in the outcomes register ` +
+        `(doc_staleness_close), not by repointing again. Original: ${msg}`
+      );
+    }
+    if (/E_REPOINT_ZERO_ROWS/.test(msg)) {
+      return err(
+        `Nothing was written for subscription '${args.subscription_id}': a concurrent repoint landed between the ` +
+        `read and the write. Re-read the target and retry. Original: ${msg}`
+      );
+    }
+    if (/42501|insufficient_privilege|permission denied/i.test(e.code ?? "") || /permission denied/i.test(msg)) {
+      return err(`Not legitimated to repoint subscription '${args.subscription_id}' (permission denied). Original: ${msg}`);
+    }
+    return err(`gov.doc_subscription_repoint failed: ${msg}${detail}`);
+  }
+  // No RELEASE on the success path: an unreleased savepoint is discarded at
+  // COMMIT, and the existing sites here (docSubscriptionOutcome) do the same.
+
+  // D-132: never report ok on the function's return value alone — re-read the
+  // row and confirm the pin actually reads as the new version.
+  const { data: after, error: afterErr } = await db
+    .from(GOV_DOC_SUBSCRIPTIONS)
+    .select("id, subscribed_at_version, status")
+    .eq("id", args.subscription_id)
+    .maybeSingle();
+  if (afterErr || !after) {
+    return err(
+      `Repoint reported success but subscription '${args.subscription_id}' could not be re-read: ` +
+      `${afterErr?.message ?? "row not found"}. Treat as UNCONFIRMED.`
+    );
+  }
+  const afterRow = after as { id: string; subscribed_at_version: string; status: string };
+  if (afterRow.subscribed_at_version !== result.to_version) {
+    return err(
+      `Repoint reported success but subscribed_at_version reads '${afterRow.subscribed_at_version}', expected ` +
+      `'${result.to_version}' — treat as UNCONFIRMED (D-132).`
+    );
+  }
+
+  const out: DocRepointResult = {
+    subscription_id: args.subscription_id,
+    from_version: result.from_version,
+    to_version: result.to_version,
+    version_id: result.version_id,
+    open_staleness: result.open_staleness,
+  };
+  // Say the quiet part out loud: moving the pin is NOT settling the debt. The
+  // count alone would read as reassurance; it is the opposite.
+  if (result.open_staleness > 0) {
+    out.staleness_note =
+      `${result.open_staleness} staleness marking(s) remain OPEN on this subscription: repointing moves the pin, ` +
+      `it does not settle the debt. Close them with doc_staleness_close and a recorded outcome.`;
+  }
+  return { ok: true, data: out };
+}

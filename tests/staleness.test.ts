@@ -323,3 +323,72 @@ test("doc_decay_apply: verdict.forced_rerun flips true once decayed_count reache
   assert.equal(data.verdict.forced_rerun, true);
   assert.match(data.verdict.class_gate_note, /not applied/i);
 });
+
+// ---------------------------------------------------------------------------
+// doc_staleness_query: the repoint triple (UAT-GOV-029). Without
+// target_current_version_id nothing could call doc_repoint — no other surface
+// exposes a gov.doc_versions.id, and that signature refuses a label on purpose.
+// ---------------------------------------------------------------------------
+
+function seedRepointTripleScenario(store: Store, opts: { pin: string; versions: Array<[string, string, number]> }): string {
+  seedProjects(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A);
+  seedDocItem(store, "sub-item", PROJ_A, docId, { item_type: "uat_case", code: "UAT-X-001" });
+  seedDocItem(store, "tgt-item", PROJ_A, docId, { item_type: "sdes_entry", code: "SDES-X-001" });
+  const subId = uuid();
+  seedSubscription(store, subId, {
+    subscriber_item_id: "sub-item", subscriber_project_id: PROJ_A,
+    target_item_id: "tgt-item", subscribed_at_version: opts.pin,
+  });
+  seedMarking(store, uuid(), { subscription_id: subId, target_item_id: "tgt-item" });
+  store["gov.doc_versions"] ??= [];
+  for (const [id, label, seq] of opts.versions) {
+    store["gov.doc_versions"].push({ id, document_id: docId, version_label: label, version_seq: seq });
+  }
+  return subId;
+}
+
+test("doc_staleness_query: reports the version UUID needed to call doc_repoint", async () => {
+  const store: Store = {};
+  const v2 = uuid();
+  seedRepointTripleScenario(store, { pin: "1.0", versions: [[uuid(), "1.0", 1], [v2, "2.0", 2]] });
+  const db = makeDb(store);
+
+  const res = await docStalenessQuery(db, { project_id: PROJ_A }, ctx);
+  assert.ok(res.ok, JSON.stringify(res));
+  const m = (res as any).data.markings[0];
+  assert.equal(m.subscribed_at_version, "1.0");
+  assert.equal(m.target_current_version, "2.0");
+  assert.equal(m.target_current_version_id, v2);
+  assert.equal(m.repoint_applicable, true);
+});
+
+test("doc_staleness_query: an unpublished target reports repoint as not applicable, with the reason", async () => {
+  const store: Store = {};
+  seedRepointTripleScenario(store, { pin: "1.0", versions: [] });
+  const db = makeDb(store);
+
+  const res = await docStalenessQuery(db, { project_id: PROJ_A }, ctx);
+  assert.ok(res.ok, JSON.stringify(res));
+  const m = (res as any).data.markings[0];
+  assert.equal(m.target_current_version_id, null);
+  assert.equal(m.repoint_applicable, false);
+  // The measured-common case (93% of live subscriptions): it must read as a
+  // normal state with a stated reason, never as a bare false.
+  assert.match(m.repoint_note, /no published version/);
+  assert.match(m.repoint_note, /doc_staleness_close/);
+});
+
+test("doc_staleness_query: a pin already on the current version is not repointable", async () => {
+  const store: Store = {};
+  const v1 = uuid();
+  seedRepointTripleScenario(store, { pin: "1.0", versions: [[v1, "1.0", 1]] });
+  const db = makeDb(store);
+
+  const res = await docStalenessQuery(db, { project_id: PROJ_A }, ctx);
+  assert.ok(res.ok, JSON.stringify(res));
+  const m = (res as any).data.markings[0];
+  assert.equal(m.repoint_applicable, false);
+  assert.match(m.repoint_note, /Already pinned/);
+});

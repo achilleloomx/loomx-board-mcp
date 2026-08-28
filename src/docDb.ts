@@ -77,6 +77,26 @@ export interface DocRwDb {
     changelogEntryId: string,
     deltaSummary: string
   ) => Promise<{ publication_id: string; version_seq: number; published_at: string }>;
+  // UAT-GOV-029 (dba msg ac19e421, migration 20260828065000): the ONLY way to
+  // move a subscription's version pin. Same migration did
+  // `REVOKE UPDATE ON gov.doc_subscriptions FROM doc_rw` +
+  // `GRANT UPDATE (intent, status, tombstoned_at, note)` — so a direct
+  // `UPDATE … SET subscribed_at_version` now raises 42501 by construction.
+  // (INSERT is untouched: docSubscribe still writes the initial pin itself.)
+  // SECURITY DEFINER, GRANTed to doc_rw. Raises typed SQLSTATEs — see docRepoint
+  // in subscriptions.ts for the full E_REPOINT_* mapping.
+  subscriptionRepoint: (
+    subscriptionId: string,
+    seenVersionId: string,
+    note?: string
+  ) => Promise<{
+    subscription_id: string;
+    from_version: string;
+    to_version: string;
+    version_id: string;
+    rows: number;
+    open_staleness: number;
+  }>;
   // Bug d6a57035 (atlas, DEL-006 dogfood): a handler runs in ONE open transaction
   // (BEGIN…COMMIT, see runWithPool below). An INSERT that hits a unique constraint
   // aborts that transaction — any subsequent query (e.g. the idempotent-retry
@@ -289,6 +309,29 @@ function makeDb(exec: PgExecutor, opts: { persistentTx?: boolean } = {}): DocRwD
         publication_id: String(r.publication_id),
         version_seq: Number(r.version_seq),
         published_at: String(r.published_at),
+      };
+    },
+    subscriptionRepoint: async (subscriptionId, seenVersionId, note) => {
+      const { rows } = await exec(
+        "SELECT gov.doc_subscription_repoint($1::uuid, $2::uuid, $3) AS r",
+        [subscriptionId, seenVersionId, note ?? null]
+      );
+      const r = rows[0] && (rows[0] as Row).r;
+      if (!r) {
+        const e = new Error("gov.doc_subscription_repoint returned no row") as Error & { code?: string };
+        e.code = "P0002";
+        throw e;
+      }
+      // jsonb comes back parsed under node-pg, but as a string under the mgmt
+      // backend's JSON transport — normalize instead of assuming either one.
+      const o = (typeof r === "string" ? JSON.parse(r) : r) as Record<string, unknown>;
+      return {
+        subscription_id: String(o.subscription_id),
+        from_version: String(o.from_version),
+        to_version: String(o.to_version),
+        version_id: String(o.version_id),
+        rows: Number(o.rows),
+        open_staleness: Number(o.open_staleness),
       };
     },
     savepoint: persistentTx

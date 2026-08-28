@@ -280,6 +280,53 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
     return { publication_id: id, version_seq: existing.length + 1, published_at: publishedAt };
   };
 
+  // Mimics gov.doc_subscription_repoint (UAT-GOV-029, dba migration
+  // 20260828065000) — including its refusals, which are the whole point: each
+  // one RAISEs with the E_REPOINT_* marker the tool dispatches on. A fake that
+  // only modelled the happy path would prove nothing about docRepoint.
+  const subscriptionRepoint = async (
+    subscriptionId: string,
+    seenVersionId: string,
+    note?: string
+  ): Promise<{ subscription_id: string; from_version: string; to_version: string; version_id: string; rows: number; open_staleness: number }> => {
+    const raise = (marker: string, code: string, detail?: string): never => {
+      const e = new Error(`${marker}: raised by fake gov.doc_subscription_repoint`) as Error & { code?: string; detail?: string };
+      e.code = code;
+      if (detail) e.detail = detail;
+      throw e;
+    };
+    const sub = ((store["gov.doc_subscriptions"] as Row[]) ?? []).find((r) => r.id === subscriptionId);
+    if (!sub) raise("E_REPOINT_NO_SUB", "P0002");
+    if (sub!.status !== "active") raise("E_REPOINT_NOT_ACTIVE", "23514");
+    const documentId =
+      (sub!.target_document_id as string | null) ??
+      ((store.doc_items as Row[]) ?? []).find((r) => r.id === sub!.target_item_id)?.document_id;
+    if (!documentId) raise("E_REPOINT_NO_TARGET_DOC", "P0002");
+    const versions = ((store["gov.doc_versions"] as Row[]) ?? [])
+      .filter((r) => r.document_id === documentId)
+      .sort((a, b) => Number(b.version_seq ?? 0) - Number(a.version_seq ?? 0));
+    const cur = versions[0];
+    if (!cur) raise("E_REPOINT_NO_VERSION", "P0002");
+    if (seenVersionId !== cur!.id) {
+      raise("E_REPOINT_STALE_READ", "40001", `dichiarata=${seenVersionId}, corrente=${cur!.id}`);
+    }
+    if (sub!.subscribed_at_version === cur!.version_label) raise("E_REPOINT_NOOP", "23514");
+    const from = String(sub!.subscribed_at_version);
+    sub!.subscribed_at_version = cur!.version_label;
+    if (note) sub!.note = `${sub!.note ?? ""}\n[repointed ${from} -> ${cur!.version_label}: ${note}]`;
+    const openStaleness = ((store["gov.doc_subscription_staleness"] as Row[]) ?? []).filter(
+      (r) => r.subscription_id === subscriptionId && r.status !== "closed"
+    ).length;
+    return {
+      subscription_id: subscriptionId,
+      from_version: from,
+      to_version: String(cur!.version_label),
+      version_id: String(cur!.id),
+      rows: 1,
+      open_staleness: openStaleness,
+    };
+  };
+
   // Mimics real SAVEPOINT/ROLLBACK TO SAVEPOINT (docDb.ts, persistentTx mode):
   // rollback clears the aborted flag, restoring a live transaction for whatever
   // query runs next — same as against the real DB.
@@ -295,6 +342,7 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
     agentInProject,
     documentExists,
     docPublish,
+    subscriptionRepoint,
     savepoint,
     rollbackToSavepoint,
     releaseSavepoint,

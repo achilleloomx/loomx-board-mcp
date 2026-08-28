@@ -36,6 +36,7 @@ const GOV_SUBSCRIPTIONS = "gov.doc_subscriptions";
 const DOC_ITEMS = "doc_items";
 const DOCUMENTS = "documents";
 const GOV_PARAMS = "loomx_governance_params";
+const GOV_DOC_VERSIONS = "gov.doc_versions";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -77,6 +78,7 @@ interface SubscriptionRow {
   target_item_id: string | null;
   target_document_id: string | null;
   status: string;
+  subscribed_at_version: string;
 }
 
 interface DocItemRow {
@@ -85,6 +87,32 @@ interface DocItemRow {
   item_type: string;
   status: string;
   attrs: Record<string, unknown> | null;
+  document_id?: string | null;
+}
+
+// Current published version per document — the repoint triple's source.
+// `null` for a document with no publication at all, which is the COMMON case,
+// not an edge one: measured 2026-08-28 on production, 143 of 153 active
+// subscriptions (93%) target a document that has never been published, and all
+// 10 open markings did. A staleness marking comes from a substantively-changed
+// ROW (D-201/M2) and needs no publication, so the two are simply independent.
+async function loadCurrentVersions(
+  db: SupabaseClient,
+  documentIds: string[]
+): Promise<Map<string, { id: string; label: string }>> {
+  const out = new Map<string, { id: string; label: string }>();
+  const uniq = [...new Set(documentIds)].filter(Boolean);
+  if (uniq.length === 0) return out;
+  const { data } = await db
+    .from(GOV_DOC_VERSIONS)
+    .select("id, document_id, version_label, version_seq")
+    .in("document_id", uniq)
+    .order("version_seq", { ascending: false });
+  // Ordered desc, so the first row seen per document is its current version.
+  for (const row of (data ?? []) as Array<{ id: string; document_id: string; version_label: string }>) {
+    if (!out.has(row.document_id)) out.set(row.document_id, { id: row.id, label: row.version_label });
+  }
+  return out;
 }
 
 // Shared by docStalenessQuery and docDecayApply: load the open/closed staleness
@@ -114,7 +142,7 @@ async function loadMarkingsForProject(
   if (subIds.length > 0) {
     const { data: subRows, error: subErr } = await db
       .from(GOV_SUBSCRIPTIONS)
-      .select("id, subscriber_item_id, subscriber_project_id, intent, target_item_id, target_document_id, status")
+      .select("id, subscriber_item_id, subscriber_project_id, intent, target_item_id, target_document_id, status, subscribed_at_version")
       .in("id", subIds);
     if (subErr) return err(`Failed to resolve subscriptions for staleness markings: ${subErr.message}`);
     for (const s of (subRows ?? []) as SubscriptionRow[]) subsById.set(s.id, s);
@@ -128,7 +156,7 @@ async function loadDoc_items(db: SupabaseClient, ids: string[]): Promise<Map<str
   const out = new Map<string, DocItemRow>();
   const uniq = [...new Set(ids)].filter(Boolean);
   if (uniq.length === 0) return out;
-  const { data } = await db.from(DOC_ITEMS).select("id, code, item_type, status, attrs").in("id", uniq);
+  const { data } = await db.from(DOC_ITEMS).select("id, code, item_type, status, attrs, document_id").in("id", uniq);
   for (const row of (data ?? []) as DocItemRow[]) out.set(row.id, row);
   return out;
 }
@@ -206,6 +234,16 @@ export interface DocStalenessQueryResult {
     changed_by: string | null;
     status: string;
     closed_outcome: string | null;
+    // Repoint triple (UAT-GOV-029): what the subscription is pinned to, what the
+    // target actually publishes now, and whether a repoint is even possible.
+    // Without target_current_version_id nothing could call doc_repoint — no
+    // other surface exposes a gov.doc_versions.id, and the signature refuses a
+    // label on purpose.
+    subscribed_at_version: string | null;
+    target_current_version: string | null;
+    target_current_version_id: string | null;
+    repoint_applicable: boolean;
+    repoint_note?: string;
   }>;
   truncated?: boolean;
   frozen_row_touches: Array<{
@@ -251,10 +289,36 @@ export async function docStalenessQuery(
   });
   const itemsById = await loadDoc_items(db, itemIds);
 
+  // Resolve each marking's target document (XOR: the subscription pins either a
+  // document or a row), then that document's current published version.
+  const targetDocIds = markings
+    .map((m) => {
+      const s = subs.get(m.subscription_id);
+      return s?.target_document_id ?? itemsById.get(m.target_item_id)?.document_id ?? null;
+    })
+    .filter((d): d is string => !!d);
+  const currentVersions = await loadCurrentVersions(db, targetDocIds);
+
   const markingsOut = markings.map((m) => {
     const s = subs.get(m.subscription_id);
     const subItem = s ? itemsById.get(s.subscriber_item_id) : undefined;
     const tgtItem = itemsById.get(m.target_item_id);
+    const targetDocId = s?.target_document_id ?? tgtItem?.document_id ?? null;
+    const cur = targetDocId ? currentVersions.get(targetDocId) ?? null : null;
+    const pin = s?.subscribed_at_version ?? null;
+    // Applicable only when there IS a newer published version to move to.
+    // Anything else gets a stated reason instead of a bare false — the caller
+    // must be able to tell "nothing to repoint" from "cannot repoint here".
+    const applicable = !!cur && pin !== null && pin !== cur.label;
+    let repointNote: string | undefined;
+    if (!cur) {
+      repointNote =
+        "Target has no published version — repointing is not applicable. A marking is raised by a substantively " +
+        "changed ROW (D-201/M2), which needs no publication, so this is a normal state, not an anomaly. Settle the " +
+        "debt with doc_staleness_close.";
+    } else if (pin !== null && pin === cur.label) {
+      repointNote = "Already pinned to the target's current version — nothing to repoint; the debt is settled with doc_staleness_close.";
+    }
     return {
       staleness_id: m.id,
       subscriber_item_id: s?.subscriber_item_id ?? "",
@@ -270,6 +334,11 @@ export async function docStalenessQuery(
       changed_by: m.changed_by,
       status: m.status,
       closed_outcome: m.closed_outcome,
+      subscribed_at_version: pin,
+      target_current_version: cur?.label ?? null,
+      target_current_version_id: cur?.id ?? null,
+      repoint_applicable: applicable,
+      ...(repointNote ? { repoint_note: repointNote } : {}),
     };
   });
 

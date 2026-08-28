@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { strict as assert } from "node:assert";
 
 import {
-  docSubscribe, docUnsubscribe, docSubscriptionOutcome, docPublish,
+  docSubscribe, docUnsubscribe, docSubscriptionOutcome, docPublish, docRepoint,
   HUB_PROJECT_ID, HUB_UNSUBSCRIBABLE_DOCUMENT_TYPE,
 } from "../src/subscriptions.ts";
 import { makeDb, uuid, ctx, PROJ_A, PROJ_B, seedProjects, type Store, type Row } from "./fakeDb.ts";
@@ -562,4 +562,140 @@ test("doc_publish: republishing the same (document_id, new_version) is a REFUSAL
   assert.equal(res2.ok, false);
   assert.match((res2 as any).error, /REFUSAL, not a no-op/);
   assert.equal(store["gov.doc_versions"].length, 1);
+});
+
+// ---------------------------------------------------------------------------
+// doc_repoint (UAT-GOV-029 / REQ-GOV-102) — the pin moves only through the
+// guarded function, and every refusal stays a refusal.
+// ---------------------------------------------------------------------------
+
+function seedRepointFixture(
+  store: Store,
+  opts: { pin?: string; published?: Array<[string, string, number]> } = {}
+): { subId: string; docId: string; targetItemId: string } {
+  const docId = uuid();
+  const targetItemId = "target-item";
+  seedDocument(store, docId, PROJ_A);
+  seedDocItem(store, "subitem-owned", PROJ_A, docId, "board-mcp");
+  seedDocItem(store, targetItemId, PROJ_A, docId, "dba");
+  const subId = seedSubscription(store, {
+    subscriber_item_id: "subitem-owned",
+    subscriber_project_id: PROJ_A,
+    target_item_id: targetItemId,
+    intent: "module",
+    subscribed_at_version: opts.pin ?? "1.0",
+  });
+  store["gov.doc_versions"] ??= [];
+  for (const [id, label, seq] of opts.published ?? []) {
+    store["gov.doc_versions"].push({ id, document_id: docId, version_label: label, version_seq: seq });
+  }
+  return { subId, docId, targetItemId };
+}
+
+test("doc_repoint: moves the pin to the current version and confirms it by re-reading (D-132)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const v2 = uuid();
+  const { subId } = seedRepointFixture(store, {
+    pin: "1.0",
+    published: [[uuid(), "1.0", 1], [v2, "2.0", 2]],
+  });
+  const db = makeDb(store);
+
+  const res = await docRepoint(db, { subscription_id: subId, seen_version_id: v2 }, ctx);
+  assert.ok(res.ok, JSON.stringify(res));
+  assert.equal((res as any).data.from_version, "1.0");
+  assert.equal((res as any).data.to_version, "2.0");
+  assert.equal((res as any).data.version_id, v2);
+  assert.equal(store["gov.doc_subscriptions"].find((r: Row) => r.id === subId)!.subscribed_at_version, "2.0");
+});
+
+test("doc_repoint: refuses a version label in place of the gov.doc_versions UUID", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const { subId } = seedRepointFixture(store, { published: [[uuid(), "2.0", 1]] });
+  const db = makeDb(store);
+
+  const res = await docRepoint(db, { subscription_id: subId, seen_version_id: "2.0" }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /must be a UUID/);
+});
+
+test("doc_repoint: a stale seen_version_id is refused, and says what to re-read", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const v1 = uuid();
+  const v2 = uuid();
+  const { subId } = seedRepointFixture(store, { pin: "1.0", published: [[v1, "1.0", 1], [v2, "2.0", 2]] });
+  const db = makeDb(store);
+
+  const res = await docRepoint(db, { subscription_id: subId, seen_version_id: v1 }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /not the target's current one/);
+  // The pin must NOT have moved on a refusal.
+  assert.equal(store["gov.doc_subscriptions"].find((r: Row) => r.id === subId)!.subscribed_at_version, "1.0");
+});
+
+test("doc_repoint: already pinned to the current version is a refusal, never a silent ok", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const v1 = uuid();
+  const { subId } = seedRepointFixture(store, { pin: "1.0", published: [[v1, "1.0", 1]] });
+  const db = makeDb(store);
+
+  const res = await docRepoint(db, { subscription_id: subId, seen_version_id: v1 }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /already pinned/i);
+  assert.match((res as any).error, /doc_staleness_close/);
+});
+
+test("doc_repoint: a target that was never published is refused with the reason, not a crash", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const { subId } = seedRepointFixture(store, { pin: "1.0", published: [] });
+  const db = makeDb(store);
+
+  const res = await docRepoint(db, { subscription_id: subId, seen_version_id: uuid() }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /never been published/);
+});
+
+test("doc_repoint: a tombstoned subscription is not repointed", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const v1 = uuid();
+  const { subId } = seedRepointFixture(store, { published: [[v1, "2.0", 1]] });
+  store["gov.doc_subscriptions"].find((r: Row) => r.id === subId)!.status = "tombstoned";
+  const db = makeDb(store);
+
+  const res = await docRepoint(db, { subscription_id: subId, seen_version_id: v1 }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /not alive is not repointed/);
+});
+
+test("doc_repoint: an unknown subscription is a refusal, not a mute success (REQ-GOV-102)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+
+  const res = await docRepoint(db, { subscription_id: uuid(), seen_version_id: uuid() }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /not readable|does not exist/);
+});
+
+test("doc_repoint: says openly that moving the pin does not settle an open staleness debt", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const v2 = uuid();
+  const { subId } = seedRepointFixture(store, { pin: "1.0", published: [[uuid(), "1.0", 1], [v2, "2.0", 2]] });
+  store["gov.doc_subscription_staleness"] = [
+    { id: uuid(), subscription_id: subId, status: "open" },
+    { id: uuid(), subscription_id: subId, status: "closed" },
+  ];
+  const db = makeDb(store);
+
+  const res = await docRepoint(db, { subscription_id: subId, seen_version_id: v2 }, ctx);
+  assert.ok(res.ok, JSON.stringify(res));
+  assert.equal((res as any).data.open_staleness, 1);
+  assert.match((res as any).data.staleness_note, /does not settle the debt/);
 });
