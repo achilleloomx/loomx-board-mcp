@@ -3776,6 +3776,31 @@ export function registerTools(
     }
   );
 
+  // --- doc_version_delta ---
+  server.tool(
+    "doc_version_delta",
+    `The structured, machine-readable delta of a publication: which ROWS were created/modified/superseded/removed ` +
+      `between two versions of a document (forge msg 05ba7c9e — REQ-SUB-003 criterion 2, and REQ-SUB-011 by declared ` +
+      `consequence). doc_publish's delta_summary stays what it is — prose for a human reading the ledger; THIS is the ` +
+      `list you filter and count on. It is DERIVED, not declared: gov.doc_publish already snapshots every row into ` +
+      `gov.doc_version_items with a content_sha256, so the delta is a diff of consecutive snapshots. That makes it ` +
+      `complete by construction (there is no hand-written list to truncate or omit from) and retroactive (it works on ` +
+      `publications made before this tool existed). An oversized diff is REFUSED, never shortened — a partial delta ` +
+      `would make aggregation counts wrong on a number that looks right. version defaults to the latest publication, ` +
+      `against_version to the one immediately before it; a first publication returns baseline:null and says so rather ` +
+      `than pretending. counts includes 'unchanged' and 'total_rows_in_version' so the arithmetic is checkable. ` +
+      `Read-only. Example: doc_version_delta({document_id:"<uuid>"}).`,
+    {
+      document_id: z.string().uuid().describe("The published document to diff"),
+      version: z.string().optional().describe("Version label to inspect (default: the most recent publication)"),
+      against_version: z.string().optional().describe("Baseline version label (default: the publication immediately preceding)"),
+    },
+    async (args) => {
+      const { docVersionDelta } = await import("./subscriptions.js");
+      return runDocTool((db) => docVersionDelta(db, args, docCtx));
+    }
+  );
+
   // --- doc_repoint ---
   server.tool(
     "doc_repoint",

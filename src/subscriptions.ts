@@ -21,8 +21,17 @@ import type { DocResult, DocContext } from "./docs.js";
 const GOV_DOC_SUBSCRIPTIONS = "gov.doc_subscriptions";
 const GOV_DOC_SUBSCRIPTION_OUTCOMES = "gov.doc_subscription_outcomes";
 const GOV_DOC_VERSIONS = "gov.doc_versions";
+const GOV_DOC_VERSION_ITEMS = "gov.doc_version_items";
 const DOC_ITEMS = "doc_items";
 const DOCUMENTS = "documents";
+const GOV_PARAMS = "loomx_governance_params";
+
+// SDES-SUB-CP-004 §4 / REQ-SUB-013 criterion 3. The suspension flag lives in
+// the parameter registry (numeric 0/1, owner declared per row); this tool is
+// the admission surface that reads it. Suspension stops ADMITTING NEW targets,
+// never the notifications already flowing — you retune before you extend, you
+// don't switch the system off.
+const ADMISSION_SUSPENDED_PARAM = "sottoscrizioni_ammissione_sospesa";
 
 // SDES-SUB-012 (REQ-SUB-012) — "what binds everyone is not subscribable", a
 // declared INTERIM approximation, not the durable rule. Loomy correction
@@ -56,6 +65,51 @@ function savepointHandle(db: SupabaseClient): {
     return { savepoint: h.savepoint, rollbackToSavepoint: h.rollbackToSavepoint };
   }
   return null;
+}
+
+// Reads the admission-suspension flag. Three outcomes, deliberately distinct:
+// suspended (a value in force, non-zero), open (in force, zero), or UNVERIFIED
+// — the row is missing, deprecated, or unreadable. Unverified never blocks:
+// a registry that can't be read is not evidence of a suspension, and walling
+// off every new subscription on a missing parameter would be a far worse
+// failure than the one this gate prevents. But it is never silent either: the
+// caller gets `admission_gate` telling them the flag could not be verified, so
+// a suspension nobody can observe cannot pass for a suspension nobody declared
+// (same principle as `missing` in staleness.ts loadDecayParams).
+interface AdmissionGate {
+  suspended: boolean;
+  verified: boolean;
+  value: number | null;
+  owner: string | null;
+  reason?: string;
+}
+
+async function readAdmissionGate(db: SupabaseClient): Promise<AdmissionGate> {
+  const { data, error } = await db
+    .from(GOV_PARAMS)
+    .select("param_key, value_numeric, owner_agent_code, deprecated_at")
+    .eq("param_key", ADMISSION_SUSPENDED_PARAM);
+  if (error) {
+    return { suspended: false, verified: false, value: null, owner: null, reason: `registry read failed: ${error.message}` };
+  }
+  const rows = (data ?? []) as Array<{ value_numeric: number | string | null; owner_agent_code: string | null; deprecated_at: string | null }>;
+  const live = rows.filter((r) => !r.deprecated_at);
+  if (live.length === 0) {
+    return {
+      suspended: false,
+      verified: false,
+      value: null,
+      owner: null,
+      reason: rows.length > 0 ? `'${ADMISSION_SUSPENDED_PARAM}' is deprecated in the registry` : `'${ADMISSION_SUSPENDED_PARAM}' is not in the registry (or not readable)`,
+    };
+  }
+  // node-pg returns `numeric` as a string — coerce, never compare loosely.
+  const raw = live[0].value_numeric;
+  const num = raw == null ? null : Number(raw);
+  if (num == null || Number.isNaN(num)) {
+    return { suspended: false, verified: false, value: null, owner: live[0].owner_agent_code ?? null, reason: `'${ADMISSION_SUSPENDED_PARAM}' has no numeric value in force` };
+  }
+  return { suspended: num !== 0, verified: true, value: num, owner: live[0].owner_agent_code ?? null };
 }
 
 export const SUBSCRIBE_INTENTS = ["informative", "module", "critical"] as const;
@@ -100,6 +154,9 @@ export interface DocSubscribeResult {
   intent_changed?: { from: string; to: string };
   subscribed_at_version: string;
   target_kind: "item" | "document";
+  // Present only when the admission-suspension flag could not be verified
+  // (SDES-SUB-CP-004 §4) — the subscription was created anyway.
+  admission_gate?: string;
 }
 
 export async function docSubscribe(
@@ -290,6 +347,29 @@ export async function docSubscribe(
     };
   }
 
+  // Admission gate (SDES-SUB-CP-004 §4, REQ-SUB-013 criterion 3). Positioned
+  // HERE on purpose — after the idempotent and grade-change branches above,
+  // immediately before the only path that actually admits something new:
+  //   - re-calling with the same intent returns the existing row: it admits
+  //     nothing, so suspending it would break idempotent callers without
+  //     suspending anything;
+  //   - changing the grade of an existing subscription is a change to a target
+  //     already admitted, not a new admission. It is deliberately NOT blocked.
+  //     If a suspension should also freeze grade upgrades, that is a widening
+  //     of the rule and belongs to whoever governs it — not to this gate
+  //     quietly reading more into "l'ammissione di nuovi documenti" than it says.
+  const gate = await readAdmissionGate(db);
+  if (gate.suspended) {
+    return err(
+      `Admission to subscriptions is SUSPENDED: '${ADMISSION_SUSPENDED_PARAM}' is ${gate.value} in the governance ` +
+      `parameter registry${gate.owner ? ` (owner ${gate.owner})` : ""} — a noise measure was exceeded and extension is ` +
+      `paused until the thresholds are retuned (REQ-SUB-013 criterion 3, SDES-SUB-CP-004 §4). This suspends NEW ` +
+      `subscriptions only: existing subscriptions and their notifications keep running untouched, and re-calling ` +
+      `doc_subscribe on a subscription you already hold still works. The flag is a deliberate human act, reversible ` +
+      `via gov_param_set by its declared owner, and its value and history are readable in loomx_governance_params.`
+    );
+  }
+
   // INSERT — origin is ALWAYS 'choice' from this tool (SDES-SUB-001 intro:
   // 'fact' origins are constitutive/automatic, out of scope here).
   const insert: Record<string, unknown> = {
@@ -333,16 +413,17 @@ export async function docSubscribe(
     return err(`Subscription '${newId}' was inserted but does not match what was sent (D-132) — treat as UNCONFIRMED.`);
   }
 
-  return {
-    ok: true,
-    data: {
-      subscription_id: newId,
-      created: true,
-      intent: afterRow.intent,
-      subscribed_at_version: afterRow.subscribed_at_version,
-      target_kind: hasItem ? "item" : "document",
-    },
+  const created: DocSubscribeResult = {
+    subscription_id: newId,
+    created: true,
+    intent: afterRow.intent,
+    subscribed_at_version: afterRow.subscribed_at_version,
+    target_kind: hasItem ? "item" : "document",
   };
+  if (!gate.verified) {
+    created.admission_gate = `NOT VERIFIED — ${gate.reason ?? "unknown"}. The subscription was created; the admission-suspension flag ('${ADMISSION_SUSPENDED_PARAM}', SDES-SUB-CP-004 §4) could not be read, so this call cannot assert that admission is open.`;
+  }
+  return { ok: true, data: created };
 }
 
 // ---------------------------------------------------------------------------
@@ -394,16 +475,17 @@ export async function docUnsubscribe(
     }
   }
 
-  // SEC-011: exit only from a CHOICE, never a FACT. The DB-floor trigger for
-  // this is ratified (D-186 §2) but NOT yet applied — measured live
-  // 2026-08-21: no BEFORE UPDATE trigger on gov.doc_subscriptions rejects a
-  // tombstone of an origin='fact' row today (dba msg 41fa192b: "proposto a
-  // loomy in questo stesso giro"). Enforced here at the tool-floor meanwhile.
+  // SEC-011: exit only from a CHOICE, never a FACT. The DB-floor trigger is
+  // ratified (D-186 §2) AND applied since 2026-08-22 (dba migration
+  // 20260822100000, msg 1051fdb7; verified live: tombstone on 'fact' → 42501,
+  // on 'choice' → succeeds). This tool-floor check is therefore redundant with
+  // the floor, and deliberately kept: it names the rule to the caller instead
+  // of letting a bare 42501 do it. Not a stand-in for a missing floor.
   if (sub.origin === "fact") {
     return err(
       `Cannot unsubscribe '${args.subscription_id}': it originates from a structural fact (origin='fact'), not a ` +
       `choice (SEC-011) — exit by removing the underlying link/role that created it, not by tombstoning here. ` +
-      `(DB-floor enforcement of this rule is ratified — D-186 §2 — but not yet applied; this tool enforces it meanwhile.)`
+      `(The DB floor enforces this too — D-186 §2, live since 2026-08-22; this message just names the rule.)`
     );
   }
 
@@ -1054,6 +1136,257 @@ export async function docRepoint(
     out.staleness_note =
       `${result.open_staleness} staleness marking(s) remain OPEN on this subscription: repointing moves the pin, ` +
       `it does not settle the debt. Close them with doc_staleness_close and a recorded outcome.`;
+  }
+  return { ok: true, data: out };
+}
+
+// ---------------------------------------------------------------------------
+// doc_version_delta — the structured delta of a publication (forge msg
+// 05ba7c9e: UAT-SUB-003 / REQ-SUB-003 criterion 2, and UAT-SUB-011 /
+// REQ-SUB-011 by declared consequence).
+//
+// Why this is NOT a declared list in changelog_entry.attrs, as SDES-SUB-003
+// sketched: measured live 2026-08-28, gov.doc_publish() already writes a FULL
+// row-level snapshot of the document into gov.doc_version_items (237 rows over
+// 29 publications), each row carrying content_sha256. So the delta does not
+// need to be declared by the caller — it is DERIVABLE by diffing consecutive
+// snapshots, and derivable is strictly stronger:
+//
+//   - Completeness is by construction. forge's central worry ("complete, never
+//     silently truncated" — same principle as CV-8/D-203) cannot be violated
+//     by a list nobody writes. There is no list to truncate. What replaces the
+//     truncation risk is a cap that REFUSES (see MAX_VERSION_DELTA_ROWS): an
+//     oversized diff is an explicit error, never a short answer.
+//   - It cannot lie. A hand-declared elenco can omit a row — accidentally, or
+//     to keep a noisy publication quiet. A sha256 diff of the ledger's own
+//     snapshots reports what was published, not what someone said was published.
+//   - It works retroactively, on the 29 publications that already exist. A
+//     declared field would only ever describe publications made after it lands.
+//
+// Verified live on document 9af1b1f1 (versions 1.2 → 1.3, 11 rows): exactly one
+// row (UAT-OR-009) reports as changed, ten as unchanged.
+//
+// Boundary: this is the board-mcp surface for the delta. M1 (who filters
+// document-subscribers down to the rows actually touched) and M4 (who counts
+// rows to decide whether to aggregate) are dba/sweep domain and may read the
+// same snapshots in SQL — same source, no second version of the truth.
+// ---------------------------------------------------------------------------
+
+// A diff bigger than this is refused, never truncated. Today's largest
+// publication is 21 rows; the cap exists so that if a document ever grows past
+// what one response can honestly carry, the caller is TOLD, and M4 never counts
+// a number smaller than the truth.
+export const MAX_VERSION_DELTA_ROWS = 2000;
+
+export const VERSION_CHANGE_KINDS = ["created", "modified", "superseded", "removed"] as const;
+export type VersionChangeKind = (typeof VERSION_CHANGE_KINDS)[number];
+
+export interface DocVersionDeltaArgs {
+  document_id: string;
+  version?: string;
+  against_version?: string;
+}
+
+export interface VersionDeltaChange {
+  item_id: string;
+  code: string | null;
+  item_type: string;
+  change_kind: VersionChangeKind;
+}
+
+export interface DocVersionDeltaResult {
+  document_id: string;
+  version: { label: string; seq: number; publication_id: string; published_at: string };
+  baseline: { label: string; seq: number; publication_id: string } | null;
+  changes: VersionDeltaChange[];
+  counts: { created: number; modified: number; superseded: number; removed: number; unchanged: number; total_rows_in_version: number };
+  complete: true;
+  note?: string;
+}
+
+interface VersionRow {
+  id: string;
+  version_seq: number;
+  version_label: string;
+  published_at: string | Date;
+  delta_summary: string;
+}
+
+interface VersionItemRow {
+  publication_id: string;
+  doc_item_id: string;
+  code: string | null;
+  item_type: string;
+  status: string;
+  content_sha256: string;
+}
+
+function toIso(v: string | Date): string {
+  return v instanceof Date ? v.toISOString() : String(v);
+}
+
+export async function docVersionDelta(
+  db: SupabaseClient,
+  args: DocVersionDeltaArgs,
+  ctx: DocContext
+): Promise<DocResult<DocVersionDeltaResult>> {
+  if (!UUID_RE.test(args.document_id)) return err(`document_id must be a UUID.`);
+
+  // The document must be readable by the caller — the delta names codes and
+  // item ids, so it never widens what RLS already decided (DEL-001 c).
+  const { data: docRow, error: docErr } = await db
+    .from(DOCUMENTS)
+    .select("id, project_id")
+    .eq("id", args.document_id)
+    .maybeSingle();
+  if (docErr) return err(`Failed to load document: ${docErr.message}`);
+  if (!docRow) {
+    return err(`document_id '${args.document_id}' is not readable by '${ctx.selfSlug}' (not found, or hidden by RLS — D-167).`);
+  }
+
+  const { data: verData, error: verErr } = await db
+    .from(GOV_DOC_VERSIONS)
+    .select("id, version_seq, version_label, published_at, delta_summary")
+    .eq("document_id", args.document_id)
+    .order("version_seq", { ascending: false });
+  if (verErr) return err(`Failed to read the publication ledger: ${verErr.message}`);
+  const versions = ((verData ?? []) as VersionRow[]).slice().sort((a, b) => b.version_seq - a.version_seq);
+  if (versions.length === 0) {
+    return err(
+      `Document '${args.document_id}' has never been published — there is no version to take a delta of. ` +
+      `A delta exists between publications, not between edits (SDES-SUB-003: fan-out starts at doc_publish).`
+    );
+  }
+
+  // Target version: explicit label, or the most recent publication.
+  let target: VersionRow | undefined;
+  if (args.version && args.version.trim() !== "") {
+    const wanted = args.version.trim();
+    const matches = versions.filter((v) => v.version_label === wanted);
+    if (matches.length === 0) {
+      return err(
+        `Version '${wanted}' is not in this document's ledger. Published versions, newest first: ` +
+        `${versions.map((v) => v.version_label).join(", ")}.`
+      );
+    }
+    // A label is not unique by contract — never pick for the caller (same rule
+    // as doc_item_resolve on ambiguity).
+    if (matches.length > 1) {
+      return err(
+        `Version label '${wanted}' matches ${matches.length} publications of this document (seq ` +
+        `${matches.map((m) => m.version_seq).join(", ")}) — this tool never picks one for you.`
+      );
+    }
+    target = matches[0];
+  } else {
+    target = versions[0];
+  }
+
+  // Baseline: explicit label, or the publication immediately preceding the
+  // target by seq. Null for a first publication — stated, never faked.
+  let baseline: VersionRow | null = null;
+  if (args.against_version && args.against_version.trim() !== "") {
+    const wanted = args.against_version.trim();
+    const matches = versions.filter((v) => v.version_label === wanted);
+    if (matches.length === 0) {
+      return err(
+        `against_version '${wanted}' is not in this document's ledger. Published versions, newest first: ` +
+        `${versions.map((v) => v.version_label).join(", ")}.`
+      );
+    }
+    if (matches.length > 1) {
+      return err(`against_version '${wanted}' matches ${matches.length} publications — this tool never picks one for you.`);
+    }
+    if (matches[0].version_seq >= target.version_seq) {
+      return err(
+        `against_version '${wanted}' (seq ${matches[0].version_seq}) is not older than version ` +
+        `'${target.version_label}' (seq ${target.version_seq}) — a delta runs forward in time.`
+      );
+    }
+    baseline = matches[0];
+  } else {
+    baseline = versions.find((v) => v.version_seq < target!.version_seq) ?? null;
+  }
+
+  const pubIds = baseline ? [target.id, baseline.id] : [target.id];
+  const { data: itemData, error: itemErr } = await db
+    .from(GOV_DOC_VERSION_ITEMS)
+    .select("publication_id, doc_item_id, code, item_type, status, content_sha256")
+    .in("publication_id", pubIds);
+  if (itemErr) return err(`Failed to read the version snapshots: ${itemErr.message}`);
+  const rows = (itemData ?? []) as VersionItemRow[];
+
+  const cur = rows.filter((r) => r.publication_id === target.id);
+  const base = baseline ? rows.filter((r) => r.publication_id === baseline!.id) : [];
+  if (cur.length === 0) {
+    return err(
+      `Publication '${target.id}' (version ${target.version_label}) has no rows in gov.doc_version_items — the ` +
+      `snapshot is missing or not readable, so no delta can be asserted. This is NOT an empty delta.`
+    );
+  }
+  if (cur.length > MAX_VERSION_DELTA_ROWS || base.length > MAX_VERSION_DELTA_ROWS) {
+    return err(
+      `This delta spans ${Math.max(cur.length, base.length)} rows, over the ${MAX_VERSION_DELTA_ROWS} cap. Refused ` +
+      `rather than truncated: a partial delta would make any downstream count (aggregation thresholds, ` +
+      `subscriber filtering) wrong on a number that looks right. Read gov.doc_version_items directly for this document.`
+    );
+  }
+
+  const byId = new Map(base.map((r) => [r.doc_item_id, r]));
+  const changes: VersionDeltaChange[] = [];
+  let unchanged = 0;
+  for (const c of cur) {
+    const p = byId.get(c.doc_item_id);
+    let kind: VersionChangeKind | null;
+    if (!p) {
+      kind = "created";
+    } else if (c.content_sha256 === p.content_sha256) {
+      kind = null;
+    } else if (c.status === "superseded" && p.status !== "superseded") {
+      kind = "superseded";
+    } else {
+      kind = "modified";
+    }
+    if (kind === null) {
+      unchanged += 1;
+      continue;
+    }
+    changes.push({ item_id: c.doc_item_id, code: c.code, item_type: c.item_type, change_kind: kind });
+  }
+  // Rows that were in the baseline and are no longer part of the document.
+  const curIds = new Set(cur.map((r) => r.doc_item_id));
+  for (const p of base) {
+    if (!curIds.has(p.doc_item_id)) {
+      changes.push({ item_id: p.doc_item_id, code: p.code, item_type: p.item_type, change_kind: "removed" });
+    }
+  }
+
+  const counts = {
+    created: changes.filter((c) => c.change_kind === "created").length,
+    modified: changes.filter((c) => c.change_kind === "modified").length,
+    superseded: changes.filter((c) => c.change_kind === "superseded").length,
+    removed: changes.filter((c) => c.change_kind === "removed").length,
+    unchanged,
+    total_rows_in_version: cur.length,
+  };
+
+  const out: DocVersionDeltaResult = {
+    document_id: args.document_id,
+    version: {
+      label: target.version_label,
+      seq: target.version_seq,
+      publication_id: target.id,
+      published_at: toIso(target.published_at),
+    },
+    baseline: baseline ? { label: baseline.version_label, seq: baseline.version_seq, publication_id: baseline.id } : null,
+    changes,
+    counts,
+    complete: true,
+  };
+  if (!baseline) {
+    out.note =
+      `First publication of this document (seq ${target.version_seq}): there is no earlier snapshot to diff against, ` +
+      `so every row reports as 'created'. That is the delta, not a fallback.`;
   }
   return { ok: true, data: out };
 }

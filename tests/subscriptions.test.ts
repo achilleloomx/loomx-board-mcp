@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { strict as assert } from "node:assert";
 
 import {
-  docSubscribe, docUnsubscribe, docSubscriptionOutcome, docPublish, docRepoint,
+  docSubscribe, docUnsubscribe, docSubscriptionOutcome, docPublish, docRepoint, docVersionDelta,
   HUB_PROJECT_ID, HUB_UNSUBSCRIBABLE_DOCUMENT_TYPE,
 } from "../src/subscriptions.ts";
 import { makeDb, uuid, ctx, PROJ_A, PROJ_B, seedProjects, type Store, type Row } from "./fakeDb.ts";
@@ -698,4 +698,265 @@ test("doc_repoint: says openly that moving the pin does not settle an open stale
   assert.ok(res.ok, JSON.stringify(res));
   assert.equal((res as any).data.open_staleness, 1);
   assert.match((res as any).data.staleness_note, /does not settle the debt/);
+});
+
+// ---------------------------------------------------------------------------
+// Admission suspension gate (SDES-SUB-CP-004 §4, REQ-SUB-013 criterion 3)
+// ---------------------------------------------------------------------------
+
+function seedAdmissionParam(store: Store, value: number | null, opts: { deprecated?: boolean; owner?: string } = {}): void {
+  store.loomx_governance_params ??= [];
+  store.loomx_governance_params.push({
+    id: uuid(),
+    param_key: "sottoscrizioni_ammissione_sospesa",
+    value_type: "numeric",
+    // node-pg hands `numeric` back as a STRING — seed it as one, or the test
+    // passes on a shape production never sees.
+    value_numeric: value === null ? null : String(value),
+    owner_agent_code: opts.owner ?? "045",
+    deprecated_at: opts.deprecated ? "2026-08-01T00:00:00Z" : null,
+  });
+}
+
+function seedSubscribeFixture(store: Store): { subId: string; targetId: string } {
+  seedProjects(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.0");
+  const subId = uuid();
+  seedDocItem(store, subId, PROJ_A, docId, "board-mcp");
+  const targetId = uuid();
+  seedDocItem(store, targetId, PROJ_A, docId, "dba");
+  return { subId, targetId };
+}
+
+test("doc_subscribe: admission suspended (flag=1) refuses a NEW subscription with a speaking error", async () => {
+  const store: Store = {};
+  const { subId, targetId } = seedSubscribeFixture(store);
+  seedAdmissionParam(store, 1);
+  const db = makeDb(store);
+
+  const res = await docSubscribe(db, {
+    subscriber_item_id: subId, target_item_id: targetId, intent: "module", note: "tracks it",
+  }, ctx);
+  assert.equal(res.ok, false);
+  const msg = (res as any).error as string;
+  assert.match(msg, /SUSPENDED/);
+  assert.match(msg, /sottoscrizioni_ammissione_sospesa/);
+  // The error must say what is NOT suspended — otherwise it reads as "the
+  // system is off", which is exactly the wrong reaction (SDES-SUB-CP-004 §4).
+  assert.match(msg, /existing subscriptions and their notifications keep running/);
+  assert.match(msg, /045/);
+  assert.equal((store["gov.doc_subscriptions"] ?? []).length, 0);
+});
+
+test("doc_subscribe: admission suspended does NOT break the idempotent re-call", async () => {
+  const store: Store = {};
+  const { subId, targetId } = seedSubscribeFixture(store);
+  seedAdmissionParam(store, 0);
+  const db = makeDb(store);
+  const first = await docSubscribe(db, {
+    subscriber_item_id: subId, target_item_id: targetId, intent: "module", note: "tracks it",
+  }, ctx);
+  assert.ok(first.ok);
+
+  // Suspension arrives after the fact; the same call must still be a no-op,
+  // because it admits nothing new.
+  store.loomx_governance_params = [];
+  seedAdmissionParam(store, 1);
+  const again = await docSubscribe(db, {
+    subscriber_item_id: subId, target_item_id: targetId, intent: "module", note: "tracks it",
+  }, ctx);
+  assert.ok(again.ok, `idempotent re-call must survive suspension: ${JSON.stringify(again)}`);
+  assert.equal((again as any).data.created, false);
+});
+
+test("doc_subscribe: admission suspended does NOT block a grade change on an existing subscription", async () => {
+  const store: Store = {};
+  const { subId, targetId } = seedSubscribeFixture(store);
+  seedAdmissionParam(store, 0);
+  const db = makeDb(store);
+  assert.ok((await docSubscribe(db, {
+    subscriber_item_id: subId, target_item_id: targetId, intent: "informative", note: "watch",
+  }, ctx)).ok);
+
+  store.loomx_governance_params = [];
+  seedAdmissionParam(store, 1);
+  const bumped = await docSubscribe(db, {
+    subscriber_item_id: subId, target_item_id: targetId, intent: "module", note: "watch",
+  }, ctx);
+  assert.ok(bumped.ok, `grade change is not a new admission: ${JSON.stringify(bumped)}`);
+  assert.deepEqual((bumped as any).data.intent_changed, { from: "informative", to: "module" });
+});
+
+test("doc_subscribe: flag=0 admits, and says nothing extra", async () => {
+  const store: Store = {};
+  const { subId, targetId } = seedSubscribeFixture(store);
+  seedAdmissionParam(store, 0);
+  const db = makeDb(store);
+  const res = await docSubscribe(db, {
+    subscriber_item_id: subId, target_item_id: targetId, intent: "module", note: "tracks it",
+  }, ctx);
+  assert.ok(res.ok);
+  assert.equal((res as any).data.created, true);
+  assert.equal((res as any).data.admission_gate, undefined);
+});
+
+test("doc_subscribe: an unreadable/missing flag admits but DECLARES it could not verify", async () => {
+  const store: Store = {};
+  const { subId, targetId } = seedSubscribeFixture(store);
+  // No param row at all.
+  const db = makeDb(store);
+  const res = await docSubscribe(db, {
+    subscriber_item_id: subId, target_item_id: targetId, intent: "module", note: "tracks it",
+  }, ctx);
+  assert.ok(res.ok, `a missing parameter must never wall off subscriptions: ${JSON.stringify(res)}`);
+  assert.equal((res as any).data.created, true);
+  assert.match((res as any).data.admission_gate as string, /NOT VERIFIED/);
+});
+
+test("doc_subscribe: a DEPRECATED flag is not in force — admits, and says it is unverified", async () => {
+  const store: Store = {};
+  const { subId, targetId } = seedSubscribeFixture(store);
+  seedAdmissionParam(store, 1, { deprecated: true });
+  const db = makeDb(store);
+  const res = await docSubscribe(db, {
+    subscriber_item_id: subId, target_item_id: targetId, intent: "module", note: "tracks it",
+  }, ctx);
+  assert.ok(res.ok, `a deprecated row must not suspend anything: ${JSON.stringify(res)}`);
+  assert.match((res as any).data.admission_gate as string, /deprecated/);
+});
+
+// ---------------------------------------------------------------------------
+// doc_version_delta (forge msg 05ba7c9e — REQ-SUB-003 c.2 / REQ-SUB-011)
+// ---------------------------------------------------------------------------
+
+function seedVersion(store: Store, id: string, document_id: string, seq: number, label: string): void {
+  store["gov.doc_versions"] ??= [];
+  store["gov.doc_versions"].push({
+    id, document_id, version_seq: seq, version_label: label,
+    published_at: new Date(`2026-08-2${seq}T10:00:00Z`), // Date, as node-pg returns it
+    delta_summary: `prose for ${label}`,
+  });
+}
+
+function seedVersionItem(
+  store: Store, publication_id: string, doc_item_id: string, code: string | null, sha: string,
+  opts: { status?: string; item_type?: string } = {}
+): void {
+  store["gov.doc_version_items"] ??= [];
+  store["gov.doc_version_items"].push({
+    publication_id, doc_item_id, code, item_type: opts.item_type ?? "requirement",
+    status: opts.status ?? "approved", content_sha256: sha,
+  });
+}
+
+test("doc_version_delta: reports only the rows that actually changed, and the counts add up", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.3");
+  const pubOld = uuid(), pubNew = uuid();
+  seedVersion(store, pubOld, docId, 2, "1.2");
+  seedVersion(store, pubNew, docId, 3, "1.3");
+
+  const stable = uuid(), touched = uuid(), born = uuid(), gone = uuid(), sup = uuid();
+  // baseline
+  seedVersionItem(store, pubOld, stable, "REQ-1", "sha-stable");
+  seedVersionItem(store, pubOld, touched, "REQ-2", "sha-old");
+  seedVersionItem(store, pubOld, gone, "REQ-3", "sha-gone");
+  seedVersionItem(store, pubOld, sup, "REQ-4", "sha-sup-old", { status: "approved" });
+  // current
+  seedVersionItem(store, pubNew, stable, "REQ-1", "sha-stable");
+  seedVersionItem(store, pubNew, touched, "REQ-2", "sha-new");
+  seedVersionItem(store, pubNew, born, "REQ-5", "sha-born");
+  seedVersionItem(store, pubNew, sup, "REQ-4", "sha-sup-new", { status: "superseded" });
+
+  const res = await docVersionDelta(db, { document_id: docId }, ctx);
+  assert.ok(res.ok, `delta ok: ${JSON.stringify(res)}`);
+  const d = (res as any).data;
+  assert.equal(d.version.label, "1.3");
+  assert.equal(d.baseline.label, "1.2");
+  const byCode = Object.fromEntries(d.changes.map((c: any) => [c.code, c.change_kind]));
+  assert.deepEqual(byCode, { "REQ-2": "modified", "REQ-5": "created", "REQ-4": "superseded", "REQ-3": "removed" });
+  assert.equal(d.counts.unchanged, 1);
+  assert.equal(d.counts.total_rows_in_version, 4);
+  // The arithmetic must be checkable by the caller: changed + unchanged over
+  // the current version equals its row count (removed rows are not in it).
+  assert.equal(d.counts.created + d.counts.modified + d.counts.superseded + d.counts.unchanged, d.counts.total_rows_in_version);
+  assert.equal(d.complete, true);
+});
+
+test("doc_version_delta: a first publication says baseline:null instead of faking one", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.0");
+  const pub = uuid();
+  seedVersion(store, pub, docId, 1, "1.0");
+  seedVersionItem(store, pub, uuid(), "REQ-1", "a");
+  seedVersionItem(store, pub, uuid(), "REQ-2", "b");
+
+  const res = await docVersionDelta(db, { document_id: docId }, ctx);
+  assert.ok(res.ok);
+  const d = (res as any).data;
+  assert.equal(d.baseline, null);
+  assert.equal(d.counts.created, 2);
+  assert.match(d.note as string, /First publication/);
+});
+
+test("doc_version_delta: a never-published document is an explicit error, not an empty delta", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.0");
+  const res = await docVersionDelta(db, { document_id: docId }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /never been published/);
+});
+
+test("doc_version_delta: a missing snapshot is an error, never reported as 'nothing changed'", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "2.0");
+  const pub = uuid();
+  seedVersion(store, pub, docId, 1, "2.0"); // ledger row, but no gov.doc_version_items
+  const res = await docVersionDelta(db, { document_id: docId }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /NOT an empty delta/);
+});
+
+test("doc_version_delta: an unknown version label lists the real ones instead of guessing", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.1");
+  const pub = uuid();
+  seedVersion(store, pub, docId, 1, "1.1");
+  seedVersionItem(store, pub, uuid(), "REQ-1", "a");
+  const res = await docVersionDelta(db, { document_id: docId, version: "9.9" }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /not in this document's ledger/);
+  assert.match((res as any).error, /1\.1/);
+});
+
+test("doc_version_delta: a baseline newer than the target is refused", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.2");
+  const p1 = uuid(), p2 = uuid();
+  seedVersion(store, p1, docId, 1, "1.1");
+  seedVersion(store, p2, docId, 2, "1.2");
+  seedVersionItem(store, p1, uuid(), "REQ-1", "a");
+  seedVersionItem(store, p2, uuid(), "REQ-1", "b");
+  const res = await docVersionDelta(db, { document_id: docId, version: "1.1", against_version: "1.2" }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /a delta runs forward in time/);
 });
