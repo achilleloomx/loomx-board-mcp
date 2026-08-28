@@ -4,6 +4,28 @@
 
 ---
 
+## Sessione #130 — 2026-08-28 (autopilot dispatch «notte PR-1a», primo ciclo publish reale su doc-in-db, GTD `1502862a`, WI `ca6b1c36`)
+
+**Task:** pubblicare i documenti normativi del progetto doc-in-db, per attaccare il debito misurato in `#127` (93% delle sottoscrizioni agganciate a target mai pubblicati). Criterio dato: pubblicare dove il contenuto è stabile, e **dichiarare con motivo** ciò che non lo è — mai pubblicare a forza.
+
+**Pubblicati (2).** `req` «Requisiti del modello documenti governance» `668d0dca` → **1.0** (24 righe REQ-DOCM-001..024, tutte `approved`, nessun body nullo), e `exec_summary` «As-is al 2026-08-18» `dafdace0` → **1.0** (12 righe `active`). Entrambi con changelog-by-construction: prima non esisteva alcun documento `changelog` su doc-in-db, creato in questa sessione (`38809901`, visibility `org` come i documenti che registra) con una voce per pubblicazione (`CHG-DOCM-REQ-1.0`, `CHG-DOCM-ASIS-1.0`). `bump_class=major` su entrambe: non c'è una versione precedente da confrontare — la classe qui descrive la nascita della serie, non la portata di una modifica.
+
+**L'as-is si pubblica proprio perché non è normativo.** Nessuno lo sottoscrive e non è una norma: è una fotografia datata. Per questo è il caso in cui il congelamento non ha controindicazioni — una fotografia al 2026-08-18 che cambia dopo il 2026-08-18 sarebbe un difetto, non un aggiornamento. Dichiarato come tale nel `delta_summary`, per non far passare un conteggio di documenti pubblicati per un conteggio di norme in vigore.
+
+**Esclusi, con motivo, tutti e tre.** `sdes` `d21eac63`: 15 righe su 29 sono `draft`, e non sono bozze di forma — sono proposte per lavori non ancora costruiti (WI-G.1, WI-G.3, WI-C, SDES-DOCM-025 sulla pubblicazione stessa); header `draft`. `uat` `340081e4`: 5 casi `in_review` + 6 `draft` esenti dichiarati, 11 su 29 non chiusi; si muove insieme al SDES. Argomento aggiuntivo, valido per entrambi: pubblicare accende il congelamento (`gov.doc_frozen_row_touches`, D-201) su documenti in scrittura attiva, cioè produce rumore di rilevatore su ogni edit legittimo previsto. `sow` `465d2ae1`: **owner = loomy** — `gov.doc_publish` rifiuta con `insufficient_privilege` chiunque non sia owner del documento o loomy (letto nella funzione, non provato a forza); header comunque `draft`.
+
+**La misura che conta più delle due pubblicazioni.** Il SoW è il target di **26 delle 28** sottoscrizioni del progetto (OBJ-*, DEL-*, STOP-* sono sue righe): su doc-in-db il tappo non è tecnico, è di legittimazione — nessun lavoro mio lo scioglie. Allargando alla flotta (misura ripetuta prima e dopo): 18 documenti sono target di sottoscrizioni attive, 14 non hanno mai pubblicato, e il debito è concentrato per owner — **loomy 12 documenti / 146 sottoscrizioni bloccate**, it-manager 1 / 12, board-mcp 1 / 1. Il mio raggio d'azione diretto era 2 documenti su 15: il 93% non scende perché manca uno strumento, scende quando pubblicano loomy e it-manager. Segnalato a entrambi.
+
+**Un debito sanato senza `doc_repoint`, e vale la pena averlo a verbale.** L'unica sottoscrizione al `req` (DEL-BM-006, progetto board-mcp, `module`) aveva `subscribed_at_version='1.0'` — scritto quando `documents.version` valeva già `1.0` ma il documento non aveva mai pubblicato. Ora che la 1.0 è pubblicata il pin coincide, e `doc_repoint` è inapplicabile per «già agganciata alla corrente». Cioè: le **prime** pubblicazioni con label `1.0` sanano il debito per coincidenza di etichetta, senza repoint. Vale solo per la prima pubblicazione a etichetta invariata; dalla 1.1 in poi il repoint torna necessario.
+
+**Collaudo incrociato gratuito:** `doc_version_delta` (costruito ieri in `#129`) eseguito sulla pubblicazione nata oggi — 24 `created`, `baseline:null` **dichiarato** con la nota «questo è il delta, non un ripiego», `total_rows_in_version` 24 coerente. Prima verifica del tool su una pubblicazione non preesistente.
+
+**Nota di lettura del ledger (non un difetto).** `gov.doc_versions.published_by_role` registra `postgres` su ogni riga: dentro una `SECURITY DEFINER`, `current_user` è sempre l'owner della funzione. L'attribuzione reale sta su `published_by` (agent_code, `005` = board-mcp, da `gov.caller_identity()`) e `published_by_session` (`board_doc_rw`). Chi legge il ledger per attribuzione non deve guardare la colonna `_role`.
+
+**Decisioni prese:** nessuna. Il criterio di pubblicabilità applicato qui (header non-`draft` + tutte le righe in stato terminale; owner ≠ me = non pubblico) è materia di governance del framework, non del mio server: proposto a loomy nel messaggio di chiusura, non scritto come decisione di mia iniziativa (D-136 §5).
+**Blocchi / note:** l'elenco dei documenti di un progetto continua a non avere una superficie (gap `doc_list` già annotato in `#126`) — qui aggirato leggendo `documents` in SQL diretto sotto `doc_rw`, non con un tool. Nessuna modifica al codice in questa sessione: solo scritture di governance sul DB di produzione, tutte rilette (snapshot 24 righe + sha per il req, 12 per l'as-is).
+**Prossima sessione:** valutare la pubblicazione del `sdes` «Solution Design — Board MCP Server» (mio, 1 sottoscrizione, mai pubblicato) — non fatta qui perché fuori dallo scope del dispatch e perché è il documento che riscrivo a ogni sessione: pubblicarlo accende il congelamento su un documento in scrittura attiva, e il rilevatore `frozen_row_touches` non è mai stato provato dal vivo (GTD follow-on).
+
 ## Sessione #129 — 2026-08-28 (wake 2 msg: delta strutturato + predicato D-135, `doc_version_delta`, gate ammissione, WI `87e9156d`)
 
 **Wake cold-start su 2 messaggi**, entrambi lavorati e ackati (più 2 FYI del dba sullo stesso commento stale, ackati e corretti).
