@@ -279,6 +279,10 @@ export interface DocItemUpsertArgs {
   priority?: string;
   attrs?: Record<string, unknown>;
   client_token?: string;
+  /** Short index title (DEC-01j / SDES-DOCM-022). Optional, patch semantics like every other field. */
+  title?: string;
+  /** One-two sentence index summary (DEC-01j / SDES-DOCM-022). Optional, patch semantics like every other field. */
+  summary?: string;
 }
 
 export interface DocItemUpsertResult {
@@ -506,6 +510,10 @@ export async function docItemUpsert(
     else preserved.push("owner");
     if (args.sort_order !== undefined) { update.sort_order = args.sort_order; written.push("sort_order"); }
     else preserved.push("sort_order");
+    if (args.title !== undefined) { update.title = args.title; written.push("title"); }
+    else preserved.push("title");
+    if (args.summary !== undefined) { update.summary = args.summary; written.push("summary"); }
+    else preserved.push("summary");
 
     const prevAttrs: Record<string, unknown> = existing.attrs ?? {};
     if (args.attrs !== undefined) {
@@ -543,7 +551,7 @@ export async function docItemUpsert(
     // Read the row back and compare (GTD point 4 / D-132). See diffAgainstRow.
     const { data: after, error: afterErr } = await db
       .from(DOC_ITEMS)
-      .select("id, code, status, item_type, body, priority, owner, sort_order, attrs")
+      .select("id, code, status, item_type, body, priority, owner, sort_order, attrs, title, summary")
       .eq("id", existing.id)
       .maybeSingle();
     if (afterErr || !after) {
@@ -607,6 +615,8 @@ export async function docItemUpsert(
     body: args.body ?? null,
     priority: args.priority ?? null,
     attrs: storedAttrs,
+    title: args.title ?? null,
+    summary: args.summary ?? null,
   };
 
   const { data, error } = await db
@@ -629,7 +639,7 @@ export async function docItemUpsert(
   // synthesized client-side (no RETURNING), so `data` is not evidence of a row.
   const { data: afterIns, error: afterInsErr } = await db
     .from(DOC_ITEMS)
-    .select("id, code, status, item_type, body, priority, owner, sort_order, attrs")
+    .select("id, code, status, item_type, body, priority, owner, sort_order, attrs, title, summary")
     .eq("id", r.id)
     .maybeSingle();
   if (afterInsErr || !afterIns) {
@@ -1320,7 +1330,7 @@ export async function docSupersede(
 // row stays referenceable for a follow-up doc_item_resolve / doc_link.
 const QUERYABLE_FIELDS = [
   "id", "document_id", "project_id", "item_type", "code", "status",
-  "sort_order", "priority", "body", "attrs", "updated_at",
+  "sort_order", "priority", "body", "attrs", "updated_at", "title", "summary",
 ] as const;
 
 export interface DocQueryArgs {
@@ -1394,10 +1404,10 @@ export async function docQuery(
   }
 
   const selectCols = args.summary
-    ? "id, document_id, item_type, code, status, body"
+    ? "id, document_id, item_type, code, status, body, title, summary"
     : parsedFields
       ? parsedFields.join(", ")
-      : "id, document_id, project_id, item_type, code, status, sort_order, priority, body, attrs, updated_at";
+      : "id, document_id, project_id, item_type, code, status, sort_order, priority, body, attrs, updated_at, title, summary";
 
   const effectiveLimit = args.limit ?? 50;
   let q = db
@@ -1505,6 +1515,12 @@ async function docSummarize(
 
   return rows.map((r) => {
     const body = typeof r.body === "string" ? r.body : "";
+    const curatedTitle = typeof r.title === "string" && r.title.trim().length > 0 ? r.title.trim() : null;
+    const curatedSummary = typeof r.summary === "string" && r.summary.trim().length > 0 ? r.summary.trim() : null;
+    // DEC-01j / SDES-DOCM-022: prefer the curated title/summary over the body-derived
+    // headline, but never silently — an index that doesn't say whether it's curated
+    // or derived induces misplaced trust. headline_source names which one it is.
+    const curated = curatedTitle ?? curatedSummary;
     return {
       id: r.id,
       code: r.code,
@@ -1512,7 +1528,10 @@ async function docSummarize(
       item_type: r.item_type,
       status: r.status,
       body_chars: body.length,
-      headline: body.replace(/\s+/g, " ").trim().slice(0, 120),
+      headline: curated ?? body.replace(/\s+/g, " ").trim().slice(0, 120),
+      headline_source: curatedTitle ? "title" : curatedSummary ? "summary" : "body",
+      ...(curatedTitle ? { title: curatedTitle } : {}),
+      ...(curatedSummary ? { summary: curatedSummary } : {}),
       links: {
         doc_out: docOut.get(r.id) ?? 0,
         doc_in: docIn.get(r.id) ?? 0,

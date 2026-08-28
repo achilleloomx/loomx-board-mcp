@@ -3501,8 +3501,9 @@ export function registerTools(
       `pass attrs:{} to empty it on purpose. Dropped attrs keys and in-place item_type changes come back in 'warnings'; ` +
       `the response also reports fields_written / fields_preserved, and the row is re-read and compared before answering ok. ` +
       `attrs is validated against the item_type's JSON-Schema (call doc_item_types('<item_type>') for schema + example). ` +
+      `title/summary (DEC-01j / SDES-DOCM-022) are first-level fields — uniform across item_types, NOT inside attrs — for a readable index without opening bodies; same PATCH semantics (omit = preserved). ` +
       `Insert-only defaults: status=type default (usually draft), sort_order=append. item_type ∈ {${ITEM_TYPES_LIST}}. ` +
-      `Example: doc_item_upsert({project_id:"<uuid>", document_id:"<uuid>", item_type:"requirement", code:"REQ-001", body:"The system must…", attrs:{moscow:"must", acceptance_criteria:["x"]}}).`,
+      `Example: doc_item_upsert({project_id:"<uuid>", document_id:"<uuid>", item_type:"requirement", code:"REQ-001", body:"The system must…", title:"Short name", summary:"What this asserts.", attrs:{moscow:"must", acceptance_criteria:["x"]}}).`,
     {
       project_id: z.string().uuid().describe("Must equal the document's project (anti-divergence FK)"),
       document_id: z.string().uuid().optional().describe("Parent document (from doc_create). Optional when `code` already exists in the project — deduced from the row. Required to create a new row."),
@@ -3515,6 +3516,8 @@ export function registerTools(
       sort_order: z.number().int().optional().describe("Position in the document (insert default: append). Omit on update = keep the stored position. Idempotency key for code-less items."),
       attrs: z.record(z.any()).optional().describe("Type-specific structured fields — validated vs JSON-Schema (see doc_item_types). Omit on update = keep the stored attrs UNTOUCHED; pass it and it REPLACES the stored object wholesale (dropped keys are reported in warnings); pass {} to empty it deliberately."),
       client_token: z.string().optional().describe("Idempotency token for code-less items (stored in attrs._client_token)"),
+      title: z.string().optional().describe("Short index title (DEC-01j / SDES-DOCM-022) — first-level, uniform across item_types (not inside attrs). Omit on update = keep the stored value."),
+      summary: z.string().optional().describe("One-two sentence index summary (DEC-01j / SDES-DOCM-022) — first-level, same patch semantics as title. Omit on update = keep the stored value."),
     },
     async (args) => {
       const { docItemUpsert } = await import("./docs.js");
@@ -3628,7 +3631,8 @@ export function registerTools(
     "doc_query",
     `Query doc_items in a project, or run a traceability check. ` +
       `Filter mode: by document_type / item_type / status / code. ` +
-      `Lean modes (avoid dumping bodies on large docs): summary=true → per item {code,document_id,status,body_chars,headline,links:{doc_out,doc_in,gtd,wi}} plus a top-level documents legend {document_id→title,type} — a project can span several documents, and the legend makes the split visible at a glance (GTD 4a591cfe); or fields="code,status,..." → projection over chosen columns only. ` +
+      `Lean modes (avoid dumping bodies on large docs): summary=true → per item {code,document_id,status,body_chars,headline,headline_source,links:{doc_out,doc_in,gtd,wi}} plus a top-level documents legend {document_id→title,type} — a project can span several documents, and the legend makes the split visible at a glance (GTD 4a591cfe); or fields="code,status,..." → projection over chosen columns only. ` +
+      `headline (DEC-01j / SDES-DOCM-022) prefers the curated title, then summary, and only falls back to a body-derived snippet (first 120 chars) when neither is set — headline_source ('title'|'summary'|'body') always names which one you got, so a curated index is never confused with a derived one; title/summary are echoed as their own fields only when curated. ` +
       `Traceability mode: traceability='req_without_sdes' (REQ rows with no linked SDES), 'sdes_without_uat' (downstream chain), or 'req_without_origin' (D-206 upstream axis — REQ rows with no admitted origin). ` +
       `req_without_sdes/sdes_without_uat count BOTH same-project links (doc_item_links) and cross-project links (doc_item_xproject_links, D-074/D-206) as coverage — a requirement satisfied by an SDES entry in a different project is not a gap. The 'coverage' object keeps the two paths distinguishable ({total_sources, covered_same_project, covered_cross_project_only, covered_total}) — never merged into one opaque number (GTD 1b793e87). ` +
       `req_without_origin (GTD 1b793e87 follow-on, msg 28e9aa98) checks D-206's separate upstream axis — every requirement must be LINKED (doc_link / doc_link_by_code, same mechanism as req_without_sdes above — NOT doc_subscribe/gov.doc_subscriptions, which is a different axis entirely: staleness/decay tracking for readers who want to be notified of change, not provenance) to the thing it comes from, one of 4 admitted origins: a SoW element (objective/deliverable/stop_condition — "il capitolato"), a cross-project decision, a project-local decision, or a document it draws on. 'coverage.covered_by' breaks the total down by origin type (never fused). A cross-project link whose target can't be resolved (RLS-invisible from here) never counts as "no origin" — it lands in 'abstained_items'/'coverage.abstained' instead, distinct from a true gap in 'items'/'coverage.gap': per D-206, a true gap means the SoW is incomplete, not that the requirement is defective. ` +
@@ -3645,7 +3649,7 @@ export function registerTools(
       status: z.string().optional().describe("Filter by item status"),
       code: z.string().optional().describe("Filter by exact code"),
       traceability: z.enum(["req_without_sdes", "sdes_without_uat", "req_without_origin"]).optional().describe("Run a traceability gap check instead of a plain filter"),
-      summary: z.boolean().optional().describe("Lean output: code+status+body_chars+headline(120c)+link counts (doc_out/doc_in/gtd/wi), no full body. For review-at-scale."),
+      summary: z.boolean().optional().describe("Lean output: code+status+body_chars+headline(title/summary preferred, else 120c body snippet)+headline_source+link counts (doc_out/doc_in/gtd/wi), no full body. For review-at-scale."),
       fields: z.string().optional().describe("Comma-separated projection, e.g. 'code,status'. Returns only those columns (id always included). Skips body when not listed. Ignored if summary=true."),
       limit: z.number().int().min(1).max(500).optional().describe("Max rows (default: 50)"),
     },
