@@ -4,6 +4,24 @@
 
 ---
 
+## Sessione #132 — 2026-08-28 (wake auditor: ri-verdetto caso zero v3, R3 fixato, GTD `3e380cfa`, WI `e0c849c5`)
+
+**Wake cold-start su un messaggio dell'auditor** (`d03ff4c8`, ri-verdetto v3 del caso zero) con tre difetti misurati sulle superfici board-mcp — tutti della stessa forma: «la superficie c'è, risponde, e dà una risposta che sembra buona».
+
+**R3 — fixato e testato dal vivo.** `visibilityGap()` era ancorata a `loomx_agent_in_project()` (membership), ma dba ha aperto un ramo di lettura deliberatamente separato dalla membership (`loomx_document_visibility_predicate`, SELECT-only): un'identità non-membro con visibilità reale otteneva comunque `visibility_gap:true` su un conteggio a 0 vero (astensione falsa, il gemello del verde di carta — colpiva esattamente REQ-016). Fix: prima di guardare la membership, la funzione prova a leggere una riga reale sul progetto con la stessa connessione RLS-scoped — se legge qualcosa, il conteggio a 0 è vero e niente gap. Test aggiunto che riproduce lo scenario esatto misurato dall'auditor (documento `visibility=org`, nessuna membership, righe visibili di un tipo diverso da quello cercato). 290/290 verdi. Commit `6ecf18a`.
+
+**R4 — non un difetto residuo: una consegna già spedita, non ancora eseguita.** `doc_fact_sync` (v0.25.0, sessione #131, commit immediatamente precedente) è esattamente il fix che l'auditor chiedeva. Verificato dal vivo su `sbx-difetto-decadimento` (`9ef7b432`, di forge): `doc_staleness_query` conferma ancora `decayed_count:0` perché nessuno ha lanciato `doc_fact_sync` lì — provato a farlo io, rifiutato (board-mcp non è membro del sandbox). Girato a loomy come decisione: resta on-demand, o si aggancia automaticamente a `doc_link`/`doc_link_by_code` su `verifies`/`satisfies`?
+
+**R6 — confermato gap, non scelta.** `doc_item_xproject_links` non ha l'equivalente di `subscribed_at_version` (`gov.doc_subscriptions`): un cross-link segue il contenuto nuovo del bersaglio senza dirlo. Cercato in DECISIONS/HISTORY: nessuna decisione lo dichiara deliberato. Girato a loomy (msg `fda693bd`) — è una migration DBA, non una dichiarazione che posso fare da qui (D-005).
+
+**Trovato e chiuso en passant:** un fix già completo e testato da una sessione precedente (GTD `6e82b3b6`, validazione title/summary di `doc_item_upsert` contro i CHECK del DB) era rimasto nel working tree, mai committato — il WI che lo aveva prodotto era stato chiuso senza commit. Committato separatamente (`5d9ec8e`) prima di iniziare il lavoro sul wake.
+
+**Corretto anche un secondo messaggio auditor** (`0ead19a9`, sweep-allineamento-flotta): CLAUDE.md insegnava una `doc_query(document_id=...)` — parametro che il tool non espone — e puntava a un solo dei due documenti cross-decisions (39% del corpus nascosto); la tabella skill puntava alla sede legacy `.skills/` invece di `~/.claude/skills`. Entrambi corretti nello stesso commit di R3 (`6ecf18a`).
+
+**Decisioni prese:** nessuna — le due domande aperte (R4 automazione, R6 schema) sono girate a loomy, non decise qui (D-136 §5).
+**Blocchi / note:** nessuno bloccante. R4/R6 in attesa di risposta loomy.
+**Prossima sessione:** dipende dalla risposta di loomy su R4/R6.
+
 ## Sessione #131 — 2026-08-28 (autopilot dispatch «notte PR-2b», il congegno di decadimento end-to-end, GTD `b7846edf`, WI `5983ef10`, v0.25.0)
 
 **Il difetto era un anello mancante, e si è misurato in una query.** PJ-7/D-210 chiedeva il congegno che fa decadere i collaudi quando l'antenato cambia. La macchina esisteva già — quasi tutta: il rilevatore M2 del dba, `doc_staleness_query`, `doc_decay_apply`, verificati dal vivo in `#119`. Prima di costruire ho misurato dove si interrompeva: `gov.doc_items_detect_change` marca **solo** le righe su cui esiste una sottoscrizione **attiva**, e in produzione c'erano **170 sottoscrizioni, tutte `origin='choice'` fatte a mano, contro 510 legami `verifies` e 417 `satisfies` — e zero `fact`**. 927 dipendenze di tracciabilità dichiarate, nessuna capace di far decadere alcunché. È esattamente il caso che REG-011 aveva registrato provocandolo: *«collegamento presente, predicato presente, congegno assente»*. Il legame c'era. Nessuno lo leggeva.
