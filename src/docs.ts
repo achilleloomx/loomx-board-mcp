@@ -1526,7 +1526,7 @@ export interface DocQueryArgs {
   item_type?: string;
   status?: string;
   code?: string;
-  traceability?: "req_without_sdes" | "sdes_without_uat" | "req_without_origin";
+  traceability?: "req_without_sdes" | "sdes_without_uat" | "req_without_origin" | "broken_refs";
   summary?: boolean;
   fields?: string;
   limit?: number;
@@ -1592,6 +1592,9 @@ export async function docQuery(
 ): Promise<DocResult<{ mode: string; count: number; items: unknown[]; truncated?: true; documents?: Record<string, { title: string; document_type: string }>; visibility_gap?: true; note?: string }>> {
   if (args.traceability === "req_without_origin") {
     return docTraceabilityOrigin(db, args, ctx);
+  }
+  if (args.traceability === "broken_refs") {
+    return docBrokenRefs(db, args, ctx);
   }
   if (args.traceability) {
     return docTraceability(db, args, ctx);
@@ -2114,6 +2117,297 @@ async function docTraceabilityOrigin(
         abstained: abstainedItems.length,
         gap: gaps.length,
       },
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// broken_refs — link integrity, fourth traceability axis.
+//
+// Asked for by forge (msg 162add27) because UAT-PG-008 step 1 ("no broken
+// references") was not measurable: a direct SELECT on doc_item_links /
+// doc_item_xproject_links is permission-denied under an agent's own native
+// role, and doc_query(summary:true) exposes doc_out/doc_in as COUNTS only —
+// a broken link counts exactly like a healthy one, so the step read a false
+// "0 broken". Second consumer: the auditor's condition 11 (msg loomy
+// c473e347), same question from the other side. Runs under doc_rw like every
+// other doc_* handler, so each agent measures with its OWN identity.
+//
+// WHAT THIS CHECK CAN AND CANNOT SAY — measured on production 2026-08-29,
+// because the shape of the answer follows from the schema, not from taste:
+//
+//  1. A dangling pointer (link → row that does not exist) is IMPOSSIBLE by
+//     construction. Both tables carry FK ... ON DELETE CASCADE on BOTH ends:
+//     doc_item_links_from_fk / _to_fk are composite (from_item, project_id) →
+//     doc_items(id, project_id); doc_item_xproject_links_from_item_fkey /
+//     _to_item_fkey → doc_items(id). Deleting an item deletes its links. So
+//     `dangling: 0` is reported as a STRUCTURAL fact with its basis named —
+//     never as a measurement this check performed, because no RLS-scoped
+//     SELECT could tell "deleted" from "hidden" anyway (both come back as an
+//     absent row). Presenting that as a measured zero is precisely the
+//     blindness-dressed-as-absence that D-206 / REQ-DOCM-012/015 forbid.
+//
+//  2. What a caller CAN'T see is real and asymmetric: the SELECT policy on
+//     both link tables is anchored on the FROM end only
+//     (loomx_can_read_document(from_item.document_id)), so an identity can
+//     read a link and NOT its target. Measured as board-mcp: 11 of 1214
+//     same-project links and 2 of 283 cross-project links have an unreadable
+//     to_item. Those are abstentions, never gaps.
+//
+//  3. What IS a real, actionable defect in this corpus: a live link pointing
+//     at a RETIRED row. Measured globally: 4 links → superseded targets (none
+//     with a visible successor), 24 → deprecated, 2 → archived. That is the
+//     honest reading of "broken reference" here — the pointer resolves, but
+//     to something no longer in force.
+//
+// Unit of analysis is the LINK, not the item: "which references are broken"
+// is a question about edges, and rolling it up per item would hide which edge
+// is at fault.
+// ---------------------------------------------------------------------------
+
+// Statuses that mean "this row is no longer in force". Drawn from the statuses
+// the DB CHECKs actually admit (docTypes.ts + measured distribution), not
+// invented: 'superseded' already carries this meaning across the codebase
+// (req_without_sdes skips superseded sources — msg 040fe721), and
+// deprecated/archived/rejected are the other three terminal-retired values.
+// draft/proposed/in_review are IMMATURE, not retired — a reference to a draft
+// is work in progress, not a broken link, and counting it as one would flood
+// every young project with false defects. The set is echoed in the response
+// (`retired_statuses`) so the rule is inspectable and correctable without
+// anyone having to guess what the tool decided.
+const RETIRED_STATUSES = ["superseded", "deprecated", "archived", "rejected"] as const;
+const RETIRED_STATUS_SET = new Set<string>(RETIRED_STATUSES);
+
+interface LinkRow {
+  id: string;
+  from_item: string;
+  to_item: string;
+  relation_type: string;
+  scope: "same_project" | "cross_project_out" | "cross_project_in";
+}
+
+interface ItemFacts {
+  code: string | null;
+  item_type: string;
+  status: string;
+  project_id?: string;
+}
+
+async function docBrokenRefs(
+  db: SupabaseClient,
+  args: DocQueryArgs,
+  ctx: DocContext
+): Promise<DocResult<{
+  mode: string;
+  count: number;
+  items: unknown[];
+  truncated?: true;
+  abstained_items?: unknown[];
+  coverage?: unknown;
+  dangling?: unknown;
+  retired_statuses?: readonly string[];
+  notes?: string[];
+  visibility_gap?: true;
+  note?: string;
+}>> {
+  const { data: itemRows, error: itemErr } = await db
+    .from(DOC_ITEMS)
+    .select("id, code, item_type, status")
+    .eq("project_id", args.project_id);
+  if (itemErr) return err(`broken_refs item query failed: ${itemErr.message}`);
+  const projectItems = new Map<string, ItemFacts>();
+  for (const r of (Array.isArray(itemRows) ? (itemRows as any[]) : [])) {
+    projectItems.set(r.id, { code: r.code ?? null, item_type: r.item_type, status: r.status });
+  }
+  if (projectItems.size === 0) {
+    const gap = await visibilityGap(db, args.project_id, ctx.selfSlug);
+    return { ok: true, data: { mode: "traceability:broken_refs", count: 0, items: [], ...gap } };
+  }
+  const projectItemIds = Array.from(projectItems.keys());
+
+  // Same-project edges: the composite FK pins BOTH ends to this project, so
+  // every to_item here is guaranteed to be a row of this project — absence
+  // from projectItems means RLS hid it, never that it is missing.
+  const { data: sameRows, error: sameErr } = await db
+    .from(DOC_ITEM_LINKS)
+    .select("id, from_item, to_item, relation_type")
+    .eq("project_id", args.project_id);
+  if (sameErr) return err(`broken_refs link query failed: ${sameErr.message}`);
+
+  const [outHits, inHits] = await Promise.all([
+    db.from(DOC_ITEM_XPROJECT_LINKS).select("id, from_item, to_item, relation_type").in("from_item", projectItemIds),
+    db.from(DOC_ITEM_XPROJECT_LINKS).select("id, from_item, to_item, relation_type").in("to_item", projectItemIds),
+  ]);
+  if (outHits.error) return err(`broken_refs cross-project link query failed: ${outHits.error.message}`);
+  if (inHits.error) return err(`broken_refs cross-project link query failed: ${inHits.error.message}`);
+
+  const links: LinkRow[] = [
+    ...(Array.isArray(sameRows) ? (sameRows as any[]) : []).map((l) => ({ ...l, scope: "same_project" as const })),
+    ...((outHits.data ?? []) as any[]).map((l) => ({ ...l, scope: "cross_project_out" as const })),
+    ...((inHits.data ?? []) as any[]).map((l) => ({ ...l, scope: "cross_project_in" as const })),
+  ];
+  // An edge can legitimately be picked up by both cross-project queries when
+  // both ends live in this project's item set; dedupe on the link id.
+  const seenLinks = new Set<string>();
+  const scanned = links.filter((l) => (seenLinks.has(l.id) ? false : (seenLinks.add(l.id), true)));
+
+  // Foreign ends (cross-project) need their own lookup: doc_item_xproject_links
+  // has no project_id column (D-074), so the other end can live in ANY project.
+  const foreignIds = new Set<string>();
+  for (const l of scanned) {
+    if (l.scope === "same_project") continue;
+    for (const end of [l.from_item, l.to_item]) {
+      if (!projectItems.has(end)) foreignIds.add(end);
+    }
+  }
+  const foreignItems = new Map<string, ItemFacts>();
+  if (foreignIds.size > 0) {
+    const { data: fRows, error: fErr } = await db
+      .from(DOC_ITEMS)
+      .select("id, code, item_type, status, project_id")
+      .in("id", Array.from(foreignIds));
+    if (fErr) return err(`broken_refs cross-project target lookup failed: ${fErr.message}`);
+    for (const r of (Array.isArray(fRows) ? (fRows as any[]) : [])) {
+      foreignItems.set(r.id, { code: r.code ?? null, item_type: r.item_type, status: r.status, project_id: r.project_id });
+    }
+  }
+  const factsFor = (id: string): ItemFacts | undefined => projectItems.get(id) ?? foreignItems.get(id);
+
+  // A 'supersedes' edge points from the retired row to its heir BY
+  // CONSTRUCTION (doc_supersede writes old→new). Its from end being retired is
+  // the whole point, and a multi-hop chain legitimately has retired rows at
+  // both ends — classifying those as broken would turn every correctly
+  // versioned item into a defect. Counted separately, never silently dropped.
+  const supersedeEdges = scanned.filter((l) => l.relation_type === "supersedes");
+  const classifiable = scanned.filter((l) => l.relation_type !== "supersedes");
+
+  // For links onto a superseded target: is there a successor edge this identity
+  // can see? If yes the reference is recoverable with doc_item_chain; if no,
+  // the trail ends here — a materially worse case, kept distinct.
+  const supersededTargets = Array.from(new Set(
+    classifiable
+      .map((l) => l.to_item)
+      .filter((id) => factsFor(id)?.status === "superseded")
+  ));
+  const successorOf = new Map<string, string>();
+  if (supersededTargets.length > 0) {
+    const [sSame, sCross] = await Promise.all([
+      db.from(DOC_ITEM_LINKS).select("from_item, to_item, relation_type").in("from_item", supersededTargets),
+      db.from(DOC_ITEM_XPROJECT_LINKS).select("from_item, to_item, relation_type").in("from_item", supersededTargets),
+    ]);
+    if (sSame.error) return err(`broken_refs successor lookup failed: ${sSame.error.message}`);
+    if (sCross.error) return err(`broken_refs successor lookup failed: ${sCross.error.message}`);
+    for (const e of [...(sSame.data ?? []), ...(sCross.data ?? [])] as any[]) {
+      if (e.relation_type === "supersedes") successorOf.set(e.from_item, e.to_item);
+    }
+  }
+
+  const brokenBy: Record<string, number> = {
+    superseded_no_successor: 0, superseded_with_successor: 0,
+    deprecated: 0, archived: 0, rejected: 0,
+  };
+  const broken: unknown[] = [];
+  const abstained: unknown[] = [];
+  let okCount = 0;
+
+  const endDescriptor = (id: string) => {
+    const f = factsFor(id);
+    return f
+      ? { id, code: f.code, item_type: f.item_type, status: f.status, ...(f.project_id ? { project_id: f.project_id } : {}) }
+      : { id };
+  };
+
+  for (const l of classifiable) {
+    const target = factsFor(l.to_item);
+    if (!target) {
+      // The FK guarantees the row exists (see header). Not readable from here
+      // means RLS, and RLS-invisible is NOT a defect of the corpus — it is a
+      // limit of this identity's view, and saying otherwise would report the
+      // reader's blindness as the project's fault.
+      abstained.push({
+        link_id: l.id,
+        relation_type: l.relation_type,
+        scope: l.scope,
+        from: endDescriptor(l.from_item),
+        to_item: l.to_item,
+        reason:
+          "target exists (FK-guaranteed) but is not readable by this identity — the link SELECT policy is anchored on the FROM end only, " +
+          "so a readable link can point at an unreadable row. Not counted as broken.",
+      });
+      continue;
+    }
+    if (!RETIRED_STATUS_SET.has(target.status)) {
+      okCount += 1;
+      continue;
+    }
+    const successor = target.status === "superseded" ? successorOf.get(l.to_item) : undefined;
+    const kind =
+      target.status === "superseded"
+        ? (successor ? "superseded_with_successor" : "superseded_no_successor")
+        : target.status;
+    brokenBy[kind] = (brokenBy[kind] ?? 0) + 1;
+    broken.push({
+      link_id: l.id,
+      relation_type: l.relation_type,
+      scope: l.scope,
+      from: endDescriptor(l.from_item),
+      to: endDescriptor(l.to_item),
+      broken: `reference points at a retired row (status='${target.status}')`,
+      kind,
+      ...(successor
+        ? {
+            successor_id: successor,
+            hint: `recoverable — doc_item_chain({item_id:"${l.to_item}"}) walks forward to the row in force`,
+          }
+        : target.status === "superseded"
+          ? { hint: "no successor edge visible from here — the supersede trail ends at a retired row" }
+          : {}),
+    });
+  }
+
+  const effectiveLimit = args.limit ?? 50;
+  const { page: brokenPage, truncated } = paginate(broken, effectiveLimit);
+  const { page: abstainedPage } = paginate(abstained, effectiveLimit);
+  const gap = scanned.length === 0 ? await visibilityGap(db, args.project_id, ctx.selfSlug) : undefined;
+
+  return {
+    ok: true,
+    data: {
+      mode: "traceability:broken_refs",
+      count: brokenPage.length,
+      items: brokenPage,
+      ...(truncated ? { truncated } : {}),
+      ...(abstainedPage.length > 0 ? { abstained_items: abstainedPage } : {}),
+      coverage: {
+        total_links_scanned: scanned.length,
+        classified: classifiable.length,
+        ok: okCount,
+        broken: broken.length,
+        abstained: abstained.length,
+        broken_by: brokenBy,
+        skipped_supersedes: supersedeEdges.length,
+        scanned_by_scope: {
+          same_project: scanned.filter((l) => l.scope === "same_project").length,
+          cross_project_out: scanned.filter((l) => l.scope === "cross_project_out").length,
+          cross_project_in: scanned.filter((l) => l.scope === "cross_project_in").length,
+        },
+      },
+      dangling: {
+        count: 0,
+        measured: false,
+        basis:
+          "structural, not measured: both link tables FK both endpoints to doc_items(id) ON DELETE CASCADE " +
+          "(doc_item_links_from_fk/_to_fk composite on (id, project_id); doc_item_xproject_links_from_item_fkey/_to_item_fkey). " +
+          "Deleting an item deletes its links, so a link to a non-existent row cannot persist. " +
+          "An RLS-scoped SELECT could not tell 'deleted' from 'hidden' in any case — that case is reported as abstained, never as zero.",
+      },
+      retired_statuses: RETIRED_STATUSES,
+      notes: [
+        "'broken' here means the pointer resolves to a RETIRED row, not a missing one — see `dangling.basis` for why a missing one cannot exist.",
+        "'supersedes' edges are excluded from classification (counted in coverage.skipped_supersedes): they point from a retired row to its heir by construction, so scoring them would mark every correctly versioned item as defective.",
+        "cross_project_in is structurally INCOMPLETE: the link SELECT policy is anchored on the FROM end, which lives in another project, so inbound references from projects this identity cannot read are invisible here. Treat that count as a floor, never as a total.",
+      ],
+      ...gap,
     },
   };
 }

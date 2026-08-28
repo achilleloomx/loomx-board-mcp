@@ -1189,3 +1189,187 @@ test("doc_query summary: rows carry document_id and the response carries a docum
   assert.equal(legend[docA]?.title, "Req — half A");
   assert.equal(legend[docB]?.title, "Req — half B");
 });
+
+// ---------------------------------------------------------------------------
+// doc_query traceability: broken_refs (fourth axis — link integrity).
+// Asked for by forge (msg 162add27, UAT-PG-008 step 1) and the auditor
+// (condition 11, msg loomy c473e347). The shape these tests pin down comes
+// from the production schema measured 2026-08-29: dangling is impossible
+// (FK ON DELETE CASCADE both ends, both tables), so "broken" means "points at
+// a RETIRED row", and an unreadable target is an abstention, never a defect.
+// ---------------------------------------------------------------------------
+
+test("doc_query broken_refs: a link to a row in force is ok, not broken", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const docId = (doc as any).data.document_id;
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "requirement", code: "REQ-BR-1", status: "approved" }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "requirement", code: "REQ-BR-2", status: "approved" }, ctx);
+  await docLinkByCode(db, { project_id: PROJ_A, from_code: "REQ-BR-1", to_code: "REQ-BR-2", link_type: "relates_to" }, ctx);
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "broken_refs" }, ctx);
+  assert.ok(res.ok, `broken_refs ok: ${JSON.stringify(res)}`);
+  const d = (res as any).data;
+  assert.equal(d.mode, "traceability:broken_refs");
+  assert.equal(d.count, 0);
+  assert.equal(d.coverage.ok, 1);
+  assert.equal(d.coverage.broken, 0);
+  assert.equal(d.coverage.abstained, 0);
+  assert.equal(d.dangling.count, 0);
+  assert.equal(d.dangling.measured, false, "0 dangling is a structural fact (FK cascade), never a measurement this check performed");
+  assert.match(d.dangling.basis, /ON DELETE CASCADE/);
+});
+
+test("doc_query broken_refs: a link to a DEPRECATED row is a real broken reference", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const reqDoc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const decDoc = await docCreate(db, { project_id: PROJ_A, document_type: "decisions", title: "Decisions" }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-BR-10", status: "approved" }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: (decDoc as any).data.document_id, item_type: "decision", code: "D-BR-10", status: "deprecated" }, ctx);
+  await docLinkByCode(db, { project_id: PROJ_A, from_code: "REQ-BR-10", to_code: "D-BR-10", link_type: "refines" }, ctx);
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "broken_refs" }, ctx);
+  assert.ok(res.ok);
+  const d = (res as any).data;
+  assert.equal(d.count, 1);
+  assert.equal(d.items[0].kind, "deprecated");
+  assert.equal(d.items[0].from.code, "REQ-BR-10");
+  assert.equal(d.items[0].to.code, "D-BR-10");
+  assert.equal(d.items[0].scope, "same_project");
+  assert.equal(d.coverage.broken_by.deprecated, 1);
+  assert.deepEqual(d.retired_statuses, ["superseded", "deprecated", "archived", "rejected"], "the rule is echoed so it stays inspectable and correctable");
+});
+
+test("doc_query broken_refs: the nominal doc_supersede path leaves NO broken reference — the supersedes edge is never scored and D-133 repoints the citing link", async () => {
+  // Two regressions in one, both of which would make the check punish the very
+  // mechanism that keeps the corpus honest:
+  //  (a) doc_supersede writes old→superseded PLUS a 'supersedes' edge pointing
+  //      at the heir. Scoring that edge marks every correctly versioned item
+  //      as a defect — hence the exclusion, counted in skipped_supersedes.
+  //  (b) doc_supersede also REPOINTS pre-existing links to the new row (D-133,
+  //      gov.relink_superseded), so a reference created before the supersede
+  //      does not go stale at all. Discovered by this test: the first draft
+  //      asserted a broken reference here and measured 0. That is why the
+  //      production count of links-onto-superseded is small (4 globally,
+  //      2026-08-29) — they come from status changed OUTSIDE that path, which
+  //      is the case the next test covers.
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const docId = (doc as any).data.document_id;
+  const target = await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "requirement", code: "REQ-BR-20", body: "v1", status: "approved" }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "requirement", code: "REQ-BR-21", status: "approved" }, ctx);
+  await docLinkByCode(db, { project_id: PROJ_A, from_code: "REQ-BR-21", to_code: "REQ-BR-20", link_type: "relates_to" }, ctx);
+
+  const sup = await docSupersede(db, { old_item_id: (target as any).data.item_id, body: "v2" }, ctx);
+  assert.ok(sup.ok, `supersede ok: ${JSON.stringify(sup)}`);
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "broken_refs" }, ctx);
+  assert.ok(res.ok);
+  const d = (res as any).data;
+  assert.equal(d.count, 0, "nominal versioning produces no broken reference");
+  assert.equal(d.coverage.skipped_supersedes, 1, "the supersedes edge is excluded from classification, and said so — never silently dropped");
+  assert.equal(d.coverage.ok, 1, "the citing link was repointed to the heir (D-133), and reads as healthy");
+});
+
+test("doc_query broken_refs: a link onto a superseded row WITH a visible successor is broken but recoverable, and says how", async () => {
+  // The real-world shape (production: status set outside doc_supersede, or a
+  // link created after the supersede): the pointer still resolves, but to
+  // history. Recoverable via doc_item_chain — the tool that exists precisely
+  // because a UUID reference (D-170 norm) does not travel to the new version
+  // the way a code does.
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const docId = (doc as any).data.document_id;
+  const old = await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "requirement", code: "REQ-BR-22-OLD", status: "superseded" }, ctx);
+  const heir = await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "requirement", code: "REQ-BR-22", status: "approved" }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "requirement", code: "REQ-BR-23", status: "approved" }, ctx);
+  await docLink(db, { target_kind: "doc", from_id: (old as any).data.item_id, to_id: (heir as any).data.item_id, relation_type: "supersedes" }, ctx);
+  await docLinkByCode(db, { project_id: PROJ_A, from_code: "REQ-BR-23", to_code: "REQ-BR-22-OLD", link_type: "relates_to" }, ctx);
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "broken_refs" }, ctx);
+  assert.ok(res.ok);
+  const d = (res as any).data;
+  assert.equal(d.count, 1, "only the citing link is scored, not the supersedes edge");
+  assert.equal(d.items[0].kind, "superseded_with_successor");
+  assert.equal(d.items[0].successor_id, (heir as any).data.item_id);
+  assert.match(d.items[0].hint, /doc_item_chain/);
+  assert.equal(d.coverage.skipped_supersedes, 1);
+  assert.equal(d.coverage.broken_by.superseded_no_successor, 0, "recoverable and dead-end are kept apart — they cost different work to fix");
+});
+
+test("doc_query broken_refs: a link onto a superseded row with NO visible successor is the worse case, kept distinct", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const docId = (doc as any).data.document_id;
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "requirement", code: "REQ-BR-30", status: "approved" }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "requirement", code: "REQ-BR-31", status: "superseded" }, ctx);
+  await docLinkByCode(db, { project_id: PROJ_A, from_code: "REQ-BR-30", to_code: "REQ-BR-31", link_type: "relates_to" }, ctx);
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "broken_refs" }, ctx);
+  assert.ok(res.ok);
+  const d = (res as any).data;
+  assert.equal(d.count, 1);
+  assert.equal(d.items[0].kind, "superseded_no_successor");
+  assert.equal(d.items[0].successor_id, undefined);
+  assert.match(d.items[0].hint, /trail ends/);
+  assert.equal(d.coverage.broken_by.superseded_no_successor, 1);
+});
+
+test("doc_query broken_refs: an UNREADABLE target abstains — never counted as broken (the reader's blindness is not the project's defect)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const dbMember = makeDb(store, new Set([PROJ_A]), { rls: true });
+  const openDoc = seedDocument(store, PROJ_A, "org", "Open doc", "req");
+  const closedDoc = seedDocument(store, PROJ_A, "project", "Member-only doc", "sdes");
+  await docItemUpsert(dbMember, { project_id: PROJ_A, document_id: openDoc, item_type: "requirement", code: "REQ-BR-40", status: "approved" }, ctx);
+  await docItemUpsert(dbMember, { project_id: PROJ_A, document_id: closedDoc, item_type: "sdes_entry", code: "SDES-BR-40", status: "approved" }, ctx);
+  const linked = await docLinkByCode(dbMember, { project_id: PROJ_A, from_code: "REQ-BR-40", to_code: "SDES-BR-40", link_type: "relates_to" }, ctx);
+  assert.ok(linked.ok, `setup link ok: ${JSON.stringify(linked)}`);
+
+  const asMember = await docQuery(dbMember, { project_id: PROJ_A, traceability: "broken_refs" }, ctx);
+  assert.ok(asMember.ok);
+  assert.equal((asMember as any).data.coverage.ok, 1, "the member sees a healthy link");
+
+  const dbStranger = makeDb(store, new Set(), { rls: true });
+  const asStranger = await docQuery(dbStranger, { project_id: PROJ_A, traceability: "broken_refs" }, ctx);
+  assert.ok(asStranger.ok);
+  const d = (asStranger as any).data;
+  assert.equal(d.count, 0, "an invisible target is NOT a broken reference");
+  assert.equal(d.abstained_items.length, 1);
+  assert.equal(d.abstained_items[0].to_item.length, 36, "the unreadable target is named by UUID so the caller can escalate");
+  assert.match(d.abstained_items[0].reason, /FK-guaranteed/);
+  assert.equal(d.coverage.abstained, 1);
+  assert.equal(d.coverage.ok, 0, "not a false positive either — unverifiable, not verified");
+});
+
+test("doc_query broken_refs: a CROSS-PROJECT link onto a retired row is scored, with its scope named", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docA = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req A" }, ctx);
+  const docB = await docCreate(db, { project_id: PROJ_B, document_type: "decisions", title: "Decisions B" }, ctx);
+  const from = await docItemUpsert(db, { project_id: PROJ_A, document_id: (docA as any).data.document_id, item_type: "requirement", code: "REQ-BR-50", status: "approved" }, ctx);
+  const to = await docItemUpsert(db, { project_id: PROJ_B, document_id: (docB as any).data.document_id, item_type: "decision", code: "D-BR-50", status: "deprecated" }, ctx);
+  const link = await docLink(db, { target_kind: "doc", from_id: (from as any).data.item_id, to_id: (to as any).data.item_id, relation_type: "refines" }, ctx);
+  assert.ok(link.ok, `cross-project link ok: ${JSON.stringify(link)}`);
+  assert.equal(store.doc_item_xproject_links.length, 1, "routed cross-project");
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "broken_refs" }, ctx);
+  assert.ok(res.ok);
+  const d = (res as any).data;
+  assert.equal(d.count, 1, "generic link tables BOTH scanned — not just the req→sdes axis");
+  assert.equal(d.items[0].scope, "cross_project_out");
+  assert.equal(d.items[0].to.project_id, PROJ_B);
+  assert.equal(d.coverage.scanned_by_scope.cross_project_out, 1);
+  assert.ok(d.notes.some((n: string) => /cross_project_in is structurally INCOMPLETE/.test(n)), "the inbound floor is declared, never passed off as a total");
+});
