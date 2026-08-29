@@ -1438,3 +1438,287 @@ export async function docVersionDelta(
   }
   return { ok: true, data: out };
 }
+
+// ---------------------------------------------------------------------------
+// doc_publish_impact — D-233 fase 4 (GTD c0bbe258, SDES-SUB-006 shape). Answers
+// "who is touched if I publish THIS document now" BEFORE the act — not as a
+// side effect of it. v_doc_blast_radius (dba msg b465dbdd) does not fit: it
+// starts from gov.doc_versions, i.e. a publication that already happened. The
+// pre-act question needs gov.doc_subscriptions instead (dba's own correction).
+//
+// Two regimes, told apart via gov.doc_publication_state:
+//  - 'first_publish' (is_published=false — ~93% of active subscriptions'
+//    targets, dba measured 2026-08-28): publishing now would be the FIRST
+//    publication, so every row reports 'created' by construction — same
+//    null-baseline rule doc_version_delta already uses. No diff needed:
+//    every active subscription (item- or document-level) is touched=true.
+//  - 'republish' (is_published=true): the live doc_items row is diffed
+//    against the LATEST gov.doc_version_items snapshot with the SAME
+//    predicate the M2 trigger uses (gov.doc_item_substantive_diff) — so this
+//    answer is provably the comparison the eventual publish will report
+//    (Gate 4: "la risposta prima coincide con ciò che l'atto poi produce
+//    davvero"). Measured live 2026-08-29: doc_rw has NO EXECUTE grant on that
+//    function (42501) — asked dba for a narrow grant on this STABLE,
+//    side-effect-free function (see docDb.ts substantiveDiff). Until granted,
+//    an item that already existed in the last snapshot reports
+//    touched:'unknown' with the gap named (D-136 §5: declared gap, never an
+//    invented guess) — an item ABSENT from the last snapshot still resolves
+//    for free (created, no diff function needed).
+//
+// Document-level (surveillance) subscriptions are NEVER filtered by content
+// (D-233 fase 2 amendment, loomy msg 85942fff point 2: "chi sorveglia un
+// documento intero riceve ogni versione") — touched=true unconditionally, in
+// both regimes.
+//
+// Inherits vuoto ≠ negato: gov.doc_subscriptions/doc_items visibility is RLS
+// under this caller's own identity — an empty or partial subscriber list does
+// not prove none exist, only that none are visible to this identity.
+//
+// Read-only. No write path.
+// ---------------------------------------------------------------------------
+
+export interface DocPublishImpactArgs {
+  document_id: string;
+}
+
+export type ImpactTouched = true | false | "unknown";
+
+export interface DocPublishImpactSubscriber {
+  subscription_id: string;
+  subscriber_item_id: string;
+  subscriber_project_id: string;
+  intent: string;
+  depth: "direct" | "inherited";
+  target_item_id: string | null;
+  target_code: string | null;
+  touched: ImpactTouched;
+  basis: string;
+}
+
+export interface DocPublishImpactResult {
+  document_id: string;
+  document_title: string;
+  regime: "first_publish" | "republish";
+  last_published_version: string | null;
+  subscribers: DocPublishImpactSubscriber[];
+  counts: { total: number; touched: number; not_touched: number; unknown: number; direct: number; inherited: number };
+  caveat: string;
+}
+
+interface ImpactSubscriptionRow {
+  id: string;
+  subscriber_item_id: string;
+  subscriber_project_id: string;
+  intent: string;
+  status: string;
+  target_item_id: string | null;
+  target_document_id: string | null;
+}
+
+interface ImpactDocItemRow {
+  id: string;
+  code: string | null;
+  item_type: string;
+  status: string;
+  title: string | null;
+  summary: string | null;
+  body: string | null;
+  attrs: Record<string, unknown> | null;
+}
+
+const SNAPSHOT_DIFF_COLS = "doc_item_id, code, item_type, status, title, summary, body, attrs";
+
+export async function docPublishImpact(
+  db: SupabaseClient,
+  args: DocPublishImpactArgs,
+  ctx: DocContext
+): Promise<DocResult<DocPublishImpactResult>> {
+  if (!UUID_RE.test(args.document_id)) return err(`document_id must be a UUID.`);
+
+  const rw = db as unknown as {
+    __docRw?: boolean;
+    publicationState?: (documentId: string) => Promise<{
+      is_published: boolean;
+      last_version_label: string | null;
+    }>;
+    substantiveDiff?: (before: Record<string, unknown> | null, after: Record<string, unknown>) => Promise<string[]>;
+  };
+  if (!rw.__docRw || !rw.publicationState || !rw.substantiveDiff) {
+    return err(
+      `doc_publish_impact: db is not a DocRwDb — refusing to bypass RLS. gov.doc_publication_state lives in the ` +
+      `gov schema and is only reachable via the doc_rw direct-pg path (runDocRw). Test fakes must implement ` +
+      `publicationState/substantiveDiff.`
+    );
+  }
+
+  const { data: docRow, error: docErr } = await db.from(DOCUMENTS).select("id, title").eq("id", args.document_id).maybeSingle();
+  if (docErr) return err(`Failed to load document: ${docErr.message}`);
+  if (!docRow) {
+    return err(`document_id '${args.document_id}' is not readable by '${ctx.selfSlug}' (not found, or hidden by RLS — D-167).`);
+  }
+  const doc = docRow as { id: string; title: string };
+
+  const pub = await rw.publicationState(args.document_id);
+  const regime: "first_publish" | "republish" = pub.is_published ? "republish" : "first_publish";
+
+  const { data: itemData, error: itemErr } = await db
+    .from(DOC_ITEMS)
+    .select("id, code, item_type, status, title, summary, body, attrs")
+    .eq("document_id", args.document_id);
+  if (itemErr) return err(`Failed to read document items: ${itemErr.message}`);
+  const items = (itemData ?? []) as ImpactDocItemRow[];
+  const itemIds = items.map((i) => i.id);
+  const itemById = new Map(items.map((i) => [i.id, i]));
+
+  let itemSubs: ImpactSubscriptionRow[] = [];
+  if (itemIds.length > 0) {
+    const { data, error } = await db
+      .from(GOV_DOC_SUBSCRIPTIONS)
+      .select("id, subscriber_item_id, subscriber_project_id, intent, status, target_item_id, target_document_id")
+      .in("target_item_id", itemIds)
+      .eq("status", "active");
+    if (error) return err(`Failed to read item-level subscriptions: ${error.message}`);
+    itemSubs = (data ?? []) as ImpactSubscriptionRow[];
+  }
+
+  const { data: docSubData, error: docSubErr } = await db
+    .from(GOV_DOC_SUBSCRIPTIONS)
+    .select("id, subscriber_item_id, subscriber_project_id, intent, status, target_item_id, target_document_id")
+    .eq("target_document_id", args.document_id)
+    .eq("status", "active");
+  if (docSubErr) return err(`Failed to read document-level subscriptions: ${docSubErr.message}`);
+  const surveillanceSubs = (docSubData ?? []) as ImpactSubscriptionRow[];
+
+  // Latest snapshot per item — only needed in the republish regime, where
+  // "changed since the last publish" is a real question with a real baseline.
+  const latestSnapshot = new Map<string, Record<string, unknown>>();
+  if (regime === "republish" && itemIds.length > 0) {
+    const { data: verData, error: verErr } = await db
+      .from(GOV_DOC_VERSIONS)
+      .select("id, version_seq")
+      .eq("document_id", args.document_id)
+      .order("version_seq", { ascending: false })
+      .limit(1);
+    if (verErr) return err(`Failed to read the publication ledger: ${verErr.message}`);
+    const latest = (verData ?? [])[0] as { id: string } | undefined;
+    if (latest) {
+      const { data: snapData, error: snapErr } = await db
+        .from(GOV_DOC_VERSION_ITEMS)
+        .select(SNAPSHOT_DIFF_COLS)
+        .eq("publication_id", latest.id)
+        .in("doc_item_id", itemIds);
+      if (snapErr) return err(`Failed to read the last publication's snapshot: ${snapErr.message}`);
+      for (const r of (snapData ?? []) as Array<Record<string, unknown> & { doc_item_id: string }>) {
+        latestSnapshot.set(r.doc_item_id, r);
+      }
+    }
+  }
+
+  const subscribers: DocPublishImpactSubscriber[] = [];
+  let sawPermissionGap = false;
+
+  for (const s of itemSubs) {
+    const item = s.target_item_id ? itemById.get(s.target_item_id) : undefined;
+    let touched: ImpactTouched;
+    let basis: string;
+    if (regime === "first_publish") {
+      touched = true;
+      basis = "First publication of the document: every row would report 'created' (no baseline — same rule as doc_version_delta).";
+    } else if (!item) {
+      touched = "unknown";
+      basis = "Subscribed row is not currently readable in doc_items — cannot compare.";
+    } else {
+      const snap = s.target_item_id ? latestSnapshot.get(s.target_item_id) : undefined;
+      if (!snap) {
+        touched = true;
+        basis = "Row absent from the last publication's snapshot: would report 'created'.";
+      } else {
+        // SAVEPOINT around the diff call: the whole handler runs in ONE open
+        // transaction (docDb.ts runWithPool). A 42501 on gov.doc_item_substantive_diff
+        // aborts that transaction — without a savepoint, every subsequent query in
+        // this same loop (and the whole rest of the handler) would fail with
+        // "current transaction is aborted", not the honest per-item 'unknown' this
+        // branch means to report. Measured live 2026-08-29 on the un-savepointed
+        // first version of this code: exactly that failure, on the second item.
+        const sp = savepointHandle(db);
+        const SP = "publish_impact_diff";
+        if (sp) await sp.savepoint(SP);
+        try {
+          const changed = await rw.substantiveDiff!(snap, item as unknown as Record<string, unknown>);
+          touched = changed.length > 0;
+          basis = touched
+            ? `Significant columns changed since the last publication: ${changed.join(", ")}.`
+            : "No significant column changed since the last publication.";
+        } catch (e) {
+          const code = (e as { code?: string }).code ?? "";
+          const msg = e instanceof Error ? e.message : String(e);
+          if (/42501|insufficient_privilege/.test(code) || /permission denied|insufficient_privilege/i.test(msg)) {
+            if (sp) await sp.rollbackToSavepoint(SP).catch(() => {});
+            sawPermissionGap = true;
+            touched = "unknown";
+            basis = "gov.doc_item_substantive_diff is not EXECUTE-granted to doc_rw yet (42501) — declared gap, requested from dba.";
+          } else {
+            if (sp) await sp.rollbackToSavepoint(SP).catch(() => {});
+            return err(`Failed to compute the live diff for item '${s.target_item_id}': ${msg}`);
+          }
+        }
+      }
+    }
+    subscribers.push({
+      subscription_id: s.id,
+      subscriber_item_id: s.subscriber_item_id,
+      subscriber_project_id: s.subscriber_project_id,
+      intent: s.intent,
+      depth: "direct",
+      target_item_id: s.target_item_id,
+      target_code: item?.code ?? null,
+      touched,
+      basis,
+    });
+  }
+
+  for (const s of surveillanceSubs) {
+    subscribers.push({
+      subscription_id: s.id,
+      subscriber_item_id: s.subscriber_item_id,
+      subscriber_project_id: s.subscriber_project_id,
+      intent: s.intent,
+      depth: "inherited",
+      target_item_id: null,
+      target_code: null,
+      touched: true,
+      basis: "Document-level (surveillance) subscription: never content-filtered, receives every publication by design (D-233 fase 2).",
+    });
+  }
+
+  const counts = {
+    total: subscribers.length,
+    touched: subscribers.filter((s) => s.touched === true).length,
+    not_touched: subscribers.filter((s) => s.touched === false).length,
+    unknown: subscribers.filter((s) => s.touched === "unknown").length,
+    direct: subscribers.filter((s) => s.depth === "direct").length,
+    inherited: subscribers.filter((s) => s.depth === "inherited").length,
+  };
+
+  let caveat =
+    "Visibility follows RLS under this caller's identity — an empty or partial subscriber list does not prove none " +
+    "exist, only that none are visible here (vuoto ≠ negato).";
+  if (sawPermissionGap) {
+    caveat +=
+      " Some items report touched:'unknown' because gov.doc_item_substantive_diff is not yet EXECUTE-granted to " +
+      "doc_rw — a grant request was sent to dba; this tool will start resolving them exactly once it lands, no code change needed.";
+  }
+
+  return {
+    ok: true,
+    data: {
+      document_id: args.document_id,
+      document_title: doc.title,
+      regime,
+      last_published_version: pub.last_version_label,
+      subscribers,
+      counts,
+      caveat,
+    },
+  };
+}

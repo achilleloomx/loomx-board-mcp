@@ -240,6 +240,41 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
   const documentExists = async (documentId: string): Promise<boolean> =>
     (store.documents as Row[]).some((r) => r.id === documentId);
 
+  // D-233 fase 4: mimics gov.doc_publication_state — has this document EVER
+  // been published, and what's its latest version.
+  const publicationState = async (documentId: string) => {
+    const versions = ((store["gov.doc_versions"] as Row[]) ?? [])
+      .filter((r) => r.document_id === documentId)
+      .sort((a, b) => Number(b.version_seq ?? 0) - Number(a.version_seq ?? 0));
+    const latest = versions[0];
+    return {
+      is_published: versions.length > 0,
+      version_count: versions.length,
+      last_version_seq: latest ? Number(latest.version_seq ?? 0) : null,
+      last_version_label: latest ? String(latest.version_label) : null,
+      last_published_at: latest ? String(latest.published_at) : null,
+    };
+  };
+
+  // D-233 fase 4: mimics gov.doc_item_substantive_diff on a NARROW column set
+  // (title, summary, body, attrs, status) — good enough to exercise
+  // docPublishImpact's branches, not a claim of byte-parity with the real
+  // gov.doc_m2_significant_columns() registry (doc_rw has no read grant on
+  // that helper either, so it cannot be introspected from here).
+  const SUBSTANTIVE_DIFF_COLS = ["title", "summary", "body", "attrs", "status"];
+  const substantiveDiff = async (
+    before: Record<string, unknown> | null,
+    after: Record<string, unknown>
+  ): Promise<string[]> => {
+    const changed: string[] = [];
+    for (const col of SUBSTANTIVE_DIFF_COLS) {
+      const b = before ? before[col] : undefined;
+      const a = after[col];
+      if (JSON.stringify(b ?? null) !== JSON.stringify(a ?? null)) changed.push(col);
+    }
+    return changed;
+  };
+
   // Mimics gov.doc_publish (SDES-SUB-003): appends to gov.doc_versions, bumps
   // documents.version, returns (publication_id, version_seq, published_at).
   // Throws SQLSTATE-tagged errors on the same conditions the real SECURITY
@@ -341,6 +376,8 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
     relinkSuperseded,
     agentInProject,
     documentExists,
+    publicationState,
+    substantiveDiff,
     docPublish,
     subscriptionRepoint,
     savepoint,

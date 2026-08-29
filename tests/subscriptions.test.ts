@@ -9,7 +9,7 @@ import { test } from "node:test";
 import { strict as assert } from "node:assert";
 
 import {
-  docSubscribe, docUnsubscribe, docSubscriptionOutcome, docPublish, docRepoint, docVersionDelta,
+  docSubscribe, docUnsubscribe, docSubscriptionOutcome, docPublish, docRepoint, docVersionDelta, docPublishImpact,
   HUB_PROJECT_ID, HUB_UNSUBSCRIBABLE_DOCUMENT_TYPE,
 } from "../src/subscriptions.ts";
 import { makeDb, uuid, ctx, PROJ_A, PROJ_B, seedProjects, type Store, type Row } from "./fakeDb.ts";
@@ -959,4 +959,150 @@ test("doc_version_delta: a baseline newer than the target is refused", async () 
   const res = await docVersionDelta(db, { document_id: docId, version: "1.1", against_version: "1.2" }, ctx);
   assert.equal(res.ok, false);
   assert.match((res as any).error, /a delta runs forward in time/);
+});
+
+// ---------------------------------------------------------------------------
+// doc_publish_impact
+// ---------------------------------------------------------------------------
+
+function seedImpactItem(
+  store: Store, id: string, document_id: string, project_id: string,
+  fields: { code?: string; body?: string; attrs?: Record<string, unknown>; status?: string } = {}
+): void {
+  store.doc_items ??= [];
+  store.doc_items.push({
+    id, document_id, project_id, owner: "board-mcp",
+    code: fields.code ?? null, item_type: "requirement", status: fields.status ?? "approved",
+    title: null, summary: null, body: fields.body ?? "x", attrs: fields.attrs ?? {},
+  });
+}
+
+function seedImpactSub(
+  store: Store, id: string, opts: { target_item_id?: string; target_document_id?: string; intent?: string }
+): void {
+  store["gov.doc_subscriptions"] ??= [];
+  store["gov.doc_subscriptions"].push({
+    id, subscriber_item_id: uuid(), subscriber_project_id: PROJ_B, intent: opts.intent ?? "module",
+    status: "active", target_item_id: opts.target_item_id ?? null, target_document_id: opts.target_document_id ?? null,
+  });
+}
+
+test("doc_publish_impact: first_publish regime touches every active subscriber, direct and inherited", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "0.1");
+  const itemId = uuid();
+  seedImpactItem(store, itemId, docId, PROJ_A, { code: "REQ-1" });
+  const directSub = uuid(), surveillanceSub = uuid();
+  seedImpactSub(store, directSub, { target_item_id: itemId });
+  seedImpactSub(store, surveillanceSub, { target_document_id: docId, intent: "informative" });
+
+  const res = await docPublishImpact(db, { document_id: docId }, ctx);
+  assert.ok(res.ok, `impact ok: ${JSON.stringify(res)}`);
+  const d = (res as any).data;
+  assert.equal(d.regime, "first_publish");
+  assert.equal(d.counts.total, 2);
+  assert.equal(d.counts.touched, 2);
+  assert.equal(d.counts.direct, 1);
+  assert.equal(d.counts.inherited, 1);
+  const bySub = Object.fromEntries(d.subscribers.map((s: any) => [s.subscription_id, s]));
+  assert.equal(bySub[directSub].touched, true);
+  assert.equal(bySub[directSub].depth, "direct");
+  assert.equal(bySub[surveillanceSub].touched, true);
+  assert.equal(bySub[surveillanceSub].depth, "inherited");
+});
+
+test("doc_publish_impact: republish regime — unchanged row is not touched, changed row is", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.0");
+  const pub = uuid();
+  seedVersion(store, pub, docId, 1, "1.0");
+
+  const stableId = uuid(), touchedId = uuid();
+  store["gov.doc_version_items"] ??= [];
+  store["gov.doc_version_items"].push(
+    { publication_id: pub, doc_item_id: stableId, code: "REQ-1", item_type: "requirement", status: "approved", title: null, summary: null, body: "same", attrs: {} },
+    { publication_id: pub, doc_item_id: touchedId, code: "REQ-2", item_type: "requirement", status: "approved", title: null, summary: null, body: "old", attrs: {} },
+  );
+  seedImpactItem(store, stableId, docId, PROJ_A, { code: "REQ-1", body: "same" });
+  seedImpactItem(store, touchedId, docId, PROJ_A, { code: "REQ-2", body: "new" });
+
+  const stableSub = uuid(), touchedSub = uuid();
+  seedImpactSub(store, stableSub, { target_item_id: stableId });
+  seedImpactSub(store, touchedSub, { target_item_id: touchedId });
+
+  const res = await docPublishImpact(db, { document_id: docId }, ctx);
+  assert.ok(res.ok, `impact ok: ${JSON.stringify(res)}`);
+  const d = (res as any).data;
+  assert.equal(d.regime, "republish");
+  const bySub = Object.fromEntries(d.subscribers.map((s: any) => [s.subscription_id, s]));
+  assert.equal(bySub[stableSub].touched, false);
+  assert.equal(bySub[touchedSub].touched, true);
+  assert.match(bySub[touchedSub].basis, /body/);
+  assert.equal(d.counts.not_touched, 1);
+  assert.equal(d.counts.touched, 1);
+});
+
+test("doc_publish_impact: republish regime — a row absent from the last snapshot is 'created', no diff needed", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.0");
+  const pub = uuid();
+  seedVersion(store, pub, docId, 1, "1.0");
+  // no gov.doc_version_items rows at all — a brand-new item added after v1.0
+
+  const bornId = uuid();
+  seedImpactItem(store, bornId, docId, PROJ_A, { code: "REQ-9" });
+  const bornSub = uuid();
+  seedImpactSub(store, bornSub, { target_item_id: bornId });
+
+  const res = await docPublishImpact(db, { document_id: docId }, ctx);
+  assert.ok(res.ok);
+  const d = (res as any).data;
+  const sub = d.subscribers.find((s: any) => s.subscription_id === bornSub);
+  assert.equal(sub.touched, true);
+  assert.match(sub.basis, /created/);
+});
+
+test("doc_publish_impact: a permission gap on the diff function is a declared 'unknown', never a guessed answer", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const real = makeDb(store) as any;
+  const db = {
+    from: (t: string) => real.from(t),
+    __docRw: true,
+    publicationState: real.publicationState,
+    substantiveDiff: async () => {
+      const e = new Error("permission denied for function doc_item_substantive_diff") as Error & { code?: string };
+      e.code = "42501";
+      throw e;
+    },
+  } as any;
+
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A, "1.0");
+  const pub = uuid();
+  seedVersion(store, pub, docId, 1, "1.0");
+  const itemId = uuid();
+  store["gov.doc_version_items"] ??= [];
+  store["gov.doc_version_items"].push({ publication_id: pub, doc_item_id: itemId, code: "REQ-1", item_type: "requirement", status: "approved", title: null, summary: null, body: "x", attrs: {} });
+  seedImpactItem(store, itemId, docId, PROJ_A, { code: "REQ-1", body: "x" });
+  const subId = uuid();
+  seedImpactSub(store, subId, { target_item_id: itemId });
+
+  const res = await docPublishImpact(db, { document_id: docId }, ctx);
+  assert.ok(res.ok);
+  const d = (res as any).data;
+  const sub = d.subscribers.find((s: any) => s.subscription_id === subId);
+  assert.equal(sub.touched, "unknown");
+  assert.match(sub.basis, /42501/);
+  assert.equal(d.counts.unknown, 1);
+  assert.match(d.caveat, /not yet EXECUTE-granted/);
 });

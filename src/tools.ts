@@ -3833,6 +3833,27 @@ export function registerTools(
     }
   );
 
+  // --- doc_publish_impact ---
+  server.tool(
+    "doc_publish_impact",
+    `D-233 fase 4: answers "who is touched if I publish THIS document now" BEFORE the act — not as a side effect ` +
+      `of it. Returns active subscribers (item-level 'direct' + document-level 'inherited' surveillance), each with ` +
+      `touched:true|false|'unknown'. Two regimes: 'first_publish' (never published — every row would report ` +
+      `'created', so every subscriber is touched=true, no diff needed) and 'republish' (already published — the ` +
+      `live row is diffed against the last publication's snapshot with the SAME predicate the M2 trigger uses, so ` +
+      `the pre-act answer matches what the eventual publish will report). Surveillance subscriptions are never ` +
+      `content-filtered (touched=true unconditionally, by design). touched:'unknown' on a 'republish' item means ` +
+      `the diff function isn't EXECUTE-granted to doc_rw yet — a declared gap, not a guess. Visibility follows RLS ` +
+      `(vuoto ≠ negato). Read-only. Example: doc_publish_impact({document_id:"<uuid>"}).`,
+    {
+      document_id: z.string().uuid().describe("The document you are about to publish"),
+    },
+    async (args) => {
+      const { docPublishImpact } = await import("./subscriptions.js");
+      return runDocTool((db) => docPublishImpact(db, args, docCtx));
+    }
+  );
+
   // --- doc_repoint ---
   server.tool(
     "doc_repoint",

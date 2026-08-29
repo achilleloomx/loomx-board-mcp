@@ -97,6 +97,27 @@ export interface DocRwDb {
     rows: number;
     open_staleness: number;
   }>;
+  // D-233 fase 4 (doc_publish_impact): mimics gov.doc_publication_state — has
+  // this document EVER been published, and what's the latest version. STABLE,
+  // read-only, already GRANTed to doc_rw (measured live 2026-08-29).
+  publicationState: (documentId: string) => Promise<{
+    is_published: boolean;
+    version_count: number;
+    last_version_seq: number | null;
+    last_version_label: string | null;
+    last_published_at: string | null;
+  }>;
+  // D-233 fase 4: the SAME predicate the M2 trigger (gov.doc_items_detect_change)
+  // uses to decide whether a row changed substantively — gov.doc_item_substantive_diff
+  // (STABLE, side-effect-free, takes two jsonb snapshots, returns the changed
+  // significant columns). Calling it here — instead of re-deriving the same
+  // comparison in JS — is what lets doc_publish_impact's pre-act answer coincide
+  // BY CONSTRUCTION with what the eventual publish reports (Gate 4). Measured
+  // live 2026-08-29: doc_rw has NO EXECUTE grant on this function yet (42501) —
+  // wired anyway so the tool starts giving exact answers the moment dba grants
+  // it, no code change needed. Handlers catch the 42501 and report a declared
+  // gap (touched:'unknown'), never a guess.
+  substantiveDiff: (before: Record<string, unknown> | null, after: Record<string, unknown>) => Promise<string[]>;
   // Bug d6a57035 (atlas, DEL-006 dogfood): a handler runs in ONE open transaction
   // (BEGIN…COMMIT, see runWithPool below). An INSERT that hits a unique constraint
   // aborts that transaction — any subsequent query (e.g. the idempotent-retry
@@ -293,6 +314,35 @@ function makeDb(exec: PgExecutor, opts: { persistentTx?: boolean } = {}): DocRwD
       const { rows } = await exec("SELECT doc_document_exists($1::uuid) AS ok", [documentId]);
       const r = rows[0] as Row | undefined;
       return Boolean(r && r.ok);
+    },
+    publicationState: async (documentId: string) => {
+      const { rows } = await exec(
+        "SELECT is_published, version_count, last_version_seq, last_version_label, last_published_at " +
+          "FROM gov.doc_publication_state($1::uuid)",
+        [documentId]
+      );
+      const r = rows[0] as Row | undefined;
+      if (!r) {
+        const e = new Error("gov.doc_publication_state returned no row") as Error & { code?: string };
+        e.code = "P0002";
+        throw e;
+      }
+      return {
+        is_published: Boolean(r.is_published),
+        version_count: Number(r.version_count ?? 0),
+        last_version_seq: r.last_version_seq === null || r.last_version_seq === undefined ? null : Number(r.last_version_seq),
+        last_version_label: (r.last_version_label as string | null) ?? null,
+        last_published_at: (r.last_published_at as string | null) ?? null,
+      };
+    },
+    substantiveDiff: async (before, after) => {
+      const { rows } = await exec(
+        "SELECT gov.doc_item_substantive_diff($1::jsonb, $2::jsonb) AS changed",
+        [before === null ? null : JSON.stringify(before), JSON.stringify(after)]
+      );
+      const r = rows[0] as Row | undefined;
+      const changed = r && r.changed;
+      return Array.isArray(changed) ? (changed as string[]) : [];
     },
     docPublish: async (documentId, newVersion, bumpClass, changelogEntryId, deltaSummary) => {
       const { rows } = await exec(
