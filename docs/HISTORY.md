@@ -4,6 +4,22 @@
 
 ---
 
+## Sessione #142 — 2026-08-29 (wake cold-start msg loomy `13ea022a`, WI `eab3b0b5`, D-244)
+
+**Task:** eseguire D-244 (firmata da Achille lo stesso giorno): il repository pubblico `loomx-board-mcp` era fermo al 13 maggio 2026 (26 commit, lo scheletro pre-rifacimento) mentre la storia locale/reale contava 116 commit dal 29 giugno a oggi — due alberi senza antenato comune (scoperto in sessione precedente provando un push additivo sotto D-237, mai forzato). Decisione: cutover con archiviazione, non fusione (una fusione dichiarerebbe una convivenza mai avvenuta). Condizione vincolante: archiviare e VERIFICARE la storia vecchia PRIMA della sovrascrittura, due gesti separati.
+
+**Eseguito, in ordine.** (1) `git push origin origin/master:refs/heads/archive/master-skeleton-pre-20260829-cutover` — la storia vecchia (SHA `61d5f549`, 26 commit) archiviata su branch remoto dedicato. (2) Verifica indipendente **prima** di procedere: `gh api repos/.../branches/archive/...` conferma SHA `61d5f549` e ultimo commit ("register loomx-controlling + pieroni agents") — letta dall'API GitHub, non dalla cache git locale appena usata per il push. (3) Solo a verifica ottenuta, cutover: `git push origin master:master --force-with-lease=master:61d5f549...` (lease ancorato al valore atteso, non un force nudo). (4) Verifica finale in due strati indipendenti: `gh api repos/.../branches/master` conferma SHA `b89ba78`; un `git clone` fresco in una directory separata (nessuna cache del repo di lavoro) conferma 116 commit, HEAD `b89ba78`, `package.json` v0.29.0, e file reali del rifacimento (`docs.ts`, `subscriptions.ts`, `staleness.ts`, `factSync.ts` con riferimenti a `escalation_pending`) — non lo scheletro di maggio.
+
+**Nessuna interruzione a metà:** entrambi i gesti (archivio, cutover) sono stati eseguiti E verificati separatamente prima del passo successivo, come vincolato da D-244. Il branch remoto `live-recovered-20260829` (già esistente da un tentativo precedente, sottoinsieme esatto della storia locale meno l'ultimo commit) è stato lasciato intatto — non richiesta rimozione, nessuna azione distruttiva non necessaria.
+
+**Verbale inviato a loomy** (board_send) con i tre elementi richiesti: riferimento esatto dell'archivio + verifica, conteggio finale (116=116), esito della lettura esterna.
+
+**Decisioni prese:** nessuna nuova decisione — esecuzione di D-244 già firmata.
+**Blocchi / note:** nessuno. Operazione riuscita al primo tentativo su entrambi i push.
+**Prossima sessione:** nessun follow-on aperto da questo task.
+
+---
+
 ## Sessione #141 — 2026-08-29 (autopilot dispatch, GTD `a5a81b7e`, WI `1c23c1ae`, v0.29.0)
 
 **Task:** cantiere id (mandato Achille 29/08 in sessione, origine formale **D-241** corpus cross) — «riferimenti a prova di troncamento: requisiti → design → collaudi → build». Quattro assi dal mandato + episodio `subscription_id` (msg 791258c8), smistamento loomy già ratificato (msg `4e069b1a`, confermato it-manager `4b150c54`: chiave naturale nel tool, zero migration).
