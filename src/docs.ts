@@ -1785,16 +1785,18 @@ async function docTraceability(
   const cfg = map[args.traceability!];
   if (!cfg) return err(`Unknown traceability check '${args.traceability}'. Valid: ${Object.keys(map).join(", ")}.`);
 
-  // Source items in the project. Superseded rows are history, not gaps (msg
-  // 040fe721): a superseded requirement/sdes_entry is retired, not "missing
-  // coverage" — counting it as a gap is noise on every project that supersedes.
+  // Source items in the project. Retired rows (superseded/deprecated/archived/
+  // rejected, RETIRED_STATUSES) are history, not gaps (msg 040fe721, extended
+  // to the full retired set per GTD ffe8b687/SDES-DOCM-015(a)): a retired
+  // requirement/sdes_entry is retired, not "missing coverage" — counting it as
+  // a gap is noise on every project that supersedes/deprecates/archives/rejects.
   const { data: srcRows, error: srcErr } = await db
     .from(DOC_ITEMS)
     .select("id, code, body, status, attrs")
     .eq("project_id", args.project_id)
     .eq("item_type", cfg.source);
   if (srcErr) return err(`Traceability source query failed: ${srcErr.message}`);
-  const sources = (Array.isArray(srcRows) ? (srcRows as any[]) : []).filter((s) => s.status !== "superseded");
+  const sources = (Array.isArray(srcRows) ? (srcRows as any[]) : []).filter((s) => !RETIRED_STATUS_SET.has(s.status));
   if (sources.length === 0) {
     const gap = await visibilityGap(db, args.project_id, ctx.selfSlug);
     return { ok: true, data: { mode: `traceability:${args.traceability}`, count: 0, items: [], ...gap } };

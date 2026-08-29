@@ -716,6 +716,21 @@ test("doc_query traceability: a superseded REQ is history, not a gap (msg 040fe7
   assert.equal((after as any).data.coverage.total_sources, 1, "superseded row excluded from total_sources");
 });
 
+test("doc_query traceability: deprecated/rejected REQ rows are retired, not gaps (GTD ffe8b687, RETIRED_STATUSES parity with broken_refs)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const reqDoc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-DEP", status: "deprecated" }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-REJ", status: "rejected" }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: (reqDoc as any).data.document_id, item_type: "requirement", code: "REQ-LIVE" }, ctx);
+
+  const res = await docQuery(db, { project_id: PROJ_A, traceability: "req_without_sdes" }, ctx);
+  assert.ok(res.ok, JSON.stringify(res));
+  assert.equal((res as any).data.coverage.total_sources, 1, "deprecated + rejected rows excluded from total_sources, only REQ-LIVE counted");
+  assert.equal((res as any).data.count, 1, "only the live REQ is reported as a gap");
+});
+
 // ---------------------------------------------------------------------------
 // doc_query traceability: req_without_origin (D-206 third axis, GTD 1b793e87
 // follow-on, msg 28e9aa98) — upstream check, distinct from req_without_sdes.
