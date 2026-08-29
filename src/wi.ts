@@ -18,6 +18,8 @@ const DOC_ITEM_WI_LINKS_TABLE = "doc_item_wi_links";
 const DOC_ITEMS_TABLE = "doc_items";
 const AGENT_RUNTIME_TABLE = "loomx_agent_runtime";
 const BOARD_MESSAGES_TABLE = "board_messages";
+const ROLE_CARDS_TABLE = "loomx_role_cards";
+const ORG_EDGES_TABLE = "loomx_org_edges";
 
 // D-118 (a+): message types that count as "actionable" for the inbox-pending
 // guard and (a) the auto-set waiting_on heuristic.
@@ -195,6 +197,86 @@ export async function resolveAutoWaitingOn(
   return { waiting_on: targetSlug, block_scope: "reply-wake" };
 }
 
+// --- escalation target resolution (D-135 §3, REQ-GOV-086/087) ------------
+//
+// wi_end(status='escalated') reads the org chart at runtime for the
+// destinatario — never a stored field (REQ-GOV-086: role-cards already say
+// who does what, a cached owner field would go stale at the next reshuffle,
+// same class of defect as the `native_creds` drift in agents.yaml).
+
+export interface EscalationTargetResult {
+  target: string; // agent slug, or a human_ref string when isHuman
+  source: "explicit" | "fallback_reports_to";
+  isHuman?: boolean; // true when `target` is a human_ref — not a board agent,
+  // so it can never satisfy the board_messages predicate (to_agent has no
+  // code for a human). Declared explicitly rather than silently promoted
+  // (SDES-GOV-152 flags this exact gap as unresolved fleet-wide).
+}
+
+export async function resolveEscalationTarget(
+  db: SupabaseClient,
+  agentSlug: string,
+  domain: string | undefined
+): Promise<EscalationTargetResult | { error: string }> {
+  let query = db
+    .from(ORG_EDGES_TABLE)
+    .select("to_agent")
+    .eq("from_agent", agentSlug)
+    .eq("edge_type", "escalates_to");
+  if (domain) query = query.eq("domain", domain);
+  const { data: edges, error } = await query;
+  if (error) return { error: `escalates_to lookup failed: ${error.message}` };
+
+  let target: string;
+  let source: "explicit" | "fallback_reports_to";
+  const explicit = (edges ?? [])[0] as { to_agent: string } | undefined;
+  if (explicit) {
+    target = explicit.to_agent;
+    source = "explicit";
+  } else {
+    const { data: reportsTo, error: rtErr } = await db
+      .from(ORG_EDGES_TABLE)
+      .select("to_agent")
+      .eq("from_agent", agentSlug)
+      .eq("edge_type", "reports_to")
+      .maybeSingle();
+    if (rtErr) return { error: `reports_to fallback lookup failed: ${rtErr.message}` };
+    if (!reportsTo) {
+      return {
+        error: `no escalates_to edge${domain ? ` for domain "${domain}"` : ""} and no reports_to fallback for "${agentSlug}" (missing org-registry data?)`,
+      };
+    }
+    target = (reportsTo as { to_agent: string }).to_agent;
+    source = "fallback_reports_to";
+  }
+
+  // REQ-GOV-087: nobody adjudicates their own escalation. Deviate to the
+  // auditor (independent by design, D-016) instead of climbing reports_to —
+  // the manager isn't necessarily the domain authority, the auditor is a
+  // deliberate third party.
+  if (target === agentSlug) {
+    if (agentSlug === "auditor") {
+      // The auditor escalating on itself: no third agent role fits, so the
+      // chain terminates on a human (REQ-GOV-087 point 3). Not a dispatchable
+      // board agent — flagged via isHuman, never silently treated as one.
+      const { data: card, error: cardErr } = await db
+        .from(ROLE_CARDS_TABLE)
+        .select("human_ref")
+        .eq("agent_slug", "auditor")
+        .maybeSingle();
+      if (cardErr) return { error: `human_ref lookup for auditor failed: ${cardErr.message}` };
+      const humanRef = (card as { human_ref?: string | null } | null)?.human_ref;
+      if (!humanRef) {
+        return { error: "auditor is escalating on itself and has no human_ref on its role card — cannot resolve a terminal target" };
+      }
+      return { target: humanRef, source: "explicit", isHuman: true };
+    }
+    return { target: "auditor", source: "explicit" };
+  }
+
+  return { target, source };
+}
+
 export type WiResult<T> =
   | { ok: true; data: T }
   | { ok: false; error: string; runtime_request_posted?: boolean };
@@ -349,7 +431,7 @@ export async function wiStart(
 
 export interface WiEndArgs {
   wi_id: string;
-  status: WiEndStatus; // 'done' | 'failed' | 'waiting'
+  status: WiEndStatus; // 'done' | 'failed' | 'waiting' | 'escalated'
   failure_reason?: string;
   post_conditions_state?: Record<string, unknown>;
   side_effects_pending?: unknown[];
@@ -361,14 +443,24 @@ export interface WiEndArgs {
   arm_gtd_model?: string;          // fallback autopilot_model applied only to armed GTDs currently missing one (GTD 6bbc293b)
   post_runtime_request?: string;   // write to loomx_agent_runtime after close (optional)
   platform_contribution?: string;  // returned to caller for pull enabler D-045 (opt-in)
+  // D-135 (REQ-GOV-085 "percorso anticipato"): required when status=escalated.
+  escalation_reason?: string;
+  // D-135 / REQ-GOV-086: optional domain hint for the escalates_to edge lookup
+  // (e.g. 'database', 'architettura-software'). Omit to fall back straight to
+  // reports_to.
+  escalation_domain?: string;
 }
 
 // Mapping WI.status from the end-status keyword.
 // 'waiting' is not a valid WI DB status — WI goes to 'paused' while the GTD
 // goes to 'waiting' (deviation documented in CLAUDE.md WI section).
+// 'escalated' maps to 'escalation_pending', never straight to 'escalated'
+// (D-135/REQ-GOV-078): the DB trigger is the only writer of the final
+// 'escalated' status, on arrival of the message linked to this WI.
 export function mapEndStatus(endStatus: WiEndStatus): WiStatus {
   if (endStatus === "done") return "done";
   if (endStatus === "failed") return "failed";
+  if (endStatus === "escalated") return "escalation_pending";
   return "paused";
 }
 
@@ -396,6 +488,14 @@ export interface WiEndData {
   // (SDES-GOV-157) — fully superseded by pending_inbox (D-205).
   waiting_on_auto_set?: { waiting_on: string; block_scope: string }; // (a) auto-detected blocker
   waiting_on_warning?: string;                 // (a) ambiguous — caller must declare manually
+  // D-135 (REQ-GOV-085): status=escalated response — the destinatario the
+  // caller needs to write the rich follow-up message to (board_send/ping,
+  // wi_id=this WI as context). The WI state above does NOT depend on that
+  // message ever being sent.
+  escalation_target?: string;
+  escalation_target_source?: "explicit" | "fallback_reports_to";
+  escalation_note?: string; // set when escalation_target is a human_ref (isHuman) — no automatic promotion path exists yet for that case (SDES-GOV-152, unresolved fleet-wide)
+  escalation_message_warning?: string; // best-effort internal linking message (wi_ref) failed to send — WI is still in escalation_pending regardless
 }
 
 // Bug fix (GTD ba022585/c29d6143, dev-hq 2026-08-09, board msg f5fcd912): the
@@ -454,7 +554,14 @@ export async function wiEnd(
     return { ok: false, error: "failure_reason is required when status=failed." };
   }
 
-  if (row.status === "done" || row.status === "failed") {
+  if (args.status === "escalated" && !args.escalation_reason?.trim()) {
+    return { ok: false, error: "escalation_reason is required when status=escalated." };
+  }
+
+  // escalation_pending/escalated (D-135): terminal for the operator at the DB
+  // level too (loomx_wi_escalation_pending_terminal trigger) — checked here
+  // first so the caller gets a clear message instead of a raw 42501.
+  if (row.status === "done" || row.status === "failed" || row.status === "escalation_pending" || row.status === "escalated") {
     // See writeRuntimeRequest above: post the runtime_request even though the
     // WI is already closed — a stuck caller waiting on this call needs its
     // continue/clear/kill request to land regardless of the WI race outcome.
@@ -468,6 +575,25 @@ export async function wiEnd(
     }
     return { ok: false, error: `WI already closed (status=${row.status}).` };
   }
+
+  // D-135 (REQ-GOV-086/087): resolve the escalation destinatario from the org
+  // chart before touching the row — a failed lookup must not leave the WI
+  // half-transitioned.
+  let escalationTarget: string | undefined;
+  let escalationTargetSource: "explicit" | "fallback_reports_to" | undefined;
+  let escalationIsHuman = false;
+  if (args.status === "escalated") {
+    const resolved = await resolveEscalationTarget(db, row.agent_slug, args.escalation_domain);
+    if ("error" in resolved) {
+      return { ok: false, error: `Cannot resolve escalation target: ${resolved.error}` };
+    }
+    escalationTarget = resolved.target;
+    escalationTargetSource = resolved.source;
+    escalationIsHuman = resolved.isHuman ?? false;
+  }
+  const escalationNote = escalationIsHuman
+    ? `Target "${escalationTarget}" is a human_ref, not a board agent — no automatic promotion path exists for this case (SDES-GOV-152).`
+    : undefined;
 
   // Phase 1 D-074 gate (REQ-033): durable WIs closing as 'done' must have ≥1 REQ/SDES linked.
   // Ephemeral WIs (on-the-fly, EPHEMERAL_TEMPLATES, or force_ephemeral) skip the gate.
@@ -508,9 +634,19 @@ export async function wiEnd(
   };
   // Only set ended_at for terminal statuses. wi_end --waiting maps to paused,
   // which is a suspension not a closure — consistent with wi_pause (no ended_at).
-  if (newWiStatus !== "paused") update.ended_at = now;
+  // escalation_pending is neither: the WI is "consegnato", not closed
+  // (REQ-GOV-085) — ended_at stays NULL until/unless a future close happens.
+  if (newWiStatus !== "paused" && newWiStatus !== "escalation_pending") update.ended_at = now;
   if (args.post_conditions_state !== undefined) update.post_conditions_state = args.post_conditions_state;
   if (args.status === "failed" && args.failure_reason) update.failure_reason = args.failure_reason;
+  // D-135: escalation_target + escalated_at must land in the SAME UPDATE as
+  // the status flip — the DB CHECK (loomx_work_items_escalation_fields_check)
+  // requires both non-null the instant status enters escalation_pending, and
+  // REQ-GOV-085 requires the whole transition to be one atomic write.
+  if (args.status === "escalated") {
+    update.escalation_target = escalationTarget;
+    update.escalated_at = now;
+  }
 
   const { error: updErr } = await db
     .from(WI_TABLE)
@@ -538,6 +674,18 @@ export async function wiEnd(
     gtdUpdate.body = existingBody
       ? `${existingBody}\n[BLOCKER] ${args.failure_reason}`
       : `[BLOCKER] ${args.failure_reason}`;
+  }
+  // D-135 (SDES-GOV-152, "canale doppio" point 3): park the owner's own GTD
+  // on the destinatario — same convention as the D-118 (a) auto-set below
+  // (block_scope='reply-wake'), but deterministic here since the target is
+  // already known, not inferred. Skipped for a human terminal: waiting_on
+  // names a board agent slug, not a human_ref (SDES-GOV-152 gap).
+  if (args.status === "escalated" && escalationTarget && !escalationIsHuman) {
+    gtdUpdate.waiting_on = escalationTarget;
+    gtdUpdate.block_scope = "reply-wake";
+  }
+  if (args.status === "escalated" && args.resume_hint === undefined) {
+    gtdUpdate.resume_hint = args.escalation_reason;
   }
   if (args.resume_hint !== undefined) gtdUpdate.resume_hint = args.resume_hint;
 
@@ -599,6 +747,8 @@ export async function wiEnd(
         gtd_status: null,
         gtd_sync_warning: `GTD sync failed (WI is closed): ${gtdErr.message}`,
         ...(pendingInbox ? { pending_inbox: pendingInbox } : {}),
+        ...(escalationTarget ? { escalation_target: escalationTarget, escalation_target_source: escalationTargetSource } : {}),
+        ...(escalationNote ? { escalation_note: escalationNote } : {}),
       },
     };
   }
@@ -646,6 +796,41 @@ export async function wiEnd(
     if (!rr.ok) runtimeRequestWarning = `runtime_request not posted: ${rr.error}`;
   }
 
+  // D-135 §3: the fact that promotes escalation_pending -> escalated (DB
+  // trigger, dba-owned, gov.board_message_promote_escalation-equivalent) is a
+  // board_messages row with wi_ref=this WI and to_agent=escalation_target —
+  // never wi_end's own status write, and never an operator's say-so (that's
+  // the whole point of D-135). Sent here, best-effort and AFTER the WI/GTD
+  // writes above: the WI is already in escalation_pending regardless of
+  // whether this insert succeeds. wi_ref is intentionally NOT a board_send
+  // parameter (board thread b23fd91d/dba) — only this internal path writes it.
+  let escalationMessageWarning: string | undefined;
+  if (args.status === "escalated" && escalationTarget && !escalationIsHuman) {
+    if (!ctx.slugToCode) {
+      escalationMessageWarning = "No agent registry in context — linking message not sent.";
+    } else {
+      const fromCode = ctx.slugToCode.get(row.agent_slug);
+      const toCode = ctx.slugToCode.get(escalationTarget);
+      if (!fromCode || !toCode) {
+        escalationMessageWarning = `Cannot resolve agent code for "${!fromCode ? row.agent_slug : escalationTarget}" — linking message not sent.`;
+      } else {
+        const { error: msgErr } = await db.from(BOARD_MESSAGES_TABLE).insert({
+          from_agent: fromCode,
+          to_agent: toCode,
+          type: "blocker",
+          subject: `Escalation: WI ${args.wi_id} (${row.agent_slug})`,
+          body: args.escalation_reason,
+          status: "pending",
+          wake_priority: "urgent",
+          wi_ref: args.wi_id,
+        });
+        if (msgErr) {
+          escalationMessageWarning = `Linking message not sent (WI stays escalation_pending regardless): ${msgErr.message}`;
+        }
+      }
+    }
+  }
+
   return {
     ok: true,
     data: {
@@ -660,6 +845,9 @@ export async function wiEnd(
       ...(pendingInbox ? { pending_inbox: pendingInbox } : {}),
       ...(waitingOnAutoSet ? { waiting_on_auto_set: waitingOnAutoSet } : {}),
       ...(waitingOnWarning ? { waiting_on_warning: waitingOnWarning } : {}),
+      ...(escalationTarget ? { escalation_target: escalationTarget, escalation_target_source: escalationTargetSource } : {}),
+      ...(escalationNote ? { escalation_note: escalationNote } : {}),
+      ...(escalationMessageWarning ? { escalation_message_warning: escalationMessageWarning } : {}),
     },
   };
 }

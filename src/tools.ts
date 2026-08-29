@@ -2856,6 +2856,8 @@ export function registerTools(
     "emergency",
     "exempt",
     "failed",
+    "escalation_pending",
+    "escalated",
   ]);
   const WiEndStatusSchema = z.enum(WI_END_STATUSES);
   const WiLayerSchema = z.enum(WI_TEMPLATE_LAYERS);
@@ -2908,15 +2910,16 @@ export function registerTools(
   server.tool(
     "wi_end",
     [
-      "Close a Work Item. status='done'|'failed'|'waiting'. GTD status cascades (done→done, waiting→waiting, failed→next_action).",
+      "Close a Work Item. status='done'|'failed'|'waiting'|'escalated'. GTD status cascades (done→done, waiting→waiting, failed→next_action, escalated→waiting).",
       "'waiting' maps to WI.status='paused' (DB CHECK constraint — see CLAUDE.md WI section).",
       "Phase 1 D-074 gate (REQ-033): durable WIs (non-ephemeral template) closing as 'done' require ≥1 REQ/SDES/decision linked via doc_item_wi_links (decision covers governance/coordination WIs whose durable output is itself a decision).",
       "Use force_ephemeral=true to bypass (audit-logged). Phase 1 D-074: arm_gtd_ids arms follow-on GTDs post-close (soft-warn). GTD 6bbc293b: arming preserves an existing autopilot_model, fills it from arm_gtd_model when absent, and otherwise warns explicitly (never a silent undispatchable arm). platform_contribution triggers pull enabler D-045.",
       "D-205: when you close your own WI the response carries pending_inbox — the actionable messages (task/question/blocker) still queued for you: count, plus the oldest few. Informational, never blocks; it is there to feed your continue/clear/kill choice. Absent when someone else closes the WI for you (orphan sweep).",
+      "D-135 (REQ-GOV-085 'percorso anticipato'): status='escalated' requires escalation_reason and moves the WI to escalation_pending in the SAME write as the verdict — never straight to 'escalated'. The destinatario is read from the org chart at runtime (REQ-GOV-086: escalates_to for escalation_domain if given, else reports_to; self-escalation deviates to auditor per REQ-GOV-087) and returned as escalation_target. The WI state does NOT depend on any message being sent afterward — escalation_pending is terminal for the operator at the DB level (only a message linked to this WI, to escalation_target, promotes it to 'escalated' via a DB trigger). This call also best-effort sends that linking message internally (escalation_message_warning on failure — the WI stays escalation_pending regardless); you can additionally send a richer follow-up yourself (board_send/ping) once you have escalation_target.",
     ].join(" "),
     {
       wi_id: z.string().uuid().describe("Work Item id"),
-      status: WiEndStatusSchema.describe("End keyword: done | failed | waiting"),
+      status: WiEndStatusSchema.describe("End keyword: done | failed | waiting | escalated"),
       failure_reason: z.string().optional().describe("Required when status=failed"),
       post_conditions_state: z.record(z.any()).optional().describe("JSONB post-conditions result"),
       side_effects_pending: z.array(z.any()).optional().describe("Side-effects queued for skill v2 executor"),
@@ -2928,6 +2931,8 @@ export function registerTools(
       arm_gtd_model: z.string().optional().describe("[GTD 6bbc293b] Fallback autopilot_model applied only to armed GTDs that don't already have one — never overwrites an existing model."),
       post_runtime_request: z.enum(["continue", "clear", "kill", "model", "none"]).optional().describe("[D-074 REQ-034] Write to loomx_agent_runtime after close (optional; alternative to separate runtime_request call)."),
       platform_contribution: z.string().optional().describe("[D-074 REQ-035 / D-045] Content to share with forge (dev-*) or atlas (analyst-*) as platform contribution. Opt-in."),
+      escalation_reason: z.string().optional().describe("[D-135] Required when status=escalated — why this WI needs a third party."),
+      escalation_domain: z.string().optional().describe("[D-135/REQ-GOV-086] Optional domain hint for the escalates_to edge lookup (e.g. 'database'). Omit to fall back straight to reports_to."),
     },
     async (args) => {
       const { wiEnd } = await import("./wi.js");

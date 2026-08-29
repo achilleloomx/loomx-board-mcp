@@ -95,10 +95,16 @@ export const WI_STATUSES = [
   "emergency",
   "exempt",
   "failed",
+  // D-135 (migration 20260828140000): entered by wi_end(status='escalated').
+  // escalation_pending is terminal for the operator at the DB level (trigger
+  // loomx_wi_escalation_pending_terminal) — the only legitimate write from
+  // there is the DB-side promotion to 'escalated' via loomx_wi_promote_to_escalated.
+  "escalation_pending",
+  "escalated",
 ] as const;
 export type WiStatus = (typeof WI_STATUSES)[number];
 
-export const WI_END_STATUSES = ["done", "failed", "waiting"] as const;
+export const WI_END_STATUSES = ["done", "failed", "waiting", "escalated"] as const;
 export type WiEndStatus = (typeof WI_END_STATUSES)[number];
 
 export const WI_TEMPLATE_LAYERS = ["L1", "L2", "on-the-fly"] as const;

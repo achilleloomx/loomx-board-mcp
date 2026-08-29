@@ -203,10 +203,18 @@ test("mapEndStatus: waiting -> paused (schema deviation)", () => {
   assert.equal(mapEndStatus("waiting"), "paused");
 });
 
+test("mapEndStatus: escalated -> escalation_pending, never straight to escalated (D-135/REQ-GOV-078)", () => {
+  assert.equal(mapEndStatus("escalated"), "escalation_pending");
+});
+
 test("mapEndToGtdStatus: failed -> next_action (+ body blocker elsewhere)", () => {
   assert.equal(mapEndToGtdStatus("done"), "done");
   assert.equal(mapEndToGtdStatus("failed"), "next_action");
   assert.equal(mapEndToGtdStatus("waiting"), "waiting");
+});
+
+test("mapEndToGtdStatus: escalated -> waiting (parked on the destinatario)", () => {
+  assert.equal(mapEndToGtdStatus("escalated"), "waiting");
 });
 
 // ---- wi_start -----------------------------------------------------------
@@ -493,6 +501,188 @@ test("wi_end (error, already closed): no post_runtime_request → unchanged beha
   assert.equal(res.ok, false);
   if (res.ok) return;
   assert.equal(res.runtime_request_posted, undefined);
+});
+
+// ---- D-135 escalation (wi_end status=escalated) --------------------------
+
+test("wi_end (escalated, happy): explicit escalates_to edge — escalation_pending, target, atomic write, linking message sent", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress", waiting_on: null }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-29T08:00:00Z" },
+    ],
+    loomx_org_edges: [
+      { from_agent: "app", to_agent: "dba", edge_type: "escalates_to", domain: "database" },
+    ],
+    board_messages: [],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(
+    db,
+    { wi_id: "wi-1", status: "escalated", escalation_reason: "schema disagreement", escalation_domain: "database" },
+    ctxRw
+  );
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.data.wi_status, "escalation_pending");
+  assert.equal(res.data.escalation_target, "dba");
+  assert.equal(res.data.escalation_target_source, "explicit");
+  assert.equal(res.data.escalation_message_warning, undefined);
+
+  const wiRow = store.loomx_work_items[0];
+  assert.equal(wiRow.status, "escalation_pending");
+  assert.equal(wiRow.escalation_target, "dba");
+  assert.ok(wiRow.escalated_at);
+  assert.equal(wiRow.ended_at, undefined, "escalation_pending is 'consegnato', not closed — no ended_at (REQ-GOV-085)");
+
+  const gtdRow = store.loomx_items[0];
+  assert.equal(gtdRow.gtd_status, "waiting");
+  assert.equal(gtdRow.waiting_on, "dba");
+  assert.equal(gtdRow.block_scope, "reply-wake");
+  assert.equal(gtdRow.resume_hint, "schema disagreement");
+
+  assert.equal(store.board_messages.length, 1);
+  const msg = store.board_messages[0] as any;
+  assert.equal(msg.from_agent, "010"); // app
+  assert.equal(msg.to_agent, "002"); // dba
+  assert.equal(msg.wi_ref, "wi-1");
+  assert.equal(msg.wake_priority, "urgent");
+});
+
+test("wi_end (escalated): no domain-specific escalates_to edge -> falls back to reports_to (REQ-GOV-086)", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress", waiting_on: null }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [] },
+    ],
+    loomx_org_edges: [
+      { from_agent: "app", to_agent: "it-manager", edge_type: "reports_to", domain: null },
+    ],
+    board_messages: [],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "escalated", escalation_reason: "stuck" }, ctxRw);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.data.escalation_target, "it-manager");
+  assert.equal(res.data.escalation_target_source, "fallback_reports_to");
+});
+
+test("wi_end (escalated, REQ-GOV-087): resolved target === owner -> deviates to auditor, never self-adjudicated", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "dba", gtd_status: "in_progress", waiting_on: null }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "dba", gtd_item_id: "gtd-1", status: "active", side_effects_log: [] },
+    ],
+    loomx_org_edges: [
+      { from_agent: "dba", to_agent: "dba", edge_type: "escalates_to", domain: "database" },
+    ],
+    board_messages: [],
+  };
+  const ctxDba = {
+    selfSlug: "dba",
+    isLoomy: false,
+    slugToCode: new Map([["dba", "002"], ["auditor", "099"]]),
+    codeToSlug: new Map([["002", "dba"], ["099", "auditor"]]),
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(
+    db,
+    { wi_id: "wi-1", status: "escalated", escalation_reason: "dispute on own domain", escalation_domain: "database" },
+    ctxDba
+  );
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.data.escalation_target, "auditor");
+});
+
+test("wi_end (escalated, REQ-GOV-087): auditor escalating on itself -> human_ref terminal, declared not dispatched", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "auditor", gtd_status: "in_progress", waiting_on: null }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "auditor", gtd_item_id: "gtd-1", status: "active", side_effects_log: [] },
+    ],
+    loomx_org_edges: [
+      { from_agent: "auditor", to_agent: "auditor", edge_type: "escalates_to", domain: "audit" },
+    ],
+    loomx_role_cards: [{ agent_slug: "auditor", human_ref: "achille" }],
+    board_messages: [],
+  };
+  const ctxAuditor = {
+    selfSlug: "auditor",
+    isLoomy: false,
+    slugToCode: new Map([["auditor", "099"]]),
+    codeToSlug: new Map([["099", "auditor"]]),
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(
+    db,
+    { wi_id: "wi-1", status: "escalated", escalation_reason: "disagree with self", escalation_domain: "audit" },
+    ctxAuditor
+  );
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.data.escalation_target, "achille");
+  assert.match(res.data.escalation_note ?? "", /human_ref/);
+  assert.equal(store.board_messages.length, 0, "no board agent code exists for a human target — never fabricate one");
+  assert.equal(store.loomx_items[0].waiting_on, null, "waiting_on must name a board agent slug, not a human_ref (SDES-GOV-152 gap)");
+});
+
+test("wi_end (escalated, error): escalation_reason required, no partial write on rejection", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1" }],
+    loomx_work_items: [{ id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [] }],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "escalated" }, ctxRw);
+  assert.equal(res.ok, false);
+  if (res.ok) return;
+  assert.match(res.error, /escalation_reason/);
+  assert.equal(store.loomx_work_items[0].status, "active");
+});
+
+test("wi_end (escalated, error): escalation_pending/escalated are terminal for the operator (D-135) — clear error, not a raw 42501", async () => {
+  for (const status of ["escalation_pending", "escalated"] as const) {
+    const store: Store = {
+      loomx_items: [{ id: "gtd-1" }],
+      loomx_work_items: [{ id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status, side_effects_log: [] }],
+    };
+    const db = makeDb(store);
+    const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxOwn);
+    assert.equal(res.ok, false);
+    if (res.ok) continue;
+    assert.match(res.error, new RegExp(`status=${status}`));
+  }
+});
+
+test("wi_end (escalated, error): no escalates_to edge and no reports_to fallback -> explicit error, no write", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1" }],
+    loomx_work_items: [{ id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [] }],
+    loomx_org_edges: [],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "escalated", escalation_reason: "x" }, ctxRw);
+  assert.equal(res.ok, false);
+  if (res.ok) return;
+  assert.match(res.error, /Cannot resolve escalation target/);
+  assert.equal(store.loomx_work_items[0].status, "active");
+});
+
+test("wi_end (escalated): no agent registry in context -> escalation still lands, linking message best-effort skipped with warning", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress", waiting_on: null }],
+    loomx_work_items: [{ id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [] }],
+    loomx_org_edges: [{ from_agent: "app", to_agent: "dba", edge_type: "escalates_to", domain: null }],
+    board_messages: [],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "escalated", escalation_reason: "x" }, ctxOwn);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.data.wi_status, "escalation_pending");
+  assert.match(res.data.escalation_message_warning ?? "", /registry/);
+  assert.equal(store.board_messages.length, 0);
 });
 
 // ---- wi_status ----------------------------------------------------------

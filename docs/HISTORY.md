@@ -4,6 +4,56 @@
 
 ---
 
+## Sessione #139 — 2026-08-29 (autopilot dispatch, GTD `c82a33d8`, WI `16f04f62`)
+
+**Task:** D-135 §3 — `wi_end` deve restituire il destinatario dell'escalation e implementare il predicato "messaggio collegato al WI" per il trigger di promozione. GTD sbloccato oggi (`waiting_on=loomy` rimosso — dipendeva dalla consegna della spec-F4 consolidata).
+
+**Coordinamento già chiuso, verificato prima di scrivere codice:** il thread con dba (msg `4adb7818`/`b23fd91d`, 2026-08-28) aveva già deciso la forma — `board_messages.wi_ref uuid`, predicato congiunto `wi_ref IS NOT NULL AND to_agent=escalation_target` (mai il solo `wi_ref`, altrimenti chiunque promuove il WI di chiunque). Schema DBA lato WI (CHECK esteso con `escalation_pending`/`escalated`, colonne `escalation_target`/`escalated_at`, trigger terminale `loomx_wi_escalation_pending_terminal`, primitiva `loomx_wi_promote_to_escalated`) già live dal 28/08 (migration `20260828140000` + `20260828233000`, verificato funzionalmente dal dba con 5 asserzioni in transazione annullata). Mancava solo il lato board-mcp — mai costruito: misurato allora (stesso thread) zero occorrenze di `escalation_pending`/`escalation_target` in `src/`.
+
+**Implementato (`src/wi.ts`, `src/types.ts`, `src/tools.ts`, v0.28.0):** nuovo end-status `wi_end(status='escalated', escalation_reason, escalation_domain?)` — il "percorso anticipato" di REQ-GOV-085/SDES-GOV-061, l'unico buildabile oggi: il loop di verifica a `close_attempts`/`in_review`/`gov.escalation_resolutions` descritto nelle SDES-GOV-05x/15x è un'iniziativa distinta, esplicitamente fuori scope dalla stessa migration dba ("un'altra iniziativa... aggiungerli ora sarebbe scope creep"). Nella stessa UPDATE del verdetto: WI → `escalation_pending` (mai `escalated` diretto — resta l'unico writer il trigger DB), `escalation_target` risolto **a runtime** da `loomx_org_edges`/`loomx_role_cards` (nuova `resolveEscalationTarget`, REQ-GOV-086: `escalates_to` per `escalation_domain` se dato, fallback `reports_to`; self-escalation devia su `auditor` — REQ-GOV-087; l'auditor su se stesso termina sul suo `human_ref`, dichiarato via `escalation_note` — nessun agente board dispatchabile per un umano, gap noto e non mio da chiudere, SDES-GOV-152), `escalated_at`, `ended_at` resta NULL (il WI è consegnato, non chiuso). GTD del proprietario → `waiting`/`waiting_on=target`/`block_scope='reply-wake'` (stessa convenzione del guard D-118 (a), qui deterministica non euristica). Best-effort, subito dopo: INSERT interno su `board_messages` con `wi_ref`/`to_agent`/`wake_priority='urgent'` — la stessa chiamata che apre l'escalation prova già a soddisfare il predicato di promozione, senza aspettare un secondo atto dell'operatore; fallimento → `escalation_message_warning`, mai bloccante (il WI resta `escalation_pending` regolarmente). `wi_ref` non è un parametro di `board_send` — solo questo percorso interno lo scrive, come concordato col dba.
+
+**Non ancora funzionante end-to-end:** la colonna `board_messages.wi_ref` e il trigger `AFTER INSERT` che chiama `loomx_wi_promote_to_escalated` non sono ancora applicati lato dba — erano in attesa del mio pezzo, come dichiarato esplicitamente nel loro stesso commento di migration. Segnalato a dba (msg `4ea582d3`) che il lato mio è pronto: fino a quando non applicano, l'INSERT interno fallisce esplicitamente ("column wi_ref does not exist", stesso pattern pre-DDL di `wake_priority`/D-093) — mai in silenzio, sempre `escalation_message_warning` in risposta.
+
+**Test:** 10 nuovi unit test (happy path con `escalates_to` esplicito, fallback `reports_to`, self-escalation→auditor, auditor→`human_ref`, `escalation_reason` mancante senza scrittura parziale, terminale già `escalation_pending`/`escalated`, nessun target risolvibile, nessun registry in context → warning invece di crash) — 322/322 verdi, `tsc --noEmit` e `npm run build` puliti.
+
+**Durable gate (D-074):** WI linkato a REQ-GOV-078/085/086/087 (`doc_link` target_kind=wi) — sono i requisiti implementati, non una decisione di comodo.
+
+**Decisioni prese:** nessuna nuova decisione formale — implementazione di REQ-GOV-078/085/086/087 già approvati (D-135, ratificati 2026-08-16).
+**Blocchi / note:** in attesa che dba applichi `wi_ref` + trigger di promozione; nessun collaudo end-to-end possibile prima di allora.
+**Prossima sessione:** quando dba conferma il trigger live, aprire un WI di prova reale e collaudare dal vivo la promozione `escalation_pending → escalated` (non solo per lettura del codice).
+
+---
+
+## Sessione #138 — 2026-08-29 (autopilot dispatch, GTD `bb63cddf`, WI `b4876193`)
+
+**Task:** ripresa del GTD `bb63cddf` (sessione #137 l'aveva lasciato in `waiting`/`waiting_on=it-manager`) dopo le due risposte arrivate nel frattempo: it-manager conferma il repo sbagliato (sweep in loomx-hq, mio dominio) e che loomy ha già smistato il fix strutturale sulla chiave naturale nel tool (msg `4e069b1a`, cantiere REQ-B — zero migration, zero modifiche allo sweep); resta però esplicitamente in carico a me "l'estrazione delle triple per i 2 GTD aperti" (msg `4b150c54`).
+
+**Il blocco della #137 era reale ma aggirabile senza uscire dal perimetro legittimo.** La lettura owner-only di `gtd_get`/`gtd_query` resta un vicolo cieco — ma le triple richieste (item→subscription_id) non vivono nel body del GTD, vivono in `gov.doc_subscriptions`/`doc_items`, e `doc_items.owner` è un campo distinto dall'owner del GTD, leggibile sotto RLS `doc_rw` con la propria identità. Nessun bisogno di leggere il GTD altrui: query diretta (script one-off via `runDocRw`, stesso path dei tool live, non committato — pattern già usato in sessioni precedenti per lo stesso vincolo G4) su `doc_items.owner IN ('loomy','frame')` join `gov.doc_subscriptions`, filtrato sul documento target che il conteggio isolava senza ambiguità: "SoW — LoomX Items Subscription" (`681da22a-...`) con esattamente 13 righe owner=loomy e 4 owner=frame — combacia 1:1 con i conteggi dichiarati nel GTD originale (7ffd374f/833716af).
+
+**Scoperta che ha cambiato l'azione:** le 13 di loomy (REQ-SUB-001..013, intent critical) avevano TUTTE già `outcome=no_impact` registrato in `gov.doc_subscription_outcomes` — il retrofit per il suo GTD era già moot, presumibilmente chiuso da loomy stesso fuori banda nel frattempo. Le 4 di frame (WIKI-001/014/015/050, intent informative) erano invece tutte ancora senza outcome — quelle sì servivano il retrofit.
+
+**Consegnato:** triple con subscription_id inviate a frame (`c86dde45`, pronte per `doc_subscription_outcome`); informativa a loomy (`b2ec1245`) che il suo lotto è già chiuso e nessuna azione resta sul suo GTD; done a it-manager (`c4b3be89`) a chiusura del mandato. Nessuna modifica a `src/` — lo script di estrazione è stato rimosso a fine sessione, non è un tool permanente.
+
+**Nota per il futuro:** l'estrazione via script diretto è stata fatta da me come manutentore dell'infra su un mandato esplicito una-tantum, non un pattern da riusare — il contratto vero (subscription_id raggiungibile dal chiamante via i tool) resta il cantiere REQ-B di loomy, dichiarato esplicitamente ad entrambi i destinatari.
+
+**Decisioni prese:** nessuna nuova decisione formale.
+**Blocchi / note:** nessuno aperto da questo task.
+**Prossima sessione:** nessun follow-on armato — GTD `bb63cddf` chiuso `done` a `wi_end`.
+
+---
+
+## Sessione #137 — 2026-08-29 (wake cold-start, GTD `bb63cddf`, WI `e657c9ef`)
+
+**Task 1 (wake):** it-manager chiedeva (msg `dee1e38d`) di fixare "lo sweep che emette i GTD di sottoscrizione" per scrivere `subscription_id` nel body accanto a ogni item + retrofit di 2 GTD già emessi (`7ffd374f` loomy, `833716af` frame).
+
+**Misurato, nessun codice toccato:** lo sweep in questione (`subscription_sweep.py`, `_body()`/`_emit()`) vive in `loomx-hq/hub/scripts/` (repo `achilleloomx/loomx-hq`, dominio reconciler/dev-hq) — grep su tutto `loomx-board-mcp` conferma zero occorrenze del pattern. Non è il mio repo (D-005). Il gap è anche più profondo del previsto: `SWEEP_VIEW_CONTRACT` (le colonne lette da `public.gov_subscription_pending`) non porta alcun campo id/subscription_id — un edit isolato di `_body()` non basterebbe, serve prima una migration DBA sulla vista. Il retrofit dei 2 GTD è bloccato anche lato mio: sono owned da loomy/frame e `gtd_get`/`gtd_query` sono owner-only, non posso leggerne il body per estrarre le triple senza accesso DB diretto (il fuori-banda che il fix vuole eliminare). Rimbalzato a it-manager (msg `85da0203`) + segnalato a loomy per il coordinamento cross-repo (msg `77953bc4`). GTD `bb63cddf` → `waiting`, `waiting_on=it-manager`.
+
+**Task 2 (pending_inbox, emerso a `wi_end`):** dba (msg `6e6748b8`) chiedeva conferma se il progetto board-mcp espone già un documento `document_type='decisions'` prima di eseguire la posa append-only del Programma Manifesti (fascia board-mcp, 37 righe residenza). Verificato con `doc_query`: sì, `document_id=1da8642c-cfe2-48b9-be55-701e26d89b07`. Risposto (msg `7cce239b`) + segnalato che la ri-codifica preliminare dei 7+5 codici collisi che chiedeva è già tracciata nel GTD aperto `baafdcd4` (non ancora eseguita) — posa a due tempi (32 righe pulite ora, 12 dopo) ok dal lato mio.
+
+**Verifiche:** nessuna — sessione di solo triage/coordinamento, zero modifiche a `src/`.
+
+---
+
 ## Sessione #136 — 2026-08-29 (autopilot dispatch, GTD `ffe8b687`, WI `831b11a8`)
 
 **Task:** punto 4 della coda D-229 lasciato dichiarato-ma-non-eseguito dalla sessione #135 — estendere il filtro dei source rows in `docTraceability()` (`req_without_sdes`/`sdes_without_uat`) dal solo `status !== "superseded"` all'intero `RETIRED_STATUSES` (superseded/deprecated/archived/rejected), già in uso da `broken_refs` (`RETIRED_STATUS_SET`, `src/docs.ts:2179/2339`) nello stesso file.
