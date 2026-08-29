@@ -39,7 +39,7 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
   const txState = { aborted: false };
 
   function query(table: string) {
-    const filters: Array<{ col: string; val: unknown; op: "eq" | "in" }> = [];
+    const filters: Array<{ col: string; val: unknown; op: "eq" | "in" | "gte" | "lte" | "is" }> = [];
     let op: "select" | "insert" | "update" | "delete" = "select";
     let insertData: Row | null = null;
     let updateData: Row | null = null;
@@ -54,6 +54,12 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
         filters.every((f) => {
           if (f.op === "eq") return r[f.col] === f.val;
           if (f.op === "in") return (f.val as unknown[]).includes(r[f.col]);
+          // gte/lte: string compare — correct for lowercase UUIDs (bytewise
+          // order matches lexicographic on the canonical form), which is what
+          // idResolve's range scan relies on.
+          if (f.op === "gte") return typeof r[f.col] === "string" && (r[f.col] as string) >= (f.val as string);
+          if (f.op === "lte") return typeof r[f.col] === "string" && (r[f.col] as string) <= (f.val as string);
+          if (f.op === "is") return r[f.col] === f.val || (f.val === null && r[f.col] === undefined);
           return true;
         })
       );
@@ -183,6 +189,9 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
       select() { return builder; },
       eq(col: string, val: unknown) { filters.push({ col, val, op: "eq" }); return builder; },
       in(col: string, arr: unknown[]) { filters.push({ col, val: arr, op: "in" }); return builder; },
+      gte(col: string, val: unknown) { filters.push({ col, val, op: "gte" }); return builder; },
+      lte(col: string, val: unknown) { filters.push({ col, val, op: "lte" }); return builder; },
+      is(col: string, val: unknown) { filters.push({ col, val, op: "is" }); return builder; },
       order(col: string, opts: { ascending?: boolean } = {}) { orderCol = col; orderAsc = opts.ascending !== false; return builder; },
       limit(n: number) { limitN = n; return builder; },
       single() { single = true; return exec(); },

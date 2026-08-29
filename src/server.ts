@@ -34,6 +34,7 @@ const LAZY_MODULES = [
   "./subscriptions.js",
   "./staleness.js",
   "./factSync.js",
+  "./idResolve.js",
   "./structure.js",
 ] as const;
 

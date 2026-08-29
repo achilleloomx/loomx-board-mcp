@@ -12,11 +12,23 @@ import { rwGuardsEnabled, modelGuardsEnabled } from "./flags.js";
 import { SUBSCRIBE_INTENTS, SUBSCRIPTION_OUTCOMES, BUMP_CLASSES } from "./subscriptions.js";
 import { STALENESS_STATUS_FILTERS, STALENESS_CLOSE_OUTCOMES } from "./staleness.js";
 import { FACT_SYNC_RELATIONS, MAX_FACT_SYNC_LINKS } from "./factSync.js";
+import { ID_KINDS } from "./idResolve.js";
 import { paginate } from "./pagination.js";
 
 const TABLE = "board_messages";
 const OVERVIEW_VIEW = "board_overview";
 const GTD_TABLE = "loomx_items";
+
+// REQ-041 / SDES-ID-004 — the projectable columns of loomx_items for
+// gtd_query's `fields` param. A column not in this set is an explicit error
+// (never silently ignored); `id` is always added to whatever is asked.
+const GTD_QUERY_FIELDS = new Set([
+  "id", "title", "body", "gtd_status", "owner", "waiting_on", "priority", "deadline", "completed_at",
+  "source", "source_ref", "created_at", "updated_at", "context", "time_estimate", "energy_level",
+  "deleted_at", "project_id", "autopilot", "autopilot_model", "recurrence_days", "block_scope",
+  "resume_hint", "clarified_at", "autopilot_attempts", "last_evoked_at", "blocks_wi",
+  "proposed_options", "block_resume_hint", "priority_rank", "no_auto_arm",
+]);
 const GTD_ITEM_PROJECTS_TABLE = "loomx_item_projects";
 const PROJECTS_TABLE = "loomx_projects";
 const RUNTIME_TABLE = "loomx_agent_runtime";
@@ -1399,7 +1411,9 @@ export function registerTools(
   // --- gtd_query ---
   server.tool(
     "gtd_query",
-    `Flexible query for GTD items. ${isLoomy || isBroker ? "Cross-agent read enabled (loomy/broker)." : "Filters to your own items."} By default omits body and adds body_preview (200 chars) — use gtd_get(id) for full content. Every row carries model_source ('explicit'|'default', null when autopilot=false): 'default' means autopilot=true with no autopilot_model — it will resolve to the class-based default at dispatch, not that dispatch was skipped.`,
+    `Flexible query for GTD items. ${isLoomy || isBroker ? "Cross-agent read enabled (loomy/broker)." : "Filters to your own items."} By default omits body and adds body_preview (200 chars) — use gtd_get(id) for full content. ` +
+      `fields (REQ-041/SDES-ID-004) projects ONLY the listed columns — id is ALWAYS included and always the FULL UUID — so a fleet sweep fits the response limit without external distillates (where truncated ids are born). ` +
+      `Every row carries model_source ('explicit'|'default', null when autopilot=false): 'default' means autopilot=true with no autopilot_model — it will resolve to the class-based default at dispatch, not that dispatch was skipped.`,
     {
       owner: z.string().optional().describe("Filter by owner agent slug"),
       gtd_status: GtdStatusSchema.optional().describe("Filter by GTD status"),
@@ -1416,11 +1430,57 @@ export function registerTools(
       preview_only: z
         .boolean()
         .optional()
-        .describe("Omit body, include body_preview 200 chars (default: true). Set false for full body."),
+        .describe("Omit body, include body_preview 200 chars (default: true). Set false for full body. Ignored when fields is given."),
+      fields: z
+        .string()
+        .optional()
+        .describe(
+          "Comma-separated projection, e.g. 'id,title,gtd_status,priority,owner' (REQ-041). Returns ONLY those columns; id is always included, always full. body only if explicitly listed (returned whole, no preview). Unknown columns are an ERROR, never silently ignored. Omit for the full-row behavior."
+        ),
     },
-    async ({ owner, gtd_status, priority, source_ref, project_id, limit, preview_only }) => {
+    async ({ owner, gtd_status, priority, source_ref, project_id, limit, preview_only, fields }) => {
       const db = getSupabaseClient();
       const effectiveLimit = limit ?? 20;
+
+      // REQ-041 / SDES-ID-004 — explicit projection. Token budget is recovered
+      // by cutting columns, never by shortening the identifier: id rides along
+      // on every projection, whole.
+      let projection: string[] | null = null;
+      if (fields !== undefined) {
+        const parsed = fields.split(",").map((s) => s.trim()).filter((s) => s.length > 0);
+        if (parsed.length === 0) {
+          return { content: [{ type: "text" as const, text: `Error: fields is empty — list at least one column or omit the parameter.` }], isError: true };
+        }
+        const unknown = parsed.filter((f) => !GTD_QUERY_FIELDS.has(f));
+        if (unknown.length > 0) {
+          return {
+            content: [
+              {
+                type: "text" as const,
+                text: `Error: unknown field(s): ${unknown.join(", ")} (REQ-041 — a filter accepted and ignored lies about the output). Valid: ${[...GTD_QUERY_FIELDS].join(", ")}`,
+              },
+            ],
+            isError: true,
+          };
+        }
+        projection = [...new Set(["id", ...parsed])];
+      }
+      const selectCols = projection ? projection.join(",") : "*";
+      const buildRows = (page: any[]): any[] => {
+        if (projection) {
+          return projection.includes("autopilot") ? page.map(withModelSource) : page;
+        }
+        const omitBody = preview_only !== false;
+        return omitBody
+          ? page.map(({ body, ...meta }: any) => withModelSource({ ...meta, body_preview: body ? body.slice(0, 200) : null }))
+          : page.map(withModelSource);
+      };
+      const projectionExtras = projection
+        ? {
+            projection,
+            ...(preview_only !== undefined ? { projection_note: "fields is active — preview_only is ignored (body is returned whole only if listed in fields)" } : {}),
+          }
+        : {};
 
       // If project_id is specified, we need to join through loomx_item_projects
       if (project_id) {
@@ -1448,7 +1508,7 @@ export function registerTools(
 
         let query = db
           .from(GTD_TABLE)
-          .select("*")
+          .select(selectCols)
           .in("id", itemIds)
           .order("priority_rank", { ascending: false })
           .order("deadline", { ascending: true, nullsFirst: false })
@@ -1477,12 +1537,7 @@ export function registerTools(
         }
 
         const { page: pageP, truncated: truncatedP } = paginate(data ?? [], effectiveLimit);
-        const omitBodyP = preview_only !== false;
-        const rowsP = omitBodyP
-          ? pageP.map(({ body, ...meta }: any) =>
-              withModelSource({ ...meta, body_preview: body ? body.slice(0, 200) : null })
-            )
-          : pageP.map(withModelSource);
+        const rowsP = buildRows(pageP);
 
         return {
           content: [
@@ -1491,7 +1546,11 @@ export function registerTools(
               text:
                 rowsP.length === 0
                   ? "No GTD items found."
-                  : JSON.stringify({ count: rowsP.length, items: rowsP, ...(truncatedP ? { truncated: truncatedP } : {}) }, null, 2),
+                  : JSON.stringify(
+                      { count: rowsP.length, items: rowsP, ...(truncatedP ? { truncated: truncatedP } : {}), ...projectionExtras },
+                      null,
+                      2
+                    ),
             },
           ],
         };
@@ -1500,7 +1559,7 @@ export function registerTools(
       // Standard query without project filter
       let query = db
         .from(GTD_TABLE)
-        .select("*")
+        .select(selectCols)
         .order("priority_rank", { ascending: false })
         .order("deadline", { ascending: true, nullsFirst: false })
         .limit(effectiveLimit + 1);
@@ -1528,12 +1587,7 @@ export function registerTools(
       }
 
       const { page, truncated } = paginate(data ?? [], effectiveLimit);
-      const omitBody = preview_only !== false;
-      const rows = omitBody
-        ? page.map(({ body, ...meta }: any) =>
-            withModelSource({ ...meta, body_preview: body ? body.slice(0, 200) : null })
-          )
-        : page.map(withModelSource);
+      const rows = buildRows(page);
 
       return {
         content: [
@@ -1542,7 +1596,7 @@ export function registerTools(
             text:
               rows.length === 0
                 ? "No GTD items found."
-                : JSON.stringify({ count: rows.length, items: rows, ...(truncated ? { truncated } : {}) }, null, 2),
+                : JSON.stringify({ count: rows.length, items: rows, ...(truncated ? { truncated } : {}), ...projectionExtras }, null, 2),
           },
         ],
       };
@@ -1934,6 +1988,43 @@ export function registerTools(
       return {
         content: [{ type: "text", text: JSON.stringify({ count: page.length, projects: page, ...(truncated ? { truncated } : {}) }, null, 2) }],
       };
+    }
+  );
+
+  // --- id_resolve ---
+  server.tool(
+    "id_resolve",
+    `Resolve an id PREFIX (>=8 hex chars, dashes optional) to the full UUID (REQ-039/SDES-ID-002, D-241): an identifier ` +
+      `is copied whole or resolved with a tool, NEVER completed or recomposed by hand. Unique match → full UUID + kind + ` +
+      `label. Zero matches → error citing the prefix (a contaminated id — two ids merged — lands here and fails talking). ` +
+      `Multiple matches → error LISTING the candidates, never a guess. Searches (kinds param to narrow): gtd_item ` +
+      `(loomx_items, your own unless loomy/broker), board_message (your inbox/outbox unless loomy), project ` +
+      `(loomx_projects), doc_item + document (via doc_rw, RLS-aware — if no doc_rw backend is configured those kinds are ` +
+      `DECLARED unsearched, never silently skipped). A full 32-hex UUID is a valid prefix: same call verifies existence. ` +
+      `Example: id_resolve({prefix:"a5a81b7e"}).`,
+    {
+      prefix: z.string().min(8).describe("Id prefix, >=8 hex chars (dashes ok, case-insensitive). A full UUID also works (existence check)."),
+      kinds: z
+        .array(z.enum(ID_KINDS))
+        .optional()
+        .describe(`Restrict the search to these kinds (default: all of ${ID_KINDS.join(", ")})`),
+    },
+    async (args) => {
+      const { idResolve } = await import("./idResolve.js");
+      const docRunner = async <T,>(fn: (docDb: any) => Promise<T>): Promise<T> => {
+        const { runDocRw } = await import("./docDb.js");
+        return runDocRw(selfSlug, fn as any) as Promise<T>;
+      };
+      const res = await idResolve(
+        getSupabaseClient(),
+        args,
+        { selfSlug, selfCode, isLoomy, isBroker, loomyCode: slugToCode.get("loomy") },
+        docRunner
+      );
+      if (!res.ok) {
+        return { content: [{ type: "text" as const, text: `Error: ${res.error}` }], isError: true };
+      }
+      return { content: [{ type: "text" as const, text: JSON.stringify({ ok: true, ...res.data }, null, 2) }] };
     }
   );
 
@@ -3774,9 +3865,15 @@ export function registerTools(
       `the subscription's target document (gov.doc_versions) — an outcome on an unpublished version is an error. ` +
       `Append-only: re-calling with an IDENTICAL payload is a no-op (created:false); a DIFFERENT payload for the same ` +
       `(subscription, version) is refused — the ledger integrates, it never corrects (send a follow-up via board_send). ` +
-      `Example: doc_subscription_outcome({subscription_id:"<uuid>", version:"2.1", outcome:"no_impact", note:"reviewed, no change needed on my side"}).`,
+      `KEY (REQ-040/SDES-ID-003): pass EITHER subscription_id OR the natural key you actually possess — subscriber_item_id ` +
+      `plus ONE of target_item_id/target_document_id (no MCP surface hands out subscription_id to an MCP-only subscriber; ` +
+      `the resolved id comes back in the response). Ambiguity is an error listing the candidates, never a guess. ` +
+      `Example: doc_subscription_outcome({subscriber_item_id:"<uuid>", target_item_id:"<uuid>", version:"2.1", outcome:"no_impact", note:"reviewed, no change needed on my side"}).`,
     {
-      subscription_id: z.string().uuid().describe("The subscription this outcome answers"),
+      subscription_id: z.string().uuid().optional().describe("The subscription this outcome answers (alternative: the natural key below)"),
+      subscriber_item_id: z.string().uuid().optional().describe("Natural key (REQ-040): the subscriber doc_item — use with ONE of target_item_id/target_document_id, without subscription_id"),
+      target_item_id: z.string().uuid().optional().describe("Natural key: the subscription's target doc_item"),
+      target_document_id: z.string().uuid().optional().describe("Natural key: the subscription's target document (whole-document subscriptions)"),
       version: z.string().min(1).describe("The published version_label this outcome responds to"),
       outcome: z.enum(SUBSCRIPTION_OUTCOMES).describe(`Outcome: ${SUB_OUTCOMES_LIST}`),
       note: z.string().optional().describe("Required for no_impact/feedback_sent — the motivation or feedback reference"),
@@ -3989,7 +4086,16 @@ export function registerTools(
       limit: z.number().int().min(1).max(MAX_FACT_SYNC_LINKS).optional().describe(`Max links examined in one sweep (default/ceiling ${MAX_FACT_SYNC_LINKS})`),
     },
     async (args) => {
-      const { docFactSync } = await import("./factSync.js");
+      const { docFactSync, verifyProjectExists } = await import("./factSync.js");
+      // REQ-038 / SDES-ID-001a — the existence probe runs on the SERVICE-ROLE
+      // client BEFORE the doc_rw transaction opens: doc_rw holds no grant on
+      // loomx_projects, and a well-formed-but-nonexistent project_id used to
+      // sail through and answer ok with all-zero counts (a false green in
+      // front of an irreversible write).
+      const exists = await verifyProjectExists(getSupabaseClient(), args.project_id);
+      if (!exists.ok) {
+        return { content: [{ type: "text" as const, text: `Error: ${exists.error}` }], isError: true };
+      }
       return runDocTool((db) => docFactSync(db, args, docCtx));
     }
   );

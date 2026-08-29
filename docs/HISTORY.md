@@ -4,6 +4,26 @@
 
 ---
 
+## Sessione #141 — 2026-08-29 (autopilot dispatch, GTD `a5a81b7e`, WI `1c23c1ae`, v0.29.0)
+
+**Task:** cantiere id (mandato Achille 29/08 in sessione, origine formale **D-241** corpus cross) — «riferimenti a prova di troncamento: requisiti → design → collaudi → build». Quattro assi dal mandato + episodio `subscription_id` (msg 791258c8), smistamento loomy già ratificato (msg `4e069b1a`, confermato it-manager `4b150c54`: chiave naturale nel tool, zero migration).
+
+**Governance posata (product-ready, D-206/D-231/D-233):** REQ-038..041 (approved, origine `references`→D-241 cross-project) → SDES-ID-001..004 (active, `satisfies`) → UAT-ID-001..005 (`verifies`, **caso negativo COSTRUITO** in ciascuno). Le 9 nuove relazioni hanno derivato le loro fact automaticamente (hook D-225/4bis, 13 subscription).
+
+**Costruito (v0.29.0):**
+1. **`doc_fact_sync` — mai verde su project inesistente (REQ-038/SDES-ID-001a):** `verifyProjectExists` (esportata da `factSync.ts`) chiamata dal handler col client service/native-role PRIMA della transazione doc_rw (doc_rw non ha grant su `loomx_projects` — nessuna grant nuova, D-005). Probe fallito → rifiuto, mai passaggio.
+2. **`doc_fact_sync` — orfani a set completo (SDES-ID-001b):** l'orfanità è giudicata contro TUTTE le relazioni derivabili, mai contro il sottoinsieme filtrato (query complementare sui candidati; complementare illeggibile → `orphan_check_note`, mai falsi allarmi su link non letti). Chiude i ~100 falsi orfani del 29/08.
+3. **`id_resolve` (nuovo tool, REQ-039/SDES-ID-002):** prefisso hex ≥8 → range-scan UUID `[pad-0, pad-f]` con `gte`/`lte` — **zero DDL**. Ambiti: gtd_item/board_message/project (service, scoping identità specchio dei tool esistenti) + doc_item/document (doc_rw, RLS-aware; backend assente → `kinds_not_searched` dichiarato). Unico→UUID pieno; zero→errore citante; 2+→errore con candidati.
+4. **`doc_subscription_outcome` — chiave naturale (REQ-040/SDES-ID-003):** esattamente uno tra `subscription_id` e (`subscriber_item_id` + `target_item_id`/`target_document_id`); risoluzione preferisce l'unica active, ambiguità→elenco candidati, zero→errore citante; id risolto echato in risposta (`resolved_from_natural_key`). Percorso `subscription_id` invariato.
+5. **`gtd_query fields` (REQ-041/SDES-ID-004):** proiezione esplicita stile doc_query — `id` sempre incluso e sempre pieno, colonne ignote→errore, `body` solo se chiesto (intero). Elimina il bisogno dei distillati jq dove nasceva il troncamento (episodio broker 14:01).
+
+**Verifiche.** `tsc` pulito; **npm test 339/339** (17 nuovi in `tests/id-cantiere.test.ts`; fakeDb esteso con gte/lte/is). Dal vivo (`tests/verify-id-cantiere.ts`, backend direct-pg `current_user=board-mcp`, probe rollbackate): **12/12** — ghost project rifiutato citando l'id; 73 link verifies filtrati → 0 falsi orfani (e simmetrico); prefisso del GTD di questo cantiere risolto al pieno; ambiguità COSTRUITA (2 doc_items stesso prefisso iniettati nel documento probe dentro transazione poi rollbackata — residuo verificato 0 righe); chiave naturale risolta su coppia reale (rifiuto correttamente al passo versione: corpus mai pubblicato) e ghost pair citata. UAT-ID-001/002/003 → pass/done; UAT-ID-004/005 pending: il giro finale spetta a un **agente MCP-only** su finestra post-build (delegato a frame via board, lezione episodio 5).
+
+**Blocchi / note:** `.env` locale ha una service key stantia ("Unregistered API key") — il collaudo usa `DATABASE_URL` (native-role D-084), stessa via del `.mcp.json` reale. G4: le finestre vive restano su v0.28.1; `id_resolve`/fix visibili solo a finestre nuove.
+**Prossima sessione:** esiti collaudo MCP-only da frame → chiudere pass_fail UAT-ID-004/005 (GTD in waiting reply-wake).
+
+---
+
 ## Sessione #140 — 2026-08-29 (autopilot dispatch, GTD `8471a512`, WI `239c9e8f`, v0.28.1)
 
 **Task:** issue self-riportato dalla sessione precedente (`/report-issue`, ISS-??? — owner=board-mcp perché il capture cross-owner è riservato a loomy, triage nominale it-manager ma il difetto vive nel codice sorgente di questo server): G4 non è solo "la finestra resta sul build precedente" com'era documentato — è più pericoloso. I moduli ESM di `tools.ts` si caricano via `import()` dinamico **dentro** ciascun handler, non in testa al file, quindi ogni modulo entra nella cache ESM del processo alla **prima invocazione** del tool che lo usa. Rigenerare `dist/` a finestra viva produceva un **mix**: caso reale osservato (sessione precedente) `docs.js` nuovo + `factSync.js` vecchio → `doc_link` fallito con `deriveFactOnLink is not a function`, e sotto `doc_rw` (una transazione per chiamata) un link legittimo già inserito è stato rollbackato. Deciso di lavorarlo qui perché è un difetto nel codice sorgente proprio (dev/manutenzione MCP server, §ruolo CLAUDE.md), non uno che richieda coordinamento cross-repo o decisione di Loomy — non rimbalzato.

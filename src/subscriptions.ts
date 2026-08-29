@@ -531,7 +531,16 @@ export async function docUnsubscribe(
 // ---------------------------------------------------------------------------
 
 export interface DocSubscriptionOutcomeArgs {
-  subscription_id: string;
+  // Exactly ONE of: subscription_id, or the natural key (subscriber_item_id +
+  // one of target_item_id / target_document_id). REQ-040 / SDES-ID-003
+  // (loomy's ruling msg 4e069b1a): no MCP surface hands out subscription_id
+  // to an MCP-only subscriber — the natural key is what the caller actually
+  // possesses (pending view, staleness query, sweep GTD codes via
+  // doc_item_resolve). Zero migration: this is resolution, not a new model.
+  subscription_id?: string;
+  subscriber_item_id?: string;
+  target_item_id?: string;
+  target_document_id?: string;
   version: string;
   outcome: string;
   note?: string;
@@ -546,6 +555,7 @@ export interface DocSubscriptionOutcomeResult {
   version: string;
   outcome: string;
   created: boolean;
+  resolved_from_natural_key?: boolean;
 }
 
 export async function docSubscriptionOutcome(
@@ -553,7 +563,79 @@ export async function docSubscriptionOutcome(
   args: DocSubscriptionOutcomeArgs,
   ctx: DocContext
 ): Promise<DocResult<DocSubscriptionOutcomeResult>> {
-  if (!UUID_RE.test(args.subscription_id)) return err(`subscription_id must be a UUID.`);
+  const hasSubId = args.subscription_id != null;
+  const hasNatural = args.subscriber_item_id != null || args.target_item_id != null || args.target_document_id != null;
+  if (hasSubId && hasNatural) {
+    return err(
+      `Provide EITHER subscription_id OR the natural key (subscriber_item_id + target_item_id/target_document_id), ` +
+        `never both — two keys that could disagree are how the wrong row gets written.`
+    );
+  }
+  let resolvedFromNaturalKey = false;
+  if (hasSubId) {
+    if (!UUID_RE.test(args.subscription_id!)) return err(`subscription_id must be a UUID.`);
+  } else {
+    // REQ-040 / SDES-ID-003 (loomy's ruling msg 4e069b1a): an MCP-only
+    // subscriber never sees gov.doc_subscriptions.id — the pending view, the
+    // staleness query and the sweep GTD all hand out item/document ids. The
+    // natural key is what the caller actually possesses; resolving it here is
+    // what closes the outcome loop without out-of-band DB access.
+    if (!args.subscriber_item_id) {
+      return err(
+        `Missing key: provide subscription_id, or the natural key — subscriber_item_id plus ONE of ` +
+          `target_item_id / target_document_id (REQ-040: no tool may demand an id the caller cannot obtain from the MCP surfaces).`
+      );
+    }
+    if (!UUID_RE.test(args.subscriber_item_id)) return err(`subscriber_item_id must be a UUID.`);
+    if (!args.target_item_id && !args.target_document_id) {
+      return err(`The natural key needs subscriber_item_id plus ONE of target_item_id / target_document_id.`);
+    }
+    if (args.target_item_id && args.target_document_id) {
+      return err(`Give ONE of target_item_id / target_document_id, not both.`);
+    }
+    if (args.target_item_id && !UUID_RE.test(args.target_item_id)) return err(`target_item_id must be a UUID.`);
+    if (args.target_document_id && !UUID_RE.test(args.target_document_id)) return err(`target_document_id must be a UUID.`);
+    let nk = db
+      .from(GOV_DOC_SUBSCRIPTIONS)
+      .select("id, status, intent, origin, tombstoned_at")
+      .eq("subscriber_item_id", args.subscriber_item_id);
+    nk = args.target_item_id ? nk.eq("target_item_id", args.target_item_id) : nk.eq("target_document_id", args.target_document_id!);
+    const { data: nkRows, error: nkErr } = await nk;
+    if (nkErr) return err(`Failed to resolve the natural key: ${nkErr.message}`);
+    const matches = (Array.isArray(nkRows) ? nkRows : []) as Array<{
+      id: string;
+      status: string;
+      intent: string;
+      origin: string;
+      tombstoned_at: string | null;
+    }>;
+    if (matches.length === 0) {
+      return err(
+        `No subscription found for subscriber_item_id='${args.subscriber_item_id}' × ` +
+          `${args.target_item_id ? `target_item_id='${args.target_item_id}'` : `target_document_id='${args.target_document_id}'`} ` +
+          `(visible to '${ctx.selfSlug}'). Never green on a non-resolving key (REQ-038) — check the ids with doc_item_resolve/id_resolve.`
+      );
+    }
+    let chosen = matches.length === 1 ? matches[0] : undefined;
+    if (!chosen) {
+      const active = matches.filter((m) => m.status === "active");
+      if (active.length === 1) chosen = active[0];
+    }
+    if (!chosen) {
+      const list = matches
+        .map((m) => `${m.id} (status=${m.status}, origin=${m.origin}, intent=${m.intent}${m.tombstoned_at ? `, tombstoned_at=${m.tombstoned_at}` : ""})`)
+        .join("; ");
+      return err(
+        `The natural key is AMBIGUOUS — ${matches.length} subscriptions match and none is uniquely active (never guessed at): ${list}. ` +
+          `Pass subscription_id explicitly (full UUID).`
+      );
+    }
+    // The rest of this handler (legitimation, version resolution, idempotency
+    // and every error message) reads args.subscription_id — write the resolved
+    // id back so ONE flow serves both keys identically.
+    args.subscription_id = chosen.id;
+    resolvedFromNaturalKey = true;
+  }
   if (!SUBSCRIPTION_OUTCOMES.includes(args.outcome as Outcome)) {
     return err(`Invalid outcome '${args.outcome}'. Allowed: ${SUBSCRIPTION_OUTCOMES.join(", ")}.`);
   }
@@ -682,11 +764,12 @@ export async function docSubscriptionOutcome(
           ok: true,
           data: {
             outcome_id: ex.id,
-            subscription_id: args.subscription_id,
+            subscription_id: args.subscription_id!,
             publication_id: pub.id,
             version: args.version,
             outcome: ex.outcome,
             created: false,
+            ...(resolvedFromNaturalKey ? { resolved_from_natural_key: true } : {}),
           },
         };
       }
@@ -718,11 +801,12 @@ export async function docSubscriptionOutcome(
     ok: true,
     data: {
       outcome_id: newId,
-      subscription_id: args.subscription_id,
+      subscription_id: args.subscription_id!,
       publication_id: pub.id,
       version: args.version,
       outcome: afterRow.outcome,
       created: true,
+      ...(resolvedFromNaturalKey ? { resolved_from_natural_key: true } : {}),
     },
   };
 }

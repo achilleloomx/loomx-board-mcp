@@ -98,6 +98,36 @@ export interface DocFactSyncArgs {
   limit?: number;
 }
 
+// REQ-038 / SDES-ID-001a — never green on a non-resolving id. A well-formed
+// project_id with no row behind it used to sail through this whole flow and
+// answer ok with all-zero counts (for loomy ALWAYS — the membership check is
+// skipped; for everyone else with a misleading "not a member" of a project
+// that does not exist). Called by the tool handler with the SERVICE-ROLE
+// client, before the doc_rw transaction opens: doc_rw holds no grant on
+// loomx_projects, and inventing one for an existence probe would be new
+// contract (D-005). A failed probe REFUSES — an irreversible write sits
+// downstream, and "could not check" is not "checked".
+export async function verifyProjectExists(
+  serviceDb: SupabaseClient,
+  projectId: string
+): Promise<{ ok: true } | { ok: false; error: string }> {
+  if (!UUID_RE.test(projectId)) return { ok: false, error: `project_id must be a UUID.` };
+  const { data, error } = await serviceDb.from("loomx_projects").select("id").eq("id", projectId).maybeSingle();
+  if (error) {
+    return { ok: false, error: `Could not verify that project '${projectId}' exists (${error.message}) — refusing rather than proceeding on an unverified id (REQ-038).` };
+  }
+  if (!data) {
+    return {
+      ok: false,
+      error:
+        `project_id '${projectId}' does not exist in loomx_projects — refusing (REQ-038: never green on a ` +
+        `non-resolving id; the old ok-with-zero-counts answer was a false green in front of an irreversible write). ` +
+        `Use project_list to find the right id, or id_resolve if you only have a prefix.`,
+    };
+  }
+  return { ok: true };
+}
+
 export interface FactSyncCreated {
   subscription_id: string;
   subscriber_item_id: string;
@@ -124,6 +154,7 @@ export interface DocFactSyncResult {
     skipped: number;
   };
   orphan_facts?: Array<{ subscription_id: string; subscriber_code: string | null; target_code: string | null; note: string }>;
+  orphan_check_note?: string;
   admission_gate?: string;
 }
 
@@ -352,22 +383,56 @@ export async function docFactSync(
   // floor) — reported precisely because nothing can be done about them from
   // here, and a decay firing from a bond nobody can see anymore is worse when
   // it is also undocumented.
+  //
+  // REQ-038 / SDES-ID-001b: orphanhood is judged against ALL derivable
+  // relations, never against the requested subset. Before this fix, calling
+  // with relation_types=['verifies'] flagged every satisfies-derived fact as
+  // "orphan" (~100 false alarms measured 2026-08-29 on subscriptions created
+  // deliberately minutes earlier) — a filter accepted by the signature and
+  // then ignored by the check is the same defect class as ok-on-missing-id.
   const linkPairs = new Set(links.map((l) => `${l.from_item}|${l.to_item}`));
   const orphans: NonNullable<DocFactSyncResult["orphan_facts"]> = [];
-  const { data: factRows } = await db
+  let orphanCheckNote: string | undefined;
+  const { data: factRows, error: factErr } = await db
     .from(GOV_DOC_SUBSCRIPTIONS)
     .select("id, subscriber_item_id, target_item_id, note, origin, status, subscriber_project_id")
     .eq("subscriber_project_id", args.project_id)
     .eq("origin", "fact")
     .eq("status", "active");
-  for (const f of (factRows ?? []) as Array<{ id: string; subscriber_item_id: string; target_item_id: string | null; note: string }>) {
-    if (!f.target_item_id) continue;
-    if (linkPairs.has(`${f.subscriber_item_id}|${f.target_item_id}`)) continue;
+  if (factErr) {
+    // Declared, never a silent empty sweep: "could not check" and "no orphans"
+    // are different facts.
+    orphanCheckNote = `orphan check NOT run: failed to read fact subscriptions (${factErr.message}).`;
+  }
+  const factList = (factRows ?? []) as Array<{ id: string; subscriber_item_id: string; target_item_id: string | null; note: string }>;
+  let candidates = factList.filter((f) => f.target_item_id && !linkPairs.has(`${f.subscriber_item_id}|${f.target_item_id}`));
+  const complementary = FACT_SYNC_RELATIONS.filter((r) => !relations.includes(r));
+  if (!factErr && candidates.length > 0 && complementary.length > 0) {
+    const { data: extraLinks, error: extraErr } = await db
+      .from(DOC_ITEM_LINKS)
+      .select("from_item, to_item")
+      .eq("project_id", args.project_id)
+      .in("relation_type", complementary)
+      .in("from_item", [...new Set(candidates.map((f) => f.subscriber_item_id))]);
+    if (extraErr) {
+      orphanCheckNote =
+        `orphan check NOT run: the ${complementary.join("/")} links (excluded by your relation_types filter) could not be ` +
+        `read (${extraErr.message}), and judging orphanhood on a partial link set would produce exactly the false alarms ` +
+        `this check was fixed to avoid.`;
+      candidates = [];
+    } else {
+      for (const l of (extraLinks ?? []) as Array<{ from_item: string; to_item: string }>) {
+        linkPairs.add(`${l.from_item}|${l.to_item}`);
+      }
+      candidates = candidates.filter((f) => !linkPairs.has(`${f.subscriber_item_id}|${f.target_item_id}`));
+    }
+  }
+  for (const f of candidates) {
     orphans.push({
       subscription_id: f.id,
       subscriber_code: items.get(f.subscriber_item_id)?.code ?? null,
-      target_code: items.get(f.target_item_id)?.code ?? null,
-      note: `no ${relations.join("/")} link backs this fact subscription anymore. It cannot be tombstoned (origin='fact' is refused by the DB floor, SEC-011) — declared, not removable from here.`,
+      target_code: items.get(f.target_item_id!)?.code ?? null,
+      note: `no ${FACT_SYNC_RELATIONS.join("/")} link backs this fact subscription anymore. It cannot be tombstoned (origin='fact' is refused by the DB floor, SEC-011) — declared, not removable from here.`,
     });
   }
 
@@ -388,6 +453,7 @@ export async function docFactSync(
   };
   if (dryRun) result.would_create = wouldCreate;
   if (orphans.length > 0) result.orphan_facts = orphans;
+  if (orphanCheckNote) result.orphan_check_note = orphanCheckNote;
   if (!gate.verified) {
     result.admission_gate =
       `NOT VERIFIED — ${gate.reason ?? "unknown"}. Derivation ran anyway; the admission-suspension flag ` +
