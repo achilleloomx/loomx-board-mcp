@@ -4,6 +4,39 @@
 
 ---
 
+## Sessione #136 — 2026-08-29 (autopilot dispatch, GTD `ffe8b687`, WI `831b11a8`)
+
+**Task:** punto 4 della coda D-229 lasciato dichiarato-ma-non-eseguito dalla sessione #135 — estendere il filtro dei source rows in `docTraceability()` (`req_without_sdes`/`sdes_without_uat`) dal solo `status !== "superseded"` all'intero `RETIRED_STATUSES` (superseded/deprecated/archived/rejected), già in uso da `broken_refs` (`RETIRED_STATUS_SET`, `src/docs.ts:2179/2339`) nello stesso file.
+
+**Fatto:** `src/docs.ts:1797` ora filtra `!RETIRED_STATUS_SET.has(s.status)` invece di `s.status !== "superseded"` — stessa riga, stesso pattern del resto del file, nessun cambio di forma della risposta. Aggiunto un test (`tests/docs.test.ts`) che crea REQ `deprecated`+`rejected`+una viva nello stesso progetto e verifica che `total_sources`/`count` su `req_without_sdes` contino solo quella viva — prima del fix sarebbero stati sommati anche i due retired, gonfiando `total_sources` di rumore.
+
+**Nota collaterale, non nello scope del task ma emersa leggendo il codice adiacente:** `docTraceabilityOrigin()` (`req_without_origin`, `src/docs.ts:1971-1979`) porta un commento — *"same fix as req_without_sdes/sdes_without_uat... applied here"* — che si è rivelato **non vero**: il filtro lì resta `s.status !== "superseded"`, mai esteso a `RETIRED_STATUSES`. Non toccato qui (task scoperto meccanico e scoped alla sola riga 1797 dal GTD; allargarlo sarebbe stato un cambio di regola non richiesto, D-136 §5) — segnalato a loomy nel messaggio di chiusura come possibile follow-on.
+
+**Verifiche:** `tsc --noEmit` pulito, build pulita, `npm test` **308/308** (1 nuovo, 0 falliti).
+**Decisioni prese:** nessuna — fix meccanico a rischio nullo, come classificato dal GTD stesso.
+**Blocchi / note:** nessuno.
+**Prossima sessione:** eventuale follow-on su `docTraceabilityOrigin()` (commento fuorviante, non fix applicato) — non aperto come GTD qui, solo segnalato, per non pre-decidere una priorità che non è mia (D-136 §5).
+
+---
+
+## Sessione #135 — 2026-08-29 (wake cold-start msg loomy `38e9afaa`, coda D-229, WI `c0d74980`)
+
+**Wake su coda ordinata post-sessione (GO Achille D-229), 4 punti.** Punti 1 (`broken_refs`) e 3 (`fact_sync` 4bis) risultavano **già consegnati** dalle due sessioni immediatamente precedenti (`#134` v0.26.0, commit `d721a9f`; e la sessione che ha prodotto `7b9faf1` v0.27.0) — nessuna scrittura necessaria, solo verifica per lettura del codice/CLAUDE.md. Lavorati qui i punti 2 e 4.
+
+**Punto 2 — triage dei draft SDES doc-in-db.** Trovati **15**, non 16 (uno risultava già chiuso da una sessione precedente). Per ciascuno, verifica **nel codice sorgente** (grep + read, non per lettura del solo testo della entry) di cosa fosse realmente costruito:
+
+- **3 marcati `active` (as-built confermato):** `SDES-DOCM-018` (`working_doc` — registrato in `docTypes.ts`, non-pubblicabilità **testata** in `tests/subscriptions.test.ts:515`); `SDES-DOCM-023` (WI-C, meccanismo deduce-and-warn — GTD `4a591cfe` già chiuso, test in `tests/docs.test.ts` sulla classe "wrong document"; la entry stessa dichiarava già l'as-built nel corpo, mancava solo il flip di `status`); `SDES-DOCM-027` (ISS-004 — la correzione alla description di `req_without_origin` in `src/tools.ts:3667` è presente e corrisponde esattamente a quanto la entry dichiarava "applicata in questa stessa WI").
+- **2 tentati `deprecated` (istruzione "scopa G.1, G.3\") — RIFIUTATI dal floor DB, non forzati.** `SDES-DOCM-019` (WI-G.1) e `SDES-DOCM-021` (WI-G.3): nessuna delle due implementazioni esiste nel codice (`target_kind` di `doc_link` resta `doc|gtd|wi`, nessun `doc_header`; nessun read-path per-versione-pubblicata). Ma `doc_item_upsert` ha rifiutato il retire — **entrambe hanno riferimenti in entrata senza erede dichiarato** (`UAT-DOCM-019` verifies + xproject `LAV-013` references su 019; `UAT-DOCM-021` verifies su 021). Lette le due UAT: dichiarano esplicitamente *"Casa (approvata 28/08, mandato loomy msg `ebc86f25`): DEL-A4 → WI-G, sul percorso critico del programma (prerequisito di B1 e C3)"* — cioè un giorno prima della coda di stasera, loomy le aveva messe sul percorso critico del Programma Manifesti. **Conflitto reale, non inventato un contratto per risolverlo (D-136 §5):** lasciate `draft`, girato a loomy nel messaggio di chiusura invece di forzare lo scrap.
+- **Restanti 10 lasciati `draft`, verificati uno per uno contro il codice** (nessuno è "as-built" nè sui due elenchi espliciti G.1/G.3): `012` (oracolo booleano — solo 2 delle 5 superfici applicate), `014` (parità capability ancora mirror in-code, non `pg_catalog`), `015` (backlog, vedi punto 4 — e (b) risultato **fattualmente superato**: il codice conta oggi la coverage cross-project, decisione opposta a quella descritta nella entry), `016`/`017` (owner dba, bloccati), `024` (inventario meta — parzialmente reso stale da `doc_structure`, che ora copre il read-path header che la entry segnalava mancante, ma il resto della tabella resta valido: non forzato nessun flip), `025` (2 lacune reali confermate assenti: changelog auto-verificato, cancello ritiro critical), `026` (`expect`/`retired`/`doc_item_retire` assenti), `028` (gate cross-project fase 1 assente — zero occorrenze `doc_versions` in `docs.ts`), `029` (bloccato su `017`, invariato).
+
+**Punto 4 — backlog filtro rejected.** Pianificato come GTD `ffe8b687` (low, non armato): `docTraceability()` (`src/docs.ts:1797`) filtra solo `status !== "superseded"`, non l'intero `RETIRED_STATUSES` già usato altrove nello stesso file. Fix meccanico a rischio nullo, dichiarato ma non eseguito ora (rispetta l'etichetta "low" della coda).
+
+**Decisioni prese:** nessuna — il conflitto G.1/G.3 e la nota su SDES-DOCM-015(b) sono girati a loomy, non decisi qui (D-136 §5).
+**Blocchi / note:** nessuno bloccante per la sessione stessa. Il conflitto G.1/G.3 blocca lo scrap letterale finché loomy non chiarisce se il mandato `ebc86f25` (28/08) è superato dalla coda di stasera o viceversa.
+**Prossima sessione:** dipende dalla risposta di loomy su G.1/G.3; GTD `ffe8b687` resta in backlog low.
+
+---
+
 ## Sessione #134 — 2026-08-29 (wake cold-start msg loomy `d429d82f`, WI `44b30f7d`, v0.26.0)
 
 **Task:** le due risposte di loomy alle domande aperte lasciate dal congegno di decadimento. **R4** — il mantenimento automatico delle sottoscrizioni `fact` è **deciso** (D-225, integrazione **4bis**): prima attivazione per progetto sempre manuale, da lì in poi automatico; il *meccanismo* è lasciato a questo server («è implementazione, non contratto»). **R6** — la lacuna del pin di versione sui legami cross-progetto è confermata come **debito dichiarato**: si progetta, non si esegue ora.
