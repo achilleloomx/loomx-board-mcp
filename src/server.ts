@@ -11,6 +11,36 @@ import { PACKAGE_VERSION } from "./version.js";
 // -32000, with nothing logged on our side to diagnose it (RCA GTD c454dbd5).
 const BOOT_TIMEOUT_MS = 15_000;
 
+// G4 mix-of-builds fix (GTD 8471a512). tools.ts loads its handler modules via
+// `await import(...)` INSIDE each tool call, not at the top of the file — so
+// each module only enters Node's ESM cache the first time some agent actually
+// invokes the tool that needs it. If `npm run build` rewrites dist/ while this
+// process is alive, modules already cached keep their pre-rebuild content
+// (Node never invalidates an ESM cache entry on file change) but any module
+// not yet touched loads the POST-rebuild file on its first call — a live
+// process can end up running an internally-inconsistent mix of old and new
+// code (observed: new docs.js calling a function factSync.js, still cached
+// from the old build, didn't export). Eagerly importing every lazy-loaded
+// module once here, before the server accepts any tool call, pins the whole
+// set to whatever dist/ is on disk at boot — later rewrites can no longer
+// produce a mix, only the already-documented and accepted "this window stays
+// on the build it booted with" (G4, CLAUDE.md "Rollout di un nuovo build").
+const LAZY_MODULES = [
+  "./wi.js",
+  "./wiCache.js",
+  "./pendingInbox.js",
+  "./docDb.js",
+  "./docs.js",
+  "./subscriptions.js",
+  "./staleness.js",
+  "./factSync.js",
+  "./structure.js",
+] as const;
+
+async function preloadLazyModules(): Promise<void> {
+  await Promise.all(LAZY_MODULES.map((m) => import(m)));
+}
+
 function withBootTimeout<T>(label: string, p: Promise<T>): Promise<T> {
   return Promise.race([
     p,
@@ -28,6 +58,7 @@ function withBootTimeout<T>(label: string, p: Promise<T>): Promise<T> {
 export async function startServer(cliSlug: string | null): Promise<void> {
   const slug = await withBootTimeout("identity resolution (resolveSelfSlug)", resolveSelfSlug(cliSlug));
   const registry = await withBootTimeout("agent registry load (resolveAgentRegistry)", resolveAgentRegistry(slug));
+  await withBootTimeout("lazy module preload (G4 mix-of-builds fix)", preloadLazyModules());
 
   process.stderr.write(
     `[board-mcp] Agent "${slug}" resolved to code "${registry.selfCode}"\n`

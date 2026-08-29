@@ -4,6 +4,26 @@
 
 ---
 
+## Sessione #140 — 2026-08-29 (autopilot dispatch, GTD `8471a512`, WI `239c9e8f`, v0.28.1)
+
+**Task:** issue self-riportato dalla sessione precedente (`/report-issue`, ISS-??? — owner=board-mcp perché il capture cross-owner è riservato a loomy, triage nominale it-manager ma il difetto vive nel codice sorgente di questo server): G4 non è solo "la finestra resta sul build precedente" com'era documentato — è più pericoloso. I moduli ESM di `tools.ts` si caricano via `import()` dinamico **dentro** ciascun handler, non in testa al file, quindi ogni modulo entra nella cache ESM del processo alla **prima invocazione** del tool che lo usa. Rigenerare `dist/` a finestra viva produceva un **mix**: caso reale osservato (sessione precedente) `docs.js` nuovo + `factSync.js` vecchio → `doc_link` fallito con `deriveFactOnLink is not a function`, e sotto `doc_rw` (una transazione per chiamata) un link legittimo già inserito è stato rollbackato. Deciso di lavorarlo qui perché è un difetto nel codice sorgente proprio (dev/manutenzione MCP server, §ruolo CLAUDE.md), non uno che richieda coordinamento cross-repo o decisione di Loomy — non rimbalzato.
+
+**Verificata dal vivo l'assunzione su cui si basa il fix, non solo letta.** Repro isolato in Node puro (`/tmp/.../g4-repro`): un modulo importato una volta (`mod-cached.mjs`) resta sul contenuto pre-modifica anche dopo che il file viene riscritto su disco — Node non invalida mai una entry della cache ESM già caricata; un modulo mai importato prima (`mod-lazy.mjs`) la cui prima `import()` avviene DOPO la riscrittura prende invece il contenuto nuovo. È esattamente il meccanismo del bug osservato.
+
+**Costruito (`src/server.ts`, v0.28.1).** `preloadLazyModules()`: un unico `Promise.all` che importa eagerly i 9 moduli altrimenti caricati lazy da `tools.ts` (`wi.js`, `wiCache.js`, `pendingInbox.js`, `docDb.js`, `docs.js`, `subscriptions.js`, `staleness.js`, `factSync.js`, `structure.js`), chiamato in `startServer()` **prima** di `registerTools()`/`server.connect()` — quindi prima che il processo possa accettare la prima tool call. Fissa l'intero set alla build presente su disco al momento del boot: rigenerazioni successive non possono più produrre un mix, solo il comportamento G4 di base già documentato e accettato (la finestra resta sul build con cui è partita, non su un build che non è mai esistito). Bound con lo stesso `withBootTimeout` già in uso per identity/registry — un preload che si impalla (import circolare, side-effect bloccante) fallisce il boot con un messaggio chiaro invece di un hang silenzioso.
+
+**Perché eager-preload e non altre strade:** valutato e scartato passare a import statici in testa a `tools.ts` — stesso effetto ma tocca ~35 call-site invece di uno, superficie di modifica molto più larga per lo stesso risultato. Verificato che nessuno dei 9 moduli ha side-effect bloccanti a import-time (letti gli header: nessun accesso a env var mancanti o connessione DB eseguita al top-level — `docDb.ts`/`pg-shim.ts` creano il pool solo alla prima chiamata, non all'import).
+
+**Verifiche.** `tsc --noEmit` pulito, `npm run build` pulita, `npm test` **322/322** verde (nessun test nuovo: il fix è un cambio di ordine di caricamento, non di comportamento tool-per-tool — coperto dagli stessi test esistenti). Dal vivo: import diretto dei 9 moduli da `dist/` reale (non solo `tsc`, il file compilato effettivo) senza errori.
+
+**Documentazione aggiornata:** CLAUDE.md §"Rollout di un nuovo build" — la nota G4 ora distingue esplicitamente il pericolo risolto (mix) da quello che resta invariato (staleness sulla finestra già aperta al momento del rebuild).
+
+**Decisioni prese:** nessuna nuova decisione formale — fix di un difetto nel proprio codice sorgente, non una scelta di design che richieda un codice D-NNN.
+**Blocchi / note:** nessuno. Il fix non richiede né forza alcun restart di flotta — riguarda solo il comportamento di un processo che boota da questo momento in poi; le finestre già aperte restano, come sempre, sul loro `dist/` di boot finché non riavviano di propria iniziativa.
+**Prossima sessione:** nessun follow-on aperto da questo task.
+
+---
+
 ## Sessione #139 — 2026-08-29 (autopilot dispatch, GTD `c82a33d8`, WI `16f04f62`)
 
 **Task:** D-135 §3 — `wi_end` deve restituire il destinatario dell'escalation e implementare il predicato "messaggio collegato al WI" per il trigger di promozione. GTD sbloccato oggi (`waiting_on=loomy` rimosso — dipendeva dalla consegna della spec-F4 consolidata).
