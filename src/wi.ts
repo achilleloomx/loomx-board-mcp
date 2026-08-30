@@ -9,7 +9,7 @@ import type { WiStatus, WiEndStatus, WiTemplateLayer } from "./types.js";
 import { checkTemplateName } from "./wiTemplates.js";
 import { runDocRw, type DocRwDb } from "./docDb.js";
 import { rwGuardsEnabled } from "./flags.js";
-import { computePendingInbox, type PendingInboxInfo } from "./pendingInbox.js";
+import { computePendingInbox, type PendingInboxInfo, computePendingWakes, type PendingWakesInfo } from "./pendingInbox.js";
 import { paginate } from "./pagination.js";
 
 const WI_TABLE = "loomx_work_items";
@@ -483,6 +483,11 @@ export interface WiEndData {
   // D-205 (REQ-GOV-151/152/153): what is still waiting for the closing agent —
   // informational, feeds the continue/clear/kill choice. See computePendingInbox.
   pending_inbox?: PendingInboxInfo;
+  // D-238 (GTD 4e25f4e4): wake-marked messages still un-acknowledged for the
+  // closing agent. Distinct axis from pending_inbox above — any message type,
+  // filtered on wake_priority instead of task/question/blocker. See
+  // computePendingWakes.
+  pending_wakes?: PendingWakesInfo;
   // D-118 (a) reply-wake structural guard (see resolveAutoWaitingOn). Sibling
   // guard (a+, checkInboxPendingGuard/inbox_pending_warning) removed
   // (SDES-GOV-157) — fully superseded by pending_inbox (D-205).
@@ -728,6 +733,9 @@ export async function wiEnd(
   // apply. Suppressed when someone else is closing this WI (orphan sweep,
   // REQ-GOV-151) — see computePendingInbox.
   const pendingInbox = await computePendingInbox(db, ctx, row.agent_slug, ctx.selfSlug, now);
+  // D-238: same non-blocking, every-real-close-path treatment as pending_inbox
+  // above (including the GTD-sync-failure return below) — see computePendingWakes.
+  const pendingWakes = await computePendingWakes(db, ctx, row.agent_slug, ctx.selfSlug);
 
   const { error: gtdErr } = await db
     .from(GTD_TABLE)
@@ -747,6 +755,7 @@ export async function wiEnd(
         gtd_status: null,
         gtd_sync_warning: `GTD sync failed (WI is closed): ${gtdErr.message}`,
         ...(pendingInbox ? { pending_inbox: pendingInbox } : {}),
+        ...(pendingWakes ? { pending_wakes: pendingWakes } : {}),
         ...(escalationTarget ? { escalation_target: escalationTarget, escalation_target_source: escalationTargetSource } : {}),
         ...(escalationNote ? { escalation_note: escalationNote } : {}),
       },
@@ -843,6 +852,7 @@ export async function wiEnd(
       ...(args.platform_contribution ? { platform_contribution_pending: args.platform_contribution } : {}),
       ...(runtimeRequestWarning ? { runtime_request_warning: runtimeRequestWarning } : {}),
       ...(pendingInbox ? { pending_inbox: pendingInbox } : {}),
+      ...(pendingWakes ? { pending_wakes: pendingWakes } : {}),
       ...(waitingOnAutoSet ? { waiting_on_auto_set: waitingOnAutoSet } : {}),
       ...(waitingOnWarning ? { waiting_on_warning: waitingOnWarning } : {}),
       ...(escalationTarget ? { escalation_target: escalationTarget, escalation_target_source: escalationTargetSource } : {}),

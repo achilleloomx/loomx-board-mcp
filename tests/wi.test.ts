@@ -61,8 +61,11 @@ function makeDb(store: Store, behaviour: Behaviour = {}): SupabaseClient {
       rows.filter((r) =>
         filters.every((f) => {
           if (f.op === "eq") return r[f.col] === f.val;
+          if (f.op === "neq") return r[f.col] !== f.val;
           if (f.op === "gte") return (r[f.col] as string) >= (f.val as string);
           if (f.op === "in") return (f.val as unknown[]).includes(r[f.col]);
+          if (f.op === "is") return (r[f.col] ?? null) === f.val;
+          if (f.op === "not-is") return (r[f.col] ?? null) !== f.val;
           return true;
         })
       );
@@ -109,6 +112,19 @@ function makeDb(store: Store, behaviour: Behaviour = {}): SupabaseClient {
       },
       in(col: string, vals: unknown[]) {
         filters.push({ col, val: vals, op: "in" });
+        return builder;
+      },
+      neq(col: string, val: unknown) {
+        filters.push({ col, val, op: "neq" });
+        return builder;
+      },
+      is(col: string, val: unknown) {
+        filters.push({ col, val, op: "is" });
+        return builder;
+      },
+      not(col: string, operator: string, val: unknown) {
+        // Real supabase-js: .not(col, "is", null) means "col IS NOT NULL".
+        if (operator === "is") filters.push({ col, val, op: "not-is" });
         return builder;
       },
       order() {
@@ -1555,4 +1571,102 @@ test("D-205 (REQ-GOV-151): pending_inbox survives a GTD-sync failure — the WI 
   if (!res.ok) return;
   assert.match(res.data.gtd_sync_warning ?? "", /GTD sync failed/);
   assert.equal(res.data.pending_inbox?.count, 1);
+});
+
+// ---- D-238 pending_wakes on wi_end ---------------------------------------
+// GTD 4e25f4e4 — sibling of D-205 pending_inbox above, but a different axis:
+// wake-marked messages (any type) not yet acknowledged. Same undefined-vs-empty
+// / orphan-sweep contract, reused via computePendingWakes.
+
+test("D-238: wi_end returns pending_wakes with the owner's un-acknowledged wake-marked queue", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-23T08:00:00Z" },
+    ],
+    board_messages: [
+      { id: "m1", from_agent: "045", to_agent: "010", type: "info", subject: "cold-wake ping", status: "pending", wake_priority: "urgent", created_at: "2026-08-23T09:00:00Z" },
+      { id: "m2", from_agent: "002", to_agent: "010", type: "task", subject: "no wake marker", status: "pending", wake_priority: null, created_at: "2026-08-23T09:05:00Z" },
+      { id: "m3", from_agent: "045", to_agent: "010", type: "info", subject: "already acked", status: "acknowledged", wake_priority: "normal", created_at: "2026-08-23T09:10:00Z" },
+      { id: "m4", from_agent: "045", to_agent: "002", type: "info", subject: "someone else's wake", status: "pending", wake_priority: "high", created_at: "2026-08-23T09:15:00Z" },
+    ],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done", force_ephemeral: true, force_reason: "test" }, ctxRw);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.data.pending_wakes?.count, 1);
+  assert.equal(res.data.pending_wakes?.messages[0].id, "m1");
+  assert.equal(res.data.pending_wakes?.messages[0].from, "it-manager");
+  assert.equal(res.data.pending_wakes?.messages[0].subject, "cold-wake ping");
+  assert.equal(res.data.pending_wakes?.messages[0].wake_priority, "urgent");
+});
+
+test("D-238: an empty wake queue is still reported (count 0), not omitted", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-23T08:00:00Z" },
+    ],
+    board_messages: [],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done", force_ephemeral: true, force_reason: "test" }, ctxRw);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.data.pending_wakes?.count, 0);
+  assert.deepEqual(res.data.pending_wakes?.messages, []);
+});
+
+test("D-238: a wake moved to in_progress via board_update_status (never acked) still counts as pending", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-23T08:00:00Z" },
+    ],
+    board_messages: [
+      { id: "m1", from_agent: "045", to_agent: "010", type: "task", subject: "in flight", status: "in_progress", wake_priority: "normal", created_at: "2026-08-23T09:00:00Z" },
+    ],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done", force_ephemeral: true, force_reason: "test" }, ctxRw);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.data.pending_wakes?.count, 1);
+});
+
+test("D-238: no pending_wakes when loomy closes another agent's WI (orphan sweep)", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-23T08:00:00Z" },
+    ],
+    board_messages: [
+      { id: "m1", from_agent: "045", to_agent: "010", type: "info", subject: "cold-wake ping", status: "pending", wake_priority: "urgent", created_at: "2026-08-23T09:00:00Z" },
+    ],
+  };
+  const db = makeDb(store);
+  const ctxLoomyRw = { ...ctxRw, selfSlug: "loomy", isLoomy: true };
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done", force_ephemeral: true, force_reason: "test" }, ctxLoomyRw);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.data.pending_wakes, undefined);
+});
+
+test("D-238: pending_wakes survives a GTD-sync failure — the WI still closed", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [], started_at: "2026-08-23T08:00:00Z" },
+    ],
+    board_messages: [
+      { id: "m1", from_agent: "045", to_agent: "010", type: "info", subject: "cold-wake ping", status: "pending", wake_priority: "urgent", created_at: "2026-08-23T09:00:00Z" },
+    ],
+  };
+  const db = makeDb(store, { failNext: { loomx_items: [{ op: "update", message: "row locked" }] } });
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done", force_ephemeral: true, force_reason: "test" }, ctxRw);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.match(res.data.gtd_sync_warning ?? "", /GTD sync failed/);
+  assert.equal(res.data.pending_wakes?.count, 1);
 });

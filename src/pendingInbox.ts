@@ -12,6 +12,7 @@
 // this one is live (SDES-GOV-157), never bundled here.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
+import type { WakePriority } from "./types.js";
 
 const BOARD_MESSAGES_TABLE = "board_messages";
 
@@ -111,5 +112,85 @@ export async function computePendingInbox(
     count: actionable.length,
     messages,
     ...(actionable.length > MAX_LISTED ? { truncated: true } : {}),
+  };
+}
+
+// pending_wakes (D-238, GTD 4e25f4e4). Sibling of pending_inbox above but a
+// different axis: wake-marked messages (wake_priority IS NOT NULL), any type —
+// not just task/question/blocker — that the closing agent has not yet
+// acknowledged. Delivery of a wake is defined as board_ack (ping's own
+// contract: "Use board_ack to close it"), so the filter is status<>acknowledged,
+// not status=pending — a wake moved to in_progress/done via board_update_status
+// without ever being acked still counts as undelivered here.
+//
+// This is what makes §0ter stop depending on the agent's memory of what pinged
+// it earlier in the session: the wi_end payload itself carries the queue.
+
+export interface PendingWakeMessage {
+  id: string;
+  from: string; // sender slug (falls back to the raw agent code if unmapped)
+  subject: string;
+  wake_priority: WakePriority;
+}
+
+export interface PendingWakesInfo {
+  count: number;
+  messages: PendingWakeMessage[]; // oldest first, at most MAX_LISTED
+  truncated?: boolean; // count > MAX_LISTED — the list is a head, not the whole queue
+}
+
+interface WakeMsgRow {
+  id: string;
+  from_agent: string;
+  subject?: string | null;
+  wake_priority: WakePriority;
+  created_at: string;
+}
+
+/**
+ * Read-only snapshot of the wake-marked messages still un-acknowledged for
+ * `ownerSlug`. Same undefined-vs-empty contract as computePendingInbox: no
+ * field at all on an orphan-sweep close (callerSlug !== ownerSlug), an
+ * unresolvable registry, or a failed read — a count of 0 IS reported when the
+ * read actually happened.
+ */
+export async function computePendingWakes(
+  db: SupabaseClient,
+  registry: PendingInboxRegistry,
+  ownerSlug: string,
+  callerSlug: string
+): Promise<PendingWakesInfo | undefined> {
+  if (callerSlug !== ownerSlug) return undefined;
+  if (!registry.slugToCode || !registry.codeToSlug) return undefined;
+  const ownerCode = registry.slugToCode.get(ownerSlug);
+  if (!ownerCode) return undefined;
+
+  const { data, error } = await db
+    .from(BOARD_MESSAGES_TABLE)
+    .select("id, from_agent, subject, wake_priority, status, created_at")
+    .eq("to_agent", ownerCode)
+    .is("archived_at", null)
+    .not("wake_priority", "is", null)
+    .neq("status", "acknowledged");
+
+  if (error) {
+    process.stderr.write(`[pending_wakes] read failed (non-blocking): ${error.message}\n`);
+    return undefined;
+  }
+
+  const rows = (Array.isArray(data) ? data : []) as WakeMsgRow[];
+  const sorted = rows.sort((a, b) => (a.created_at < b.created_at ? -1 : a.created_at > b.created_at ? 1 : 0));
+
+  const messages: PendingWakeMessage[] = sorted.slice(0, MAX_LISTED).map((m) => ({
+    id: m.id,
+    from: registry.codeToSlug!.get(m.from_agent) ?? m.from_agent,
+    subject: m.subject ?? "(no subject)",
+    wake_priority: m.wake_priority,
+  }));
+
+  return {
+    count: sorted.length,
+    messages,
+    ...(sorted.length > MAX_LISTED ? { truncated: true } : {}),
   };
 }

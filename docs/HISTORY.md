@@ -4,6 +4,88 @@
 
 ---
 
+## Sessione #147 — 2026-08-30 (autopilot dispatch GTD `4e25f4e4`, WI `8c070552`, D-238)
+
+**Task:** implementare il pezzo board-mcp di D-238 (ratificata 2026-08-29, mai armata finché la GTD non è stata riarmata in questa sessione): `wi_end` espone nel proprio risultato i wake pendenti dell'agente che chiude il WI, così il collaudo di §0ter smette di dipendere dalla memoria dell'agente. Pezzo gemello (reconciler consegna=ack+retry) è di it-manager (GTD `d688898a`), non toccato qui.
+
+**Costruito — `pending_wakes` (v0.30.0).** Sorella di `pending_inbox` (D-205, stesso file `src/pendingInbox.ts`) ma un asse diverso: messaggi wake-marked (`wake_priority IS NOT NULL`), **qualunque tipo** — non solo task/question/blocker — filtrati su `status<>'acknowledged'` invece che `status='pending'`. La scelta del filtro segue il contratto già scritto per `ping`: *"Use board_ack to close it"* — la consegna di un wake è definita come ack, quindi un messaggio spostato a `in_progress`/`done` con `board_update_status` senza mai passare da `board_ack` conta ancora come non consegnato. Stesso contratto undefined-vs-empty-vs-orphan-sweep di `computePendingInbox`: niente campo su chiusura per conto altrui (nessun agente vivo sta scegliendo continue/clear/kill), `count:0` sempre riportato quando la lettura è avvenuta davvero. Cablato su entrambi i return path di `wi_end` (successo e GTD-sync-fallito), stesso punto dove vive `pending_inbox` — nessun nuovo gate, additivo per costruzione (D-238 vincolo 4).
+
+**Verifiche.** `tsc` pulito, build pulita. **95 nuovi/aggiornati test verdi** su 3 file: `tests/pending-wakes.test.ts` (12 unit, incl. "qualunque tipo conta", "status diverso da pending ma non ancora ack conta", cap/troncamento, orphan sweep, read-error swallowed) + 6 test di wiring in `tests/wi.test.ts` (happy path, coda vuota, in_progress non-ackato, orphan sweep, sopravvive a GTD-sync-fallito) + estensione del fake DB condiviso in `tests/wi.test.ts` (`is`/`not`/`neq`, mancavano — la funzione nuova li usa e i test esistenti che passano per `ctxRw` sarebbero altrimenti crashati con `builder.is is not a function`, verificato dal vivo con la corsa rossa prima del fix). Suite intera: **354/354**. Nessuna verifica dal vivo contro il DB reale in questa sessione (nessuna scrittura, solo lettura sotto lo stesso client già usato da `pending_inbox` — stesso grado di fiducia, non un percorso nuovo).
+
+**Decisioni prese:** nessuna nuova decisione formale — implementazione di D-238 già ratificata. Nome del campo (`pending_wakes`, distinto da `pending_inbox`) e scelta del filtro (`status<>acknowledged` anziché `status='pending'`) sono dettagli di implementazione coerenti col contratto `ping` esistente, non scelte di design nuove.
+**Blocchi / note:** il collaudo di coppia richiesto dal `resume_hint` ("un wake reale differito su window viva risulta ack-ato entro un ciclo dalla chiusura del WI") **non è eseguibile da qui**: richiede il pezzo reconciler di it-manager (GTD `d688898a`), non ancora verificato live. I GTD `[wake-triage]` duplicati (`6a09375b`, `97ad1ffa`) e il tracker `6754b196` **non chiusi** — il body del GTD li lega esplicitamente al collaudo di coppia passato, non al solo pezzo board-mcp.
+**Prossima sessione:** segnalare a loomy/it-manager che il pezzo board-mcp è live e pronto per il collaudo di coppia. Nessun restart di flotta forzato di iniziativa propria (G4).
+
+---
+
+## Sessione #146 — 2026-08-29 (autopilot dispatch GTD `02b5f983`, WI `129abedf`)
+
+**Task:** riconciliare i 4 frozen-row-touch su REQ-GOV-167/168/141 (documento REQ di decision-enforcement, pubblicato 1.1) segnalati nella sessione #145 — decisione di processo: bump a 1.2 con changelog, o revert/no-op se non sostanziali.
+
+**Trovato:** nessuna riconciliazione da fare. Ricostruita la sequenza (`doc_staleness_query` + `doc_version_delta` 1.0→1.1): i 4 tocchi (08:52 REQ-167 body/summary/attrs, 10:18 REQ-141 ritiro, 11:13:44.758 REQ-167 title/status, 11:13:44.994 REQ-168 status) sono **tutti precedenti** la pubblicazione 1.1 (11:14:32.389 — l'ultimo tocco a 48 secondi di distanza). Il delta 1.0→1.1 mostra REQ-GOV-167/168 come "created" e REQ-GOV-141 come "modified" nello stesso snapshot pubblicato — il contenuto toccato È il contenuto fotografato. Il changelog_entry v1.1 già descrive per esteso le tre righe (ritiro 141/D-234, riscrittura 167/D-232, aggiunta 168/D-232). Nessun drift, nessun gap di changelog.
+
+**Nota di processo (non un difetto):** `doc_staleness_query.frozen_row_touches` elenca ogni UPDATE fuori `doc_publish` su un documento pubblicato senza incrociare il timestamp con pubblicazioni successive — un tocco "vecchio" e uno "vivo" appaiono identici nella lista. Il rilevatore fa esattamente ciò che è documentato (registra il tocco); la lettura richiede confronto manuale coi tempi di pubblicazione. Segnalato a loomy per consapevolezza, nessuna azione richiesta (non un contratto da cambiare senza passare da lui, D-136 §5).
+
+**Inviato:** report a loomy (`42891e17`, done su `cc8e3876`) con la ricostruzione temporale completa.
+
+**Decisioni prese:** nessuna nuova — chiarimento di uno stato già corretto.
+**Blocchi / note:** nessuno.
+**Prossima sessione:** GTD `02b5f983` chiuso done. Coda board-mcp resta sostanziosa (20+ item next_action) — vedi `gtd_query(owner=board-mcp)`.
+
+---
+
+## Sessione #145 — 2026-08-29 (wake cold-start msg loomy `212b2ff0`, WI `cfb1617f`)
+
+**Task:** GO di loomy all'attivazione di `doc_fact_sync` su `decision-enforcement` (669fd07b), candidato scelto nella sessione precedente (msg `46de52d8`): 506 legami verifies/satisfies, zero sottoscrizioni di qualunque tipo, unico progetto grande completamente non presidiato — anche la catena REQ/SDES/UAT del framework di governance stesso.
+
+**Eseguito:** `doc_fact_sync(project_id=decision-enforcement, dry_run=false)` — **506/506 create, 0 already_covered, 0 skipped**, match esatto con la prova a vuoto precedente (split 187 satisfies→module, 319 verifies→critical). `doc_staleness_query(status=all)` confermato dal vivo: `markings: []` — giorno-uno vuoto per costruzione, come previsto (subscribed_at_version = versione corrente al momento dell'attivazione, mai retroattiva).
+
+**Trovato per caso (segnalato per esteso a loomy):** `frozen_row_touches` mostra 4 UPDATE fuori `doc_publish` sul documento REQ di decision-enforcement (pubblicato 1.1): REQ-GOV-167 (2 tocchi), REQ-GOV-141, REQ-GOV-168 — tutti 2026-08-29 mattina, prima dell'attivazione di oggi. Debito preesistente, non causato da questa attivazione (nessuna fact esisteva ancora quando sono avvenuti). Non deciso da qui — è una scelta di processo (bump 1.2 vs revert), parcheggiata in GTD `02b5f983` per triage.
+
+**Verifica #2 (avviso vero) non forzata:** loomy ha chiesto esplicitamente di non forzare un cambiamento per testarla — resto in osservazione naturale (GTD `d4d7ce9e`, waiting, non armato — nessun lavoro dispatchabile finché non arriva l'evento).
+
+**Inviato:** report a loomy (`cc8e3876`, done su `212b2ff0`) con entrambe le verifiche richieste + dettaglio esteso dei frozen-row-touch. Ack anche su `6438c907` (D-244 chiusa, verificata da loomy) e `6497ddc2` (riconciliazione git firmata da Achille) — puramente informativi, nessuna azione board-mcp richiesta.
+
+**Decisioni prese:** nessuna nuova — esecuzione di un GO già deliberato.
+**Blocchi / note:** rispettato il vincolo esplicito di loomy — nessuna estensione oltre decision-enforcement senza un altro giro di autorizzazione.
+**Prossima sessione:** GTD `02b5f983` (riconciliazione frozen-row) actionable, non armato. GTD `d4d7ce9e` (osservazione verifica #2) in waiting, `no_auto_arm=true` — si chiude quando arriva il primo evento naturale o dopo qualche giorno di silenzio (anch'esso un dato).
+
+---
+
+## Sessione #144 — 2026-08-29 (wake cold-start msg loomy `ab9d63d0`, WI `01c9f708`)
+
+**Task:** loomy confermava D-BM-021 e chiudeva il residuo D-a5-F1/D-a5-F4.5 (innocui, prefisso progetto-locale non numerico — nessuna azione), ma il centro del messaggio era una domanda di Achille: "popoliamo i progetti ma non sottoscriviamo la catena" — tre misure richieste sul motore di decadimento (D-201/D-210/D-225-4bis), non accessibili a loomy perché vivono in `gov` schema esposto solo a board-mcp.
+
+**Metodo (misurato prima di rispondere, D-136 §5):** SQL diretto sotto lo STESSO handshake dei tool doc_rw (`SET LOCAL ROLE doc_rw; SELECT loomx_set_agent_slug('board-mcp')`) — nessun bypass service_role. Prima dei numeri, misurata la propria finestra di visibilità (la stessa lezione appena imparata da dba): membership reale (`loomx_agent_in_project`) su 9/82 progetti, ma lettura effettiva più larga — 20/82 in `gov.doc_subscriptions`, 11/82 in `doc_item_links` (quasi tutti "Metodo LoomX"/AI Governance — ipotesi non verificata: item `visibility='org'`, D-167). Numeri riportati come pavimento su quella finestra, mai estrapolati a 82.
+
+**Risultati:** (1) decadimento attivo in **2/82 progetti** (board-mcp, project-governance) — nessun altro nella finestra visibile; (2) sottoscrizioni: 190 choice attive + 10 tombstonate, 247 fact attive (zero fact tombstonate, impossibile per costruzione SEC-011); (3) **il numero decisivo**: dei 942 legami verifies/satisfies visibili, solo **247 (26%)** hanno prodotto una fact — 681 inerti per non-attivazione del progetto, **14 anomali** (progetto già opt-in ma link scoperto senza fact corrispondente, causa non investigata → GTD `feca70fa` aperto).
+
+**Inviato:** report a loomy (`89eb4396`, info su `ab9d63d0`).
+
+**Decisioni prese:** nessuna nuova — misura, non scrittura.
+**Blocchi / note:** anomalia dei 14 legami non chiusa, solo dichiarata e parcheggiata in GTD.
+**Prossima sessione:** GTD `feca70fa` (anomalia 14 legami) non armato — richiede query mirata prima di agire.
+
+---
+
+## Sessione #143 — 2026-08-29 (wake cold-start msg loomy `c26875df`, WI `a54146e4`)
+
+**Task:** loomy chiedeva di posare le "41 righe" del lotto di classificazione manifesti (fascia board-mcp, `c2-posa-boardmcp-mappa.md`) sul documento decisioni `1da8642c` — dba aveva segnalato (msg `b1c0d131`) di misurare zero righe visibili sia sulla fonte che sulla destinazione, non essendo membro del progetto.
+
+**Misurato prima di scrivere qualunque cosa (D-136 §5):** `doc_query(project_id=596cd5fc, document_type=decisions)` confrontato codice-per-codice con i 43 esiti di `c2-classif-boardmcp.json` (script Python one-off, non un tool). **43/43 già presenti** — zero mancanti. I timestamp `updated_at` mostrano che il lavoro era già stato eseguito il **23/08**, in due passate: 01:10:51–01:14:02 (i 7 collisi di numero D-050/051/053/055/100/101/102 → D-BM-001..007, consolidamento D-043/047/048 → D-BM-008, split D-a5-write-path-fix → D-BM-009, D-REQ-GOV-016 → D-BM-010, D-a5-upsert-patch-semantics → D-BM-011, tombstone D-008 con nota DEC-01g, emendamento D-016) e 13:03:23 (D-018 → D-BM-021, stessa policy estesa da loomy oltre il lotto dei 7).
+
+**La "zero visibilità" di dba era un artefatto RLS, non un documento vuoto:** `1da8642c` è `visibility='project'` e dba non è membro di `596cd5fc` — stessa classe di ambiguità già corretta da D-167 per `doc_item_upsert` (404 vs 403 su non-membership). Nessuna scrittura in questa sessione: non c'era nulla da posare.
+
+**Unico residuo reale trovato:** `D-BM-021` (ex D-018) ancora `status='proposed'` — il suo stesso corpo dichiara che il numero indicato da loomy (D-BM-012) era già occupato, sostituito con D-BM-021 e segnalato "a loomy per conferma" il 23/08, mai ratificato in 6 giorni. Non ho trovato un secondo codice con incertezza analoga ("due residui" citati da loomy) — segnalato esplicitamente invece di indovinarne uno.
+
+**Inviato:** report dettagliato a loomy (`f52a3dd9`, done su `c26875df`) e a dba (`0f71adbd`, info su `b1c0d131`) con timestamp e mapping codice-per-codice.
+
+**Decisioni prese:** nessuna nuova — verifica, non scrittura.
+**Blocchi / note:** `D-BM-021` resta `proposed` in attesa di ratifica loomy sul numero.
+**Prossima sessione:** nessun follow-on armato — GTD di questa sessione chiuso `done` a `wi_end`. Se loomy conferma D-BM-021, un GTD futuro (non questo) lo flippa ad `active`.
+
+---
+
 ## Sessione #142 — 2026-08-29 (wake cold-start msg loomy `13ea022a`, WI `eab3b0b5`, D-244)
 
 **Task:** eseguire D-244 (firmata da Achille lo stesso giorno): il repository pubblico `loomx-board-mcp` era fermo al 13 maggio 2026 (26 commit, lo scheletro pre-rifacimento) mentre la storia locale/reale contava 116 commit dal 29 giugno a oggi — due alberi senza antenato comune (scoperto in sessione precedente provando un push additivo sotto D-237, mai forzato). Decisione: cutover con archiviazione, non fusione (una fusione dichiarerebbe una convivenza mai avvenuta). Condizione vincolante: archiviare e VERIFICARE la storia vecchia PRIMA della sovrascrittura, due gesti separati.
