@@ -3689,8 +3689,10 @@ export function registerTools(
     "doc_link",
     `Create a link. UUID-ONLY (no code param — resolve first, or use doc_link_by_code). target_kind routes the link: ` +
       `'doc' → doc_item↔doc_item traceability (relation_type required: ${DOC_LINK_TYPES_LIST}). ` +
-      `  'references' = CROSS-PROJECT (D-074): routes to doc_item_xproject_links; UUIDs are globally unique, no project_id constraint. ` +
-      `  All other types = intra-project only: same-project FK enforced (translateLinkError on cross-project attempt). ` +
+      `  Routing is decided by the FACT of the two endpoints' project_id, not by the relation_type label (SDES-SUB-005, D-155): ` +
+      `  same project_id → doc_item_links (intra-project); different project_id → doc_item_xproject_links (cross-project), for ANY relation_type. ` +
+      `  'references' is the one exception — it ALWAYS routes to doc_item_xproject_links (D-074), even when both items share a project, ` +
+      `  since doc_item_links' CHECK does not admit 'references' at all. ` +
       `'gtd' → doc_item↔GTD actionability (doc_item_gtd_links, no relation_type — D-070); ` +
       `'wi'  → doc_item↔WI execution link (doc_item_wi_links, no relation_type — D-070). ` +
       `Example (doc, intra): doc_link({target_kind:"doc", from_id:"<sdes-uuid>", to_id:"<req-uuid>", relation_type:"satisfies"}). ` +

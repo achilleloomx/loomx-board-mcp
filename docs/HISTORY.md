@@ -4,6 +4,22 @@
 
 ---
 
+## Sessione #150 — 2026-08-31 (autopilot dispatch, GTD `f5c2f646`, msg loomy `09421611`, WI `4e8f2738`)
+
+**Task:** loomy segnala che la descrizione del tool `doc_link` contraddice D-155/SDES-SUB-005 e ha già causato un errore reale ("stanotte, nel mandato che avevo scritto io").
+
+**Root cause confermata leggendo codice+contratto affiancati:** la docstring del tool (`src/tools.ts`, righe 3690-3693) dichiarava ancora il comportamento **pre-D-155**: "solo `references` è cross-project, tutti gli altri tipi sono intra-project only, FK enforced su tentativo cross-project". Il codice (`src/docs.ts:1174-1237`, commento esplicito "SDES-SUB-005 (D-155)") instrada invece da tempo per il **confine di progetto reale** delle due estremità (`from.project_id` vs `to.project_id`), non per l'etichetta `relation_type`: stesso progetto → `doc_item_links` (intra), progetti diversi → `doc_item_xproject_links` (cross), per QUALSIASI relation_type. `references` resta l'unica eccezione (sempre cross-project, D-074) perché il CHECK di `doc_item_links` non lo ammette proprio. Il codice era corretto (170 righe non-references già in `doc_item_xproject_links`, come misurato da loomy); solo la superficie che un agente legge prima di chiamare il tool era rimasta al contratto vecchio — chi si è fidato della docstring ha posato un link con relation_type non-`references` aspettandosi un fallimento cross-project e si è preso invece (o viceversa) un comportamento diverso da quello dichiarato.
+
+**Fix:** riscritta la sezione `'doc' → ...` della descrizione del tool `doc_link` per dichiarare il routing reale (per project_id, non per label), con `references` esplicitato come unica eccezione e il motivo (CHECK constraint). Nessuna modifica al codice di routing (`docs.ts`), già corretto — solo al contratto esposto. `tsc` pulito, `npm run build` verificato.
+
+**Verifiche:** lettura affiancata tool description (`tools.ts`) vs implementazione (`docs.ts:1174-1237`) vs CLAUDE.md (sezione "Fix registry collegato (SDES-SUB-005, D-155)", già allineata alla decisione — solo la docstring del tool era rimasta indietro). Build pulita.
+
+**Decisioni prese:** nessuna nuova decisione — correzione di un contratto tool per farlo aderire a D-155 già ratificata.
+**Blocchi / note:** stesso limite G4 delle sessioni precedenti — finestre già aperte continuano a servire la docstring vecchia dalla loro build in memoria finché non riavviano; nessun restart forzato di mia iniziativa.
+**Prossima sessione:** nessun follow-on aperto su questo item.
+
+---
+
 ## Sessione #149 — 2026-08-31 (wake cold-start msg loomy `da27c4bc`, ISS-040, WI `98eff123`)
 
 **Task:** ISS-040 riassegnato a board-mcp da loomy — `wi_end` rotto per tutta la flotta da 36 ore sullo stesso difetto della sessione #148 (`.neq` mancante in `pg-shim.ts`). Causa del ritardo: il fix era **già scritto** dalla sessione #148 (diff su `src/pg-shim.ts`/`src/wi.ts`/`tests/pgshim-comparators.test.ts`, entry sopra) ma mai committato né buildato — la sessione si è probabilmente interrotta prima di chiudere (il suo stesso WI `afc8630a` risultava non più active, nessun commit in `git log`). Nel frattempo il register ha accumulato **nove segnalazioni duplicate da sette agenti diversi** (30/08 20:49 → 31/08 08:47) per lo stesso difetto, diagnosticato correttamente da it-manager (ISS-040) ma senza `autopilot`/`waiting_on` — diagnosi senza esecutore, come descritto da loomy nel messaggio di wake.
