@@ -732,10 +732,27 @@ export async function wiEnd(
   // read-only and non-blocking, so the eval-first flag D-118 needed doesn't
   // apply. Suppressed when someone else is closing this WI (orphan sweep,
   // REQ-GOV-151) — see computePendingInbox.
-  const pendingInbox = await computePendingInbox(db, ctx, row.agent_slug, ctx.selfSlug, now);
+  //
+  // try/catch (board msg 835fcd46, frame): both compute* functions already
+  // degrade a DB-level {error} to undefined internally, but a bug in the query
+  // chain itself (missing shim method) throws synchronously instead — which,
+  // uncaught, aborted wi_end BEFORE the GTD cascade update below ever ran. This
+  // is reporting on an already-concluded operation (the WI row is committed by
+  // this point); it must never take the close down with it.
+  let pendingInbox: PendingInboxInfo | undefined;
+  try {
+    pendingInbox = await computePendingInbox(db, ctx, row.agent_slug, ctx.selfSlug, now);
+  } catch (e) {
+    process.stderr.write(`[wi_end][pending_inbox] compute threw (non-blocking): ${(e as Error).message}\n`);
+  }
   // D-238: same non-blocking, every-real-close-path treatment as pending_inbox
   // above (including the GTD-sync-failure return below) — see computePendingWakes.
-  const pendingWakes = await computePendingWakes(db, ctx, row.agent_slug, ctx.selfSlug);
+  let pendingWakes: PendingWakesInfo | undefined;
+  try {
+    pendingWakes = await computePendingWakes(db, ctx, row.agent_slug, ctx.selfSlug);
+  } catch (e) {
+    process.stderr.write(`[wi_end][pending_wakes] compute threw (non-blocking): ${(e as Error).message}\n`);
+  }
 
   const { error: gtdErr } = await db
     .from(GTD_TABLE)

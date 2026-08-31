@@ -1,10 +1,16 @@
-// Unit tests for PgQuery comparator filters (gte/lte/gt/lt).
+// Unit tests for PgQuery comparator filters (gte/lte/gt/lt/neq).
 // wi.ts's resolveAutoWaitingOn (D-118 guard, runs unconditionally even with
 // LOOMX_RW_GUARDS_ENABLED off, for the dry-run log) and wi_query --since both
 // call .gte() on the query builder — the pg-shim (DATABASE_URL backend, D-084)
 // never implemented it, so any agent running on the direct-postgres backend
 // crashed with "db.from(...).select(...).eq(...).gte is not a function" on
 // wi_end(status="waiting") (board msg 5cc2fba8, agent nottolini).
+//
+// Same class of bug recurred for .neq(): computePendingWakes (D-238,
+// src/pendingInbox.ts) chains .not("wake_priority","is",null).neq("status",
+// "acknowledged") — the shim never implemented .neq() either, so wi_end on the
+// pg backend closed the WI/GTD fine but threw composing the response (board
+// msg 835fcd46, agent frame). Regression test below pins .neq() down.
 //
 // Run: npx tsx --test tests/pgshim-comparators.test.ts
 
@@ -44,4 +50,22 @@ test("lte/gt/lt build the matching comparison operators", async () => {
   assert.match(calls[0].sql, /"a" <= \$1/);
   assert.match(calls[1].sql, /"b" > \$1/);
   assert.match(calls[2].sql, /"c" < \$1/);
+});
+
+test("neq builds a <> WHERE clause and chains after .not()", async () => {
+  const { exec, calls } = recorder();
+  const { error } = await new PgQuery(exec, "board_messages")
+    .select("id, to_agent, wake_priority, status")
+    .eq("to_agent", "005")
+    .is("archived_at", null)
+    .not("wake_priority", "is", null)
+    .neq("status", "acknowledged");
+
+  assert.equal(error, null);
+  assert.equal(calls.length, 1);
+  assert.match(
+    calls[0].sql,
+    /WHERE "to_agent" = \$1 AND "archived_at" IS NULL AND "wake_priority" IS NOT NULL AND "status" <> \$2/
+  );
+  assert.deepEqual(calls[0].params, ["005", "acknowledged"]);
 });

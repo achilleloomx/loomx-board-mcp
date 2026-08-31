@@ -4,6 +4,44 @@
 
 ---
 
+## Sessione #149 — 2026-08-31 (wake cold-start msg loomy `da27c4bc`, ISS-040, WI `98eff123`)
+
+**Task:** ISS-040 riassegnato a board-mcp da loomy — `wi_end` rotto per tutta la flotta da 36 ore sullo stesso difetto della sessione #148 (`.neq` mancante in `pg-shim.ts`). Causa del ritardo: il fix era **già scritto** dalla sessione #148 (diff su `src/pg-shim.ts`/`src/wi.ts`/`tests/pgshim-comparators.test.ts`, entry sopra) ma mai committato né buildato — la sessione si è probabilmente interrotta prima di chiudere (il suo stesso WI `afc8630a` risultava non più active, nessun commit in `git log`). Nel frattempo il register ha accumulato **nove segnalazioni duplicate da sette agenti diversi** (30/08 20:49 → 31/08 08:47) per lo stesso difetto, diagnosticato correttamente da it-manager (ISS-040) ma senza `autopilot`/`waiting_on` — diagnosi senza esecutore, come descritto da loomy nel messaggio di wake.
+
+**Cosa ho fatto:** ripreso il lavoro già scritto (nessuna modifica di merito aggiunta — il fix di #148 era corretto), poi completato ciò che mancava:
+1. `tsc --noEmit` pulito, suite `355/355` verde (confermato, non solo ricontrollato a memoria).
+2. `npm run build` — verificato `neq` presente in `dist/pg-shim.js` e `dist/wi.js` post-build.
+3. **Verifica dal vivo** (mancante in #148): script throwaway (`tsx`, cancellato subito dopo) che chiama `computePendingInbox`/`computePendingWakes` con `DATABASE_URL` reale — la stessa catena che crashava. Nessun errore, risposta corretta (`pending_inbox.count=1`, `pending_wakes.count=3`). Eseguito da sorgente e non dai tool MCP di questa finestra: questa finestra ha caricato il `dist/` **prima** del fix (G4/preload eager v0.28.1), quindi un `wi_end` chiamato da qui con la vecchia build avrebbe comunque riprodotto il crash — non è una controprova del fix, solo la conferma del comportamento G4 atteso.
+4. Commit dei soli file pertinenti a ISS-040 (`src/pg-shim.ts`, `src/wi.ts`, `tests/pgshim-comparators.test.ts`, questo file). **Non toccato** `.claude/hooks/governance-gate.sh`: diff non collegato a ISS-040, non documentato in HISTORY, provenienza sconosciuta — lasciato intatto in working tree, non è mio da decidere se e quando committarlo.
+
+**Deploy (D-237, atto amministrato):** `dist/` è aggiornato su disco ma questa e le altre finestre della flotta restano sul build con cui sono partite (G4, nessun hot-reload). Non ho riavviato nessuno di mia iniziativa (CLAUDE.md §Rollout — non è una mia decisione unilaterale): segnalato a loomy con la finestra di effetto e l'elenco dei cicli in corso da considerare.
+
+**Verifiche:** vedi punti 1-3 sopra — root cause + fix invariati da #148, solo completati end-to-end.
+
+**Decisioni prese:** nessuna nuova decisione formale.
+**Blocchi / note:** redeploy/restart flotta in mano a loomy/it-manager, non eseguito qui.
+**Prossima sessione:** nessun follow-on aperto su questo difetto — chiudere le 8 segnalazioni duplicate resta vincolato dall'ownership GTD (owner-only + loomy, non board-mcp) e viene gestito fuori da questo WI.
+
+---
+
+## Sessione #148 — 2026-08-31 (wake cold-start msg frame `835fcd46`, WI `afc8630a`)
+
+**Task:** blocker da frame — `wi_end` chiudeva il WI (scrittura confermata, `ended_at` valorizzato) ma rispondeva con solo `Error: db.from(...).select(...).eq(...).is(...).not(...).neq is not a function`. Ipotesi di frame dalla forma della catena: uno dei due blocchi post-chiusura (`pending_inbox` D-205 / `pending_wakes` D-238).
+
+**Root cause confermata.** `computePendingWakes` (`src/pendingInbox.ts:168-174`) chiama `.eq().is().not("wake_priority","is",null).neq("status","acknowledged")`. `pg-shim.ts` (backend `DATABASE_URL`, D-084) non ha mai implementato `.neq()` — unico uso nell'intero repo. Stessa classe di difetto già vista per `.gte()` (msg `5cc2fba8`, stesso file, sessione precedente): la sessione #147 che ha costruito `pending_wakes` aveva esteso il **fake DB dei test** (`tests/wi.test.ts`) con `is`/`not`/`neq`, ma non lo shim reale — mock e produzione sono divergiuti, il verde dei test non l'ha mai coperto perché la suite non esercita `PgQuery` reale per questo percorso.
+
+**Fix.** `neq(col, val)` aggiunto a `PgQuery` (metodo + case SQL `<>` in `_buildWhere`). Regression test in `tests/pgshim-comparators.test.ts` (stesso file/pattern del regression test `.gte()`) che istanzia `PgQuery` vero, non il fake — chiude il gap che ha lasciato passare il difetto.
+
+**Secondo problema trovato in lettura, non solo cosmetico.** `computePendingInbox`/`computePendingWakes` in `wi.ts` giravano senza try/catch, **prima** dell'update cascata sul GTD collegato (righe ~740). Un throw sincrono in quel punto non falliva solo la risposta: interrompeva l'esecuzione prima che il GTD passasse a `done` — la cascata WI→GTD si perdeva in silenzio su qualunque eccezione lì, non solo questa. Aggiunto try/catch attorno a entrambe le chiamate (log stderr, campo omesso) — coerente col contratto "mai bloccante" che D-205/D-238 dichiarano ma non implementavano contro un'eccezione sincrona (solo contro `{error}` restituito).
+
+**Verifiche:** `tsc` pulito. Suite intera **355/355** verde (nuovo test incluso).
+
+**Decisioni prese:** nessuna nuova decisione formale — bug fix nel proprio repo, nessun impatto su tool names/signature/schema esterno.
+**Blocchi / note:** nessuno.
+**Prossima sessione:** nessun follow-on aperto: fix verificato dal codice/test, non ancora dal vivo contro un `wi_end` reale sul backend `pg` (nessun agente su quel backend disponibile in questa sessione per riprodurre end-to-end).
+
+---
+
 ## Sessione #147 — 2026-08-30 (autopilot dispatch GTD `4e25f4e4`, WI `8c070552`, D-238)
 
 **Task:** implementare il pezzo board-mcp di D-238 (ratificata 2026-08-29, mai armata finché la GTD non è stata riarmata in questa sessione): `wi_end` espone nel proprio risultato i wake pendenti dell'agente che chiude il WI, così il collaudo di §0ter smette di dipendere dalla memoria dell'agente. Pezzo gemello (reconciler consegna=ack+retry) è di it-manager (GTD `d688898a`), non toccato qui.

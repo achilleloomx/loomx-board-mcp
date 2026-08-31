@@ -2,7 +2,7 @@
 // Implements only the subset of methods used by src/tools.ts so the backend
 // can be swapped via DATABASE_URL without rewriting tool code.
 //
-// Supported: from().select/insert/update/upsert/eq/gte/lte/gt/lt/is/in/not/contains/or/order/limit/single/maybeSingle,
+// Supported: from().select/insert/update/upsert/eq/neq/gte/lte/gt/lt/is/in/not/contains/or/order/limit/single/maybeSingle,
 // and rpc(). Awaiting any chain returns { data, error } like supabase-js.
 
 import pg from "pg";
@@ -18,7 +18,7 @@ type DbResult<T> = { data: T | null; error: { message: string } | null };
 export type PgExecutor = (sql: string, params: unknown[]) => Promise<{ rows: Row[] }>;
 
 interface Filter {
-  type: "eq" | "is" | "in" | "not" | "contains" | "or" | "gte" | "lte" | "gt" | "lt";
+  type: "eq" | "neq" | "is" | "in" | "not" | "contains" | "or" | "gte" | "lte" | "gt" | "lt";
   col?: string;
   op?: string;
   val?: unknown;
@@ -119,6 +119,11 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
     return this;
   }
 
+  neq(col: string, val: unknown): this {
+    this._filters.push({ type: "neq", col, val });
+    return this;
+  }
+
   gte(col: string, val: unknown): this {
     this._filters.push({ type: "gte", col, val });
     return this;
@@ -208,6 +213,11 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
         case "eq": {
           params.push(f.val);
           clauses.push(`${ident(f.col!)} = $${params.length}`);
+          break;
+        }
+        case "neq": {
+          params.push(f.val);
+          clauses.push(`${ident(f.col!)} <> $${params.length}`);
           break;
         }
         case "gte": {
