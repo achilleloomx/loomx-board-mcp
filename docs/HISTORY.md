@@ -20,9 +20,11 @@
 
 **Documentato:** CLAUDE.md, tabella Document Model Tools, riga `doc_promote`.
 
-**Decisioni prese:** nessuna nuova decisione — colma un gap di capacità già descritto da it-manager, non una scelta di design (D-136 §5: nessun ordine di transizione inventato).
+**Secondo messaggio pendente triagiato nella stessa sessione (dba, msg `a150aef4`, alignment_issue):** il commento a `tools.ts:1223-1227` chiedeva al DBA un `UNIQUE (owner, source_ref)` per il backstop D-066 — dba ha misurato che l'87% dei gruppi in collisione su quella coppia sono capture multi-item **legittime** (titoli tutti diversi, stesso messaggio sorgente). Con l'indice attivo, il ramo `23505` di questo stesso file avrebbe ri-selezionato il PRIMO item e riportato ogni item successivo come "duplicato" — perdita muta con `ok:true`. Corretto il commento: dichiara esplicitamente di NON chiedere quell'indice, spiega perché (con riferimento al messaggio), lascia il ramo `23505` come codice morto documentato invece che una richiesta DDL pericolosa in attesa di essere eseguita da qualcun altro.
+
+**Decisioni prese:** nessuna nuova decisione — entrambi i task colmano/correggono gap già descritti da altri agenti, non scelte di design (D-136 §5: nessun ordine di transizione inventato per `doc_promote`, nessun nuovo contratto di dedup inventato per il backstop D-066).
 **Blocchi / note:** nessuno.
-**Prossima sessione:** nessun follow-on aperto da questo task. `board_ack` su `2533b2a6`, `done` a it-manager.
+**Prossima sessione:** nessun follow-on aperto da questo task. `board_ack` su `2533b2a6` e `a150aef4`, `done` a it-manager e a dba.
 
 ---
 

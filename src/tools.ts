@@ -1223,9 +1223,14 @@ export function registerTools(
 
       // D-066 race backstop: the pre-INSERT SELECT above is not atomic, so concurrent
       // gtd_add calls with the same (owner, source_ref) can both pass the check and insert.
-      // Once the DBA adds a partial UNIQUE (owner, source_ref) WHERE gtd_status <> 'trash',
-      // the losing insert returns 23505 — re-select the winner and report it as a duplicate
-      // instead of erroring. Harmless (never fires) until that index exists.
+      // dba (msg a150aef4, 2026-09-03): do NOT request a UNIQUE (owner, source_ref) index —
+      // measured 87% of (owner, source_ref) collision groups are LEGITIMATE multi-item
+      // captures (distinct titles, same source message). A unique index would make the
+      // second, third, ... legitimate item's insert return 23505, and this branch would
+      // then re-select the FIRST item and report it as "the duplicate" — silently dropping
+      // every item after the first with ok:true. This branch stays dead code (no such index
+      // exists, and none should be requested) unless a narrower key (e.g. including title)
+      // is designed and measured the same way.
       if (error?.code === "23505" && source_ref) {
         const { data: winner } = await db
           .from(GTD_TABLE)
