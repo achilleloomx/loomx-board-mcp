@@ -459,11 +459,15 @@ async function run(): Promise<void> {
       if (mode === 'commit') {
         if (item.code) {
           // Coded item: manual upsert on (project_id, code).
-          // NOTE (board-mcp fix): the DB unique index is PARTIAL
-          // (uq_doc_items_project_code … WHERE code IS NOT NULL), which does NOT
+          // NOTE (board-mcp fix): historically the DB unique index was PARTIAL
+          // (uq_doc_items_project_code … WHERE code IS NOT NULL), which did NOT
           // satisfy PostgREST `ON CONFLICT (project_id, code)` → ".upsert()"
-          // errors "no unique or exclusion constraint matching". So we do a
-          // select-then-insert/update by hand (same as board-mcp doc_item_upsert).
+          // errored "no unique or exclusion constraint matching". That index was
+          // dropped as redundant (DEL-C1, dba 2026-08-20) in favor of the
+          // non-partial `doc_items_project_code_unique` constraint that already
+          // covered the same columns — kept here as select-then-insert/update by
+          // hand anyway (same as board-mcp doc_item_upsert); harmless, no behavior
+          // change intended by this cleanup.
           const fields = {
             document_id: documentId,
             project_id: projectId,

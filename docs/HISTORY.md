@@ -4,6 +4,14 @@
 
 ---
 
+## Sessione #162 — 2026-09-03 (autopilot dispatch, igiene `uq_doc_items_project_code`, GTD `3ba4ec39`, WI `e25da77e`)
+
+**Task LOW priority, "solo a coda vuota":** GTD dba `b8f94388` (DEL-C1, indice partial `uq_doc_items_project_code` droppato 2026-08-20) censiva due riferimenti morti nel codice applicativo. Uno (`src/docs.ts`, regex `/uq_doc_items_project_code|duplicate key/i` → `/duplicate key/i`) era già stato ripulito a v0.18.0 (commit `6219357`, sessione #101) — ma questo specifico GTD non era mai stato chiuso e continuava a essere ri-evocato.
+
+**Chiuso il secondo:** `scripts/migrate-governance.ts:462-466` attribuiva ancora al presente ("the DB unique index IS PARTIAL") il motivo per cui lo script fa select-then-insert/update manuale invece di `.upsert()` — diagnosi scaduta, l'indice non esiste più. Commento riscritto al passato/corretto: l'indice partial è stato droppato (DEL-C1), il vincolo reale oggi è `doc_items_project_code_unique` (non-partial). **Nessun cambio di comportamento** (per esplicita nota dba nella migration): il workaround resta com'era, innocuo. `tests/fakeDb.ts:72` (fixture che emette il nome vecchio nell'errore mock) lasciato intatto — già censito dal dba come "nessun percorso di produzione", il match è su `duplicate key` non sul nome del constraint. `tsc --noEmit` pulito, 377/377 test verdi.
+
+---
+
 ## Sessione #161 — 2026-09-03 (autopilot dispatch, GTD `e03c14db`, WI `3722138a`)
 
 **Task:** chiudere CV-8 in REG-002 (progetto hub, `22ae4e79`) — la riga risultava ancora 🟡 "in attesa dell'implementazione" mentre board-mcp aveva già committato la forma (`872cf05`, v0.24.0, 25/08) e chiesto a loomy la chiusura. Coerente con la "Quinta lezione" già scritta nel registro stesso ("il documento si scrive una volta, la realtà continua a cambiare") — non ho chiuso per lettura del vecchio messaggio, ho riverificato dal vivo.
