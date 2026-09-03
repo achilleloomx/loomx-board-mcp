@@ -2647,7 +2647,12 @@ async function docBrokenRefs(
 
   const effectiveLimit = args.limit ?? 50;
   const { page: brokenPage, truncated } = paginate(broken, effectiveLimit);
-  const { page: abstainedPage } = paginate(abstained, effectiveLimit);
+  // CV-8 follow-up (D-203, found on live re-verification 2026-09-03): abstained
+  // was capped by the same paginate() call but its own cut was discarded — two
+  // independently-capped lists need two independent signals, same as
+  // decisions_inbox's board_truncated/gtd_truncated split. abstainedPage was
+  // silently short before this fix.
+  const { page: abstainedPage, truncated: abstainedTruncated } = paginate(abstained, effectiveLimit);
   const gap = scanned.length === 0 ? await visibilityGap(db, args.project_id, ctx.selfSlug, ctx.serviceDb) : undefined;
 
   return {
@@ -2657,7 +2662,9 @@ async function docBrokenRefs(
       count: brokenPage.length,
       items: brokenPage,
       ...(truncated ? { truncated } : {}),
-      ...(abstainedPage.length > 0 ? { abstained_items: abstainedPage } : {}),
+      ...(abstainedPage.length > 0
+        ? { abstained_items: abstainedPage, ...(abstainedTruncated ? { abstained_truncated: abstainedTruncated } : {}) }
+        : {}),
       coverage: {
         total_links_scanned: scanned.length,
         classified: classifiable.length,
