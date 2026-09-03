@@ -15,6 +15,7 @@ import { STALENESS_STATUS_FILTERS, STALENESS_CLOSE_OUTCOMES } from "./staleness.
 import { FACT_SYNC_RELATIONS, MAX_FACT_SYNC_LINKS } from "./factSync.js";
 import { ID_KINDS } from "./idResolve.js";
 import { paginate } from "./pagination.js";
+import { withStrictToolArgs } from "./strictTools.js";
 
 const TABLE = "board_messages";
 const OVERVIEW_VIEW = "board_overview";
@@ -271,9 +272,15 @@ const StatusFilterSchema = z.enum(MESSAGE_STATUSES);
 const WakePrioritySchema = z.enum(WAKE_PRIORITIES);
 
 export function registerTools(
-  server: McpServer,
+  rawServer: McpServer,
   registry: AgentRegistry
 ): void {
+  // Every `server.tool(...)` below registers with strict argument validation
+  // (see strictTools.ts): an unknown key is rejected by name instead of being
+  // silently dropped, which is what the published JSON Schema has always
+  // claimed. Wrapping here rather than at each call site keeps tools added
+  // later strict by construction.
+  const server = withStrictToolArgs(rawServer);
   const { selfCode, selfSlug, slugToCode, codeToSlug } = registry;
 
   // Dynamic agent slug validation — no hardcoded enum

@@ -14,6 +14,7 @@ import { z } from "zod";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { getSupabaseClient } from "./supabase.js";
 import { paginate } from "./pagination.js";
+import { withStrictToolArgs } from "./strictTools.js";
 
 // Tag conventions for the Achille <-> Loomy bridge.
 const TAG_CHAT = "loomx-chat";
@@ -58,9 +59,11 @@ export interface HumanToolsContext {
 }
 
 export function registerHumanTools(
-  server: McpServer,
+  rawServer: McpServer,
   ctx: HumanToolsContext
 ): void {
+  // Strict argument validation, same rationale as registerTools (strictTools.ts).
+  const server = withStrictToolArgs(rawServer);
   const { selfCode, loomyCode } = ctx;
 
   // --- fleet_status ------------------------------------------------------

@@ -4,6 +4,30 @@
 
 ---
 
+## Sessione #160 — 2026-09-03 (wake cold-start, msg forge `0b7ef2ae`, GTD `9856f4ce`, WI `3be448ee`, v0.32.0)
+
+**Task:** blocker da forge — la causa verificata dell'ISS `wi_start` aperto il 21/08 (GTD `9856f4ce`, riaperto da forge il 28/08 come `caaafa95`, mai numerato dal triage). Non un difetto di `wi_start`: la **forma di registrazione di tutti i tool**. `server.tool(name, description, rawShape, cb)` fa costruire all'SDK uno `z.object(shape)` **non-strict**, e il default di zod è scartare in silenzio le chiavi sconosciute — mentre il JSON Schema pubblicato ai client dichiara `"additionalProperties": false`. Schema e runtime dicevano due cose diverse.
+
+**Riprodotto, non dedotto** (`tests/verify-strict-args.ts`, transport reale dell'SDK): schema pubblicato con `additionalProperties:false`, chiamata con `gtd_id` al posto di `gtd_item_id` → `isError:false`, handler riceve `{intent:"x"}`. La chiave sparisce **prima** di arrivare all'handler: nessun wrapper sulla callback avrebbe potuto vederla — è il motivo per cui l'opzione 2 di forge («wrapper che valida gli args prima di passarli all'handler») non funziona nella forma proposta, e il punto di innesto deve essere la **registrazione**.
+
+**Perimetro più largo di quanto segnalato:** forge contava 67 `server.tool(` in `tools.ts`; `src/humanTools.ts` (bridge LoomX Chat, transport remoto) ne registra **altri 5**. Totale **72**. Un fix fatto riscrivendo i call site segnalati li avrebbe mancati — ragione concreta, non stilistica, per irrigidire il punto di registrazione.
+
+**Implementato** `src/strictTools.ts` — `withStrictToolArgs(server)`: un Proxy tipato `McpServer` che intercetta `.tool()` e ri-registra via `registerTool` con `z.object(shape).strict()`. Applicato dentro `registerTools` e `registerHumanTools`, quindi **zero diff sui 72 call site** e un tool aggiunto domani nasce strict per costruzione invece di riaprire il difetto.
+
+**Il contratto pubblicato NON cambia** — misurato, non affermato (`tests/verify-strict-contract.ts`, confronto fra il build pre-fix ancora in `dist/` e il sorgente corretto): 66 schemi su 67 **identici byte per byte**. L'unico delta è `home_grocery_categories`, l'unica registrazione dichiarata con `{}`: pubblicava uno schema senza alcuna clausola `additionalProperties` e accettava qualunque chiave; ora dichiara `additionalProperties:false`. Verificato prima di toccarlo che irrigidirlo non regredisce nulla: la chiamata senza `arguments` era **già** un errore prima del fix, `arguments:{}` passava e continua a passare — l'unico cambiamento è che una chiave ignota viene nominata invece che accettata.
+
+**Cosa si vede adesso**, sullo stesso `wi_start` e sulla stessa chiamata: build pre-fix → `Failed to auto-create GTD item` (era entrato nel **ramo auto-create**, fino al DB — il difetto esatto che produce il GTD duplicato); build corretto → `-32602 … "Unrecognized key(s) in object: 'gtd_id'"`, fermato alla porta, DB mai toccato. L'errore **nomina la chiave**, che è ciò che rende il refuso auto-correggibile da chi chiama.
+
+**Gate di regressione** (`tests/strict-tool-args.test.ts`, stesso spirito di capability-parity → build rossa): registra l'intera superficie — `registerTools` **con `HOME_FAMILY_ID`/`HOME_USER_ID` settati**, così gli 8 `home_*` condizionali non restano fuori dalla misura, più `registerHumanTools` — e verifica che ognuno rifiuti una chiave ignota nominandola. **72/72 verificati.** Senza le env dei condizionali il gate girava su 59 e sarebbe passato lasciando fuori 13 tool: esattamente la forma di cecità che il gate esiste per impedire.
+
+**Verifiche.** `tsc --noEmit` pulito. `npm test` **376/376** verdi (373 preesistenti + 3 nuovi). `npm run build` pulito, gate ri-eseguito sul costruito.
+
+**Incidente di sessione — disco host pieno, due file troncati e ripristinati.** A metà stesura della documentazione il disco di root era al **99%** (984M liberi su 75G): uno script python che riscriveva `package.json` e `docs/HISTORY.md` li ha aperti in scrittura (troncandoli) e la scrittura è fallita per `ENOSPC` → entrambi a **0 byte**. Nessuna perdita: erano committati, ripristinati con `git checkout --` (package.json 644B, HISTORY.md 415KB) e le modifiche riapplicate con edit non-troncanti. Il sorgente del fix non è stato toccato (scritto e verificato prima). Spazio liberato con `npm cache clean --force` (~2.4G, cache rigenerabile) → 3.3G liberi, **ma la causa resta**: il disco è pieno al 96% e va gestito a livello macchina, non da qui. Segnalato a it-manager. Lezione operativa: su questo host una riscrittura in-place non è sicura — usare scrittura atomica (temp + move) o edit che non troncano.
+
+**Nota di rollout (G4):** il fix vale per una finestra solo dal suo prossimo avvio. Le finestre già aperte restano sul build precedente e continuano a scartare in silenzio finché non riavviano — non ho forzato restart di flotta (pattern sessioni #63/#64/#68: lo decidono Loomy/it-manager).
+
+---
+
 ## Sessione #159 — 2026-09-03 (wake cold-start, GTD `140839f3`, WI `5f844e60`, v0.31.0)
 
 **Task:** cold-wake `normal` da it-manager (msg `2533b2a6`) — ISS-046: `documents.status` esiste (CHECK `draft|in_review|approved|active|superseded|archived|deprecated`) ma nessun tool lo scrive. Verificato via grep, confermato: zero `.update()` sulla colonna in tutto `src/`, `doc_publish` muove solo `version`/il ledger `gov.doc_versions`.
