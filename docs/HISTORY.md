@@ -4,6 +4,22 @@
 
 ---
 
+## Sessione #161 — 2026-09-03 (autopilot dispatch, GTD `e03c14db`, WI `3722138a`)
+
+**Task:** chiudere CV-8 in REG-002 (progetto hub, `22ae4e79`) — la riga risultava ancora 🟡 "in attesa dell'implementazione" mentre board-mcp aveva già committato la forma (`872cf05`, v0.24.0, 25/08) e chiesto a loomy la chiusura. Coerente con la "Quinta lezione" già scritta nel registro stesso ("il documento si scrive una volta, la realtà continua a cambiare") — non ho chiuso per lettura del vecchio messaggio, ho riverificato dal vivo.
+
+**Riverifica dal vivo:** letti riga per riga tutti e 16 i call-site di `paginate()` in `src/` (grep + lettura diretta, non fidandosi del commit message). Confermati corretti i 12 tool dichiarati (`board_inbox`, `board_overview`, `gtd_inbox`, `gtd_query` ×2 rami, `gtd_overview`, `project_list`, `home_grocery_list`, `home_school_menu_read`, `wi_query`, `doc_query`, `loomy_replies`, `decisions_inbox` ×2 liste) — `truncated`/`*_truncated` propaga fino al `return` in ognuno. `872cf05` confermato ancestor di HEAD (mai revertito). Suite 377/377 verde, `tsc --noEmit` pulito.
+
+**Trovato durante la riverifica, fuori dal perimetro dei 12 originari:** `doc_query(traceability='broken_refs')` — ramo aggiunto dopo, v0.27.0 — pagina anche `abstained_items` con lo stesso `paginate()` ma scartava il suo segnale di troncamento (solo `items`/`broken` lo esponeva). Stessa classe di difetto che CV-8 esiste per eliminare, non ereditata dal codice scritto dopo CV-8. Fix minimale (`src/docs.ts`, commit `a94fd7c`): aggiunto `abstained_truncated`, stesso pattern già corretto di `decisions_inbox` (`board_truncated`/`gtd_truncated` per due liste indipendenti). 377/377 verdi, `tsc` pulito, `npm run build` pulito.
+
+**Segnalato al tracker** (D-192, skill `/report-issue`): GTD `e9871ab6` owner=board-mcp, `waiting_on=it-manager` (ramo 5b — capture cross-owner riservato a loomy, ISS-003), `[ISS-???]` in attesa di numerazione (ramo B — numerazione cross-owner riservata alle viste di it-manager, ISS-008). `board_send` di routing inviato a it-manager. Il fix è già live nel sorgente: la segnalazione è per traccia, non per sbloccare un workaround.
+
+**REG-002 aggiornata** (`doc_item_upsert`, rilettura D-132 confermata): CV-8 → ✅ CHIUSA, con la cronologia della riverifica e la menzione esplicita del gap trovato-e-corretto (non assorbito in silenzio). Aggiunta una "Sesta lezione" nel blocco finale del registro, sullo stesso registro che chiudo: chiudere per lettura del commit message è lo stesso errore in forma diversa di chiudere per lettura del documento invece che della realtà.
+
+**Collaterale:** trovato in inbox un `task` pending di loomy — GO restart flotta per propagare v0.32.0 (strict args, sessione #160). Ack'd; non eseguito in questa WI (perimetro diverso) — parcheggiato in GTD `a51280ac` (planned, non armato), che ora include anche `a94fd7c` nello stesso dist da propagare.
+
+---
+
 ## Sessione #160 — 2026-09-03 (wake cold-start, msg forge `0b7ef2ae`, GTD `9856f4ce`, WI `3be448ee`, v0.32.0)
 
 **Task:** blocker da forge — la causa verificata dell'ISS `wi_start` aperto il 21/08 (GTD `9856f4ce`, riaperto da forge il 28/08 come `caaafa95`, mai numerato dal triage). Non un difetto di `wi_start`: la **forma di registrazione di tutti i tool**. `server.tool(name, description, rawShape, cb)` fa costruire all'SDK uno `z.object(shape)` **non-strict**, e il default di zod è scartare in silenzio le chiavi sconosciute — mentre il JSON Schema pubblicato ai client dichiara `"additionalProperties": false`. Schema e runtime dicevano due cose diverse.
