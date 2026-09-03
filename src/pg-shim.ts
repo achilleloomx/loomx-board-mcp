@@ -267,6 +267,10 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
           } else if (f.op === "is" && f.val === null) {
             // "is" op: not(col, "is", null) → col IS NOT NULL
             clauses.push(`${ident(f.col!)} IS NOT NULL`);
+          } else if (f.op === "eq") {
+            // "eq" op: not(col, "eq", val) → col <> val
+            params.push(f.val);
+            clauses.push(`${ident(f.col!)} <> $${params.length}`);
           } else {
             throw new Error(`Unsupported .not() form: ${f.op}`);
           }
