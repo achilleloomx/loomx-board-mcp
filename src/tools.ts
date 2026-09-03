@@ -5,6 +5,7 @@ import { MESSAGE_TYPES, MESSAGE_STATUSES, GTD_STATUSES, GTD_PRIORITIES, MEAL_TYP
 import type { AgentRegistry, MessageStatus } from "./types.js";
 import {
   DB_DOCUMENT_TYPES,
+  DB_DOCUMENT_STATUSES,
   DB_ITEM_TYPES,
   DB_DOC_ITEM_LINK_TYPES,
 } from "./docTypes.js";
@@ -3639,6 +3640,28 @@ export function registerTools(
     async (args) => {
       const { docRename } = await import("./docs.js");
       return runDocTool((db) => docRename(db, args, docCtx));
+    }
+  );
+
+  // --- doc_promote ---
+  server.tool(
+    "doc_promote",
+    `Promote a document's lifecycle status (documents.status) — the verb ISS-046 found missing (it-manager msg ` +
+      `2533b2a6: the column and its CHECK exist, zero .update() on it anywhere in src/; doc_publish bumps only ` +
+      `version/the ledger). STATUS ONLY: title/visibility/owner/version are different acts with different ` +
+      `legitimations — see doc_rename. Legitimation: document owner or loomy. No transition graph enforced (D-136 ` +
+      `§5) — every document_type already allows the full enum, so any status is reachable from any other; ordering ` +
+      `rules belong to whoever owns that norm. Re-reads the row before answering ok (D-132): under doc_rw a denied ` +
+      `write updates 0 rows silently. Promoting to the same status is a no-op, never an error. ` +
+      `Allowed values: ${DB_DOCUMENT_STATUSES.join("|")}. ` +
+      `Example: doc_promote({document_id:"<uuid>", new_status:"active"}).`,
+    {
+      document_id: z.string().uuid().describe("Document to promote"),
+      new_status: z.string().describe(`New status: ${DB_DOCUMENT_STATUSES.join("|")}`),
+    },
+    async (args) => {
+      const { docPromote } = await import("./docs.js");
+      return runDocTool((db) => docPromote(db, args, docCtx));
     }
   );
 

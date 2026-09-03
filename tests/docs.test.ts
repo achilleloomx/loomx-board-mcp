@@ -18,6 +18,7 @@ import {
   docSupersede,
   docQuery,
   docItemTypes,
+  docPromote,
 } from "../src/docs.ts";
 import { type Row, type Store, uuid, makeDb, makeDbWithFailingRelink, ctx, PROJ_A, PROJ_B, seedProjects } from "./fakeDb.ts";
 
@@ -1690,4 +1691,116 @@ test("doc_query broken_refs: a CROSS-PROJECT link onto a retired row is scored, 
   assert.equal(d.items[0].to.project_id, PROJ_B);
   assert.equal(d.coverage.scanned_by_scope.cross_project_out, 1);
   assert.ok(d.notes.some((n: string) => /cross_project_in is structurally INCOMPLETE/.test(n)), "the inbound floor is declared, never passed off as a total");
+});
+
+// ---------------------------------------------------------------------------
+// doc_promote — ISS-046, the verb that did not exist for documents.status
+// (it-manager msg 2533b2a6, 2026-09-03). Same shape as doc_rename's tests.
+// ---------------------------------------------------------------------------
+
+test("doc_promote: promotes status and returns old/new, re-reads before answering ok", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req A" }, ctx);
+  assert.ok(doc.ok);
+  const id = (doc as any).data.document_id;
+
+  const res = await docPromote(db, { document_id: id, new_status: "active" }, ctx);
+  assert.equal(res.ok, true, `promote ok: ${JSON.stringify(res)}`);
+  if (!res.ok) return;
+  assert.equal(res.data.old_status, "draft");
+  assert.equal(res.data.new_status, "active");
+  assert.equal(store.documents.find((d) => d.id === id)!.status, "active");
+});
+
+test("doc_promote: an invalid status is rejected before any write", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req A" }, ctx);
+  const id = (doc as any).data.document_id;
+
+  const res = await docPromote(db, { document_id: id, new_status: "not-a-real-status" }, ctx);
+  assert.equal(res.ok, false);
+  if (res.ok) return;
+  assert.match(res.error, /Invalid new_status/);
+  assert.equal(store.documents.find((d) => d.id === id)!.status, "draft", "rejected status never touched the row");
+});
+
+test("doc_promote: a non-owner is refused", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Theirs", owner: "loomy" }, ctx);
+  const id = (doc as any).data.document_id;
+
+  const res = await docPromote(db, { document_id: id, new_status: "active" }, ctx);
+  assert.equal(res.ok, false);
+  if (res.ok) return;
+  assert.match(res.error, /Not legitimated/);
+  assert.equal(store.documents.find((d) => d.id === id)!.status, "draft");
+});
+
+test("doc_promote: loomy can promote across owners", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Theirs", owner: "someone-else" }, ctx);
+  const id = (doc as any).data.document_id;
+
+  const res = await docPromote(db, { document_id: id, new_status: "approved" }, { selfSlug: "loomy", isLoomy: true });
+  assert.equal(res.ok, true, `promote ok: ${JSON.stringify(res)}`);
+  assert.equal(store.documents.find((d) => d.id === id)!.status, "approved");
+});
+
+test("doc_promote: promoting to the same status is a no-op, not an error", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req A", status: "in_review" }, ctx);
+  const id = (doc as any).data.document_id;
+
+  const res = await docPromote(db, { document_id: id, new_status: "in_review" }, ctx);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.equal(res.data.old_status, res.data.new_status);
+});
+
+test("doc_promote: unreadable document_id fails with a D-167-aware message", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+
+  const res = await docPromote(db, { document_id: uuid(), new_status: "active" }, ctx);
+  assert.equal(res.ok, false);
+  if (res.ok) return;
+  assert.match(res.error, /not readable/);
+});
+
+test("doc_promote: a write that silently affects 0 rows fails LOUD (D-132 read-back)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req A" }, ctx);
+  const id = (doc as any).data.document_id;
+
+  // A DB that accepts the UPDATE, raises nothing, but the row that actually
+  // lands still has the OLD status — the RLS-denial-affects-0-rows-silently
+  // shape under doc_rw (D-132).
+  const swallowing = {
+    from: (table: string) => {
+      const q = (db as any).from(table);
+      if (table !== "documents") return q;
+      const origUpdate = q.update.bind(q);
+      q.update = (_data: any) => origUpdate({});
+      return q;
+    },
+    __docRw: true,
+  } as unknown as SupabaseClient;
+
+  const res = await docPromote(swallowing, { document_id: id, new_status: "active" }, ctx);
+  assert.equal(res.ok, false, "must not answer ok:true on a write that landed differently than sent");
+  assert.match((res as any).error, /still reads/);
+  assert.equal(store.documents.find((d) => d.id === id)!.status, "draft", "swallowed update never actually changed the row");
 });

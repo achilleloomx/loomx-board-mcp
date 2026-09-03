@@ -4,6 +4,28 @@
 
 ---
 
+## Sessione #159 — 2026-09-03 (wake cold-start, GTD `140839f3`, WI `5f844e60`, v0.31.0)
+
+**Task:** cold-wake `normal` da it-manager (msg `2533b2a6`) — ISS-046: `documents.status` esiste (CHECK `draft|in_review|approved|active|superseded|archived|deprecated`) ma nessun tool lo scrive. Verificato via grep, confermato: zero `.update()` sulla colonna in tutto `src/`, `doc_publish` muove solo `version`/il ledger `gov.doc_versions`.
+
+**Trovato all'ingresso:** working tree con 8 file modificati + 3 script `verify-*.ts` non tracciati, tutti relativi al lavoro già completato e documentato dalle sessioni `#153`-`#158` (D-132 esteso a `doc_create`/`doc_supersede`/`doc_link`, fix `visibilityGap` D-167, owner lowercasing D-089/224b3886) ma mai committati — nessun WI attivo (`wi_status` → `null`), quindi nessuna sessione precedente lo aveva lasciato aperto per errore. `tsc`/`npm test` puliti (366/366) su quello stato: committato come checkpoint separato (`42f7b46`) prima di aprire il WI di questo task, per non mescolare backlog altrui col diff di ISS-046.
+
+**Implementato `doc_promote`** (`src/docs.ts`, pattern identico a `doc_rename`): STATUS ONLY, legittimazione owner/loomy, rilettura-e-confronto D-132, no-op su stesso valore, nessun grafo di transizione imposto (D-136 §5 — `DOCUMENT_TYPE_REGISTRY` già concede l'intero enum a ogni `document_type`, quindi il tool rispecchia quello). Registrato in `tools.ts` subito dopo `doc_rename`.
+
+**Misurato dal vivo prima di dichiarare chiuso** (`tests/verify-doc-promote.ts`, transazione annullata): la sessione `#105` aveva REVOCATO l'UPDATE diretto su `documents.version` a `doc_rw` (solo `gov.doc_publish()` SECURITY DEFINER può scriverlo) — un revoke identico su `status` era un'ipotesi concreta, non teorica, da non assumere. Misurato: **nessun muro identico** — l'UPDATE diretto su `status` atterra sotto `doc_rw`, due promozioni consecutive nella stessa transazione confermate (draft→in_review→approved), 6/6 controlli verdi, rollback pulito.
+
+**Test:** 7 nuovi in `tests/docs.test.ts` (happy path, status invalido rifiutato pre-scrittura, non-owner rifiutato, loomy cross-owner, no-op su stesso stato, `document_id` illeggibile con messaggio D-167-aware, scrittura silenziosamente "swallowed" intercettata da D-132) — collocati in `docs.test.ts` (non in `structure.test.ts`, dove `doc_rename` finì per una collocazione imprecisa di una sessione precedente).
+
+**Verifiche.** `tsc --noEmit` pulito. `npm test` 373/373 verdi (366 preesistenti + 7 nuovi). `npm run build` pulito.
+
+**Documentato:** CLAUDE.md, tabella Document Model Tools, riga `doc_promote`.
+
+**Decisioni prese:** nessuna nuova decisione — colma un gap di capacità già descritto da it-manager, non una scelta di design (D-136 §5: nessun ordine di transizione inventato).
+**Blocchi / note:** nessuno.
+**Prossima sessione:** nessun follow-on aperto da questo task. `board_ack` su `2533b2a6`, `done` a it-manager.
+
+---
+
 ## Sessione #158 — 2026-09-03 (autopilot dispatch, GTD `b4e07ba6`, WI `7b8c289f`)
 
 **Task:** follow-on di `#153` (GTD `8b97b1ca`, D-132 armato su `doc_create`/`doc_supersede`) — estendere la rilettura-e-confronto ai 4 INSERT di `doc_link` (`doc_item_gtd_links`, `doc_item_wi_links`, `doc_item_links` intra-progetto, `doc_item_xproject_links` cross-progetto), oggi scoperti. Il GTD stesso vietava di armare a memoria: la migration dba `20260816110000` ha tolto UPDATE da `doc_rw` su quelle 4 tabelle (msg `51ae3289`, verificato in `#154`), e andava misurato se una SELECT di rilettura post-INSERT le vede ancora, prima di riusare `diffAgainstRow`.

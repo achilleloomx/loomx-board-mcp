@@ -16,6 +16,7 @@ import {
   DOC_ITEM_TYPE_REGISTRY,
   DOCUMENT_TYPE_REGISTRY,
   LINK_TYPE_REGISTRY,
+  DB_DOCUMENT_STATUSES,
   validateAttrs,
   itemTypeAllowedForDocumentType,
   allowedStatusesForItemType,
@@ -359,6 +360,96 @@ export async function docRename(
       `and produces two titles that read as the same one. Not enforced here: this server does not own that norm.`;
   }
   return { ok: true, data: result };
+}
+
+// ---------------------------------------------------------------------------
+// doc_promote — the verb ISS-046 found missing (it-manager msg 2533b2a6,
+// 2026-09-03): documents.status exists (CHECK — DB_DOCUMENT_STATUSES below)
+// but grep found zero .update() on the column anywhere in src/. doc_publish
+// bumps version and appends to the gov.doc_versions ledger; nothing moves the
+// header status. A document could stay status='draft' forever while its
+// content, and every SDES/UAT that cites it, had long since gone active.
+//
+// STATUS ONLY — same split as doc_rename (title-only) and doc_publish
+// (version/ledger-only): each field is a different act with a different
+// legitimation, and one verb that writes whatever it's handed reopens the
+// patch-semantics defect this server already paid for once (v0.16.3).
+//
+// No transition graph enforced (D-136 §5): DOCUMENT_TYPE_REGISTRY already
+// grants every document_type the full DB_DOCUMENT_STATUSES set (docTypes.ts,
+// mirrored from the DB CHECK), so this tool matches that — any value in the
+// enum is reachable from any other. An ordering rule (e.g. draft can't skip
+// straight to archived) belongs to whoever owns that norm, not to this server.
+// ---------------------------------------------------------------------------
+
+export interface DocPromoteArgs {
+  document_id: string;
+  new_status: string;
+}
+
+export interface DocPromoteResult {
+  document_id: string;
+  old_status: string;
+  new_status: string;
+}
+
+export async function docPromote(
+  db: SupabaseClient,
+  args: DocPromoteArgs,
+  ctx: DocContext
+): Promise<DocResult<DocPromoteResult>> {
+  if (!(DB_DOCUMENT_STATUSES as readonly string[]).includes(args.new_status)) {
+    return err(`Invalid new_status '${args.new_status}'. Allowed: ${DB_DOCUMENT_STATUSES.join(", ")}.`);
+  }
+
+  const { data: before, error: beforeErr } = await db
+    .from(DOCUMENTS)
+    .select("id, project_id, owner, status, document_type")
+    .eq("id", args.document_id)
+    .maybeSingle();
+  if (beforeErr) return err(`Failed to load document: ${beforeErr.message}`);
+  if (!before) {
+    return err(`document_id '${args.document_id}' is not readable by '${ctx.selfSlug}' (not found, or hidden by RLS — D-167).`);
+  }
+  const doc = before as { id: string; project_id: string; owner: string | null; status: string; document_type: string };
+
+  // Same legitimation as doc_rename/doc_publish: a status change is how the
+  // whole fleet reads a document's lifecycle stage, so it's the owner's act
+  // (or loomy's), not a member's.
+  if (!ctx.isLoomy && doc.owner !== ctx.selfSlug) {
+    return err(
+      `Not legitimated to promote document '${doc.id}': you are not its owner ('${doc.owner ?? "none"}'), and only loomy ` +
+      `can promote cross-agent. Ask its owner, or ask loomy.`
+    );
+  }
+
+  // Captured BEFORE the update, by value — same trap doc_rename documents for
+  // `oldTitle`: some DB clients hand back live row objects, so reading
+  // `doc.status` after the write would report the NEW status as the old one,
+  // a receipt that proves nothing.
+  const oldStatus = String(doc.status);
+
+  if (oldStatus === args.new_status) {
+    return { ok: true, data: { document_id: doc.id, old_status: oldStatus, new_status: args.new_status } };
+  }
+
+  const { error: updErr } = await db.from(DOCUMENTS).update({ status: args.new_status }).eq("id", doc.id).select("id").maybeSingle();
+  if (updErr) return err(`Failed to promote document: ${updErr.message}`);
+
+  // D-132: an RLS denial under doc_rw affects 0 rows silently — a write that
+  // "succeeded" is not a write that landed.
+  const { data: after, error: afterErr } = await db.from(DOCUMENTS).select("id, status").eq("id", doc.id).maybeSingle();
+  if (afterErr || !after) {
+    return err(`Promote reported success but the document could not be re-read: ${afterErr?.message ?? "row not found"}. Treat as UNCONFIRMED.`);
+  }
+  if ((after as { status: string }).status !== args.new_status) {
+    return err(
+      `Write NOT applied to document '${doc.id}': status still reads '${(after as { status: string }).status}'. ` +
+      `Treat as UNCONFIRMED (0 rows updated is what an RLS denial looks like here).`
+    );
+  }
+
+  return { ok: true, data: { document_id: doc.id, old_status: oldStatus, new_status: args.new_status } };
 }
 
 // ---------------------------------------------------------------------------
