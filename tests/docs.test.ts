@@ -52,6 +52,32 @@ test("doc_create → doc_item_upsert returns a UUID, idempotent on (project_id, 
   assert.equal(store.doc_items.filter((r) => r.code === "REQ-001").length, 1, "no duplicate");
 });
 
+test("doc_create: an insert that lands with different values than sent fails LOUD (D-132 read-back, GTD 8b97b1ca)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+
+  // A DB that accepts the INSERT, raises nothing, but the row that actually lands
+  // has a different title than what was sent — under doc_rw's no-RETURNING mode
+  // the "data" the initial insert().select() hands back is synthesized
+  // client-side, not proof of what the DB actually stored.
+  const swallowing = {
+    from: (table: string) => {
+      const q = (db as any).from(table);
+      if (table !== "documents") return q;
+      const origInsert = q.insert.bind(q);
+      q.insert = (data: any) => origInsert({ ...data, title: "SWALLOWED" });
+      return q;
+    },
+    __docRw: true,
+  } as unknown as SupabaseClient;
+
+  const doc = await docCreate(swallowing, { project_id: PROJ_A, document_type: "req", title: "Req — real title" }, ctx);
+  assert.equal(doc.ok, false, "must not answer ok:true on a row that landed differently than sent");
+  assert.match((doc as any).error, /does not match what was sent/);
+  assert.match((doc as any).error, /title/);
+});
+
 // ---------------------------------------------------------------------------
 // GTD 0cdffc2b — omitted fields are PRESERVED, destructive effects are REPORTED.
 // The incident: a status-only upsert during a ~240-item ratification run wiped
@@ -396,6 +422,118 @@ test("same-project link still routes to doc_item_links (unchanged)", async () =>
   assert.equal(store.doc_item_xproject_links.length, 0);
 });
 
+// ---------------------------------------------------------------------------
+// GTD b4e07ba6 — D-132 read-back extended to doc_link's 4 INSERT paths
+// (doc_item_gtd_links, doc_item_wi_links, doc_item_links, doc_item_xproject_links).
+// Measured live first (tests/verify-doc-link-reread.ts) that a follow-up SELECT
+// on each table sees the just-inserted row under doc_rw before arming this.
+// ---------------------------------------------------------------------------
+
+test("doc_link target_kind='gtd': happy path ok, D-132 catches a swallowed insert", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const a = await docItemUpsert(db, { project_id: PROJ_A, document_id: (doc as any).data.document_id, item_type: "requirement", code: "REQ-001" }, ctx);
+  const gtdId = uuid();
+
+  const link = await docLink(db, { target_kind: "gtd", from_id: (a as any).data.item_id, to_id: gtdId }, ctx);
+  assert.ok(link.ok, `gtd link ok: ${JSON.stringify(link)}`);
+  assert.equal((link as any).data.target_kind, "gtd");
+  assert.equal(store.doc_item_gtd_links.length, 1);
+
+  const swallowing = {
+    from: (table: string) => {
+      const q = (db as any).from(table);
+      if (table !== "doc_item_gtd_links") return q;
+      const origInsert = q.insert.bind(q);
+      q.insert = (data: any) => origInsert({ ...data, gtd_item_id: uuid() }); // lands with a DIFFERENT gtd_item_id than sent
+      return q;
+    },
+    __docRw: true,
+  } as unknown as SupabaseClient;
+  const b = await docItemUpsert(db, { project_id: PROJ_A, document_id: (doc as any).data.document_id, item_type: "requirement", code: "REQ-002" }, ctx);
+  const swallowed = await docLink(swallowing, { target_kind: "gtd", from_id: (b as any).data.item_id, to_id: uuid() }, ctx);
+  assert.equal(swallowed.ok, false, "must not answer ok:true on a link that landed differently than sent");
+  assert.match((swallowed as any).error, /does not match what was sent/);
+});
+
+test("doc_link target_kind='wi': happy path ok, D-132 catches a swallowed insert", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const a = await docItemUpsert(db, { project_id: PROJ_A, document_id: (doc as any).data.document_id, item_type: "requirement", code: "REQ-001" }, ctx);
+  const wiId = uuid();
+
+  const link = await docLink(db, { target_kind: "wi", from_id: (a as any).data.item_id, to_id: wiId }, ctx);
+  assert.ok(link.ok, `wi link ok: ${JSON.stringify(link)}`);
+  assert.equal((link as any).data.target_kind, "wi");
+  assert.equal(store.doc_item_wi_links.length, 1);
+
+  const swallowing = {
+    from: (table: string) => {
+      const q = (db as any).from(table);
+      if (table !== "doc_item_wi_links") return q;
+      const origInsert = q.insert.bind(q);
+      q.insert = (data: any) => origInsert({ ...data, wi_id: uuid() }); // lands with a DIFFERENT wi_id than sent
+      return q;
+    },
+    __docRw: true,
+  } as unknown as SupabaseClient;
+  const b = await docItemUpsert(db, { project_id: PROJ_A, document_id: (doc as any).data.document_id, item_type: "requirement", code: "REQ-002" }, ctx);
+  const swallowed = await docLink(swallowing, { target_kind: "wi", from_id: (b as any).data.item_id, to_id: uuid() }, ctx);
+  assert.equal(swallowed.ok, false, "must not answer ok:true on a link that landed differently than sent");
+  assert.match((swallowed as any).error, /does not match what was sent/);
+});
+
+test("doc_link intra-project (doc_item_links): D-132 catches a swallowed insert (relation_type landed differently than sent)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const a = await docItemUpsert(db, { project_id: PROJ_A, document_id: (doc as any).data.document_id, item_type: "requirement", code: "REQ-001" }, ctx);
+  const b = await docItemUpsert(db, { project_id: PROJ_A, document_id: (doc as any).data.document_id, item_type: "requirement", code: "REQ-002" }, ctx);
+
+  const swallowing = {
+    from: (table: string) => {
+      const q = (db as any).from(table);
+      if (table !== "doc_item_links") return q;
+      const origInsert = q.insert.bind(q);
+      q.insert = (data: any) => origInsert({ ...data, relation_type: "relates_to" }); // sent 'amends', lands as 'relates_to'
+      return q;
+    },
+    __docRw: true,
+  } as unknown as SupabaseClient;
+  const swallowed = await docLink(swallowing, { target_kind: "doc", from_id: (a as any).data.item_id, to_id: (b as any).data.item_id, relation_type: "amends" }, ctx);
+  assert.equal(swallowed.ok, false, "must not answer ok:true on a link that landed differently than sent");
+  assert.match((swallowed as any).error, /does not match what was sent/);
+});
+
+test("doc_link cross-project (doc_item_xproject_links): D-132 catches a swallowed insert", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docA = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req A" }, ctx);
+  const docB = await docCreate(db, { project_id: PROJ_B, document_type: "req", title: "Req B" }, ctx);
+  const a = await docItemUpsert(db, { project_id: PROJ_A, document_id: (docA as any).data.document_id, item_type: "requirement", code: "REQ-001" }, ctx);
+  const b = await docItemUpsert(db, { project_id: PROJ_B, document_id: (docB as any).data.document_id, item_type: "requirement", code: "REQ-001" }, ctx);
+
+  const swallowing = {
+    from: (table: string) => {
+      const q = (db as any).from(table);
+      if (table !== "doc_item_xproject_links") return q;
+      const origInsert = q.insert.bind(q);
+      q.insert = (data: any) => origInsert({ ...data, relation_type: "relates_to" }); // sent 'references', lands as 'relates_to'
+      return q;
+    },
+    __docRw: true,
+  } as unknown as SupabaseClient;
+  const swallowed = await docLink(swallowing, { target_kind: "doc", from_id: (a as any).data.item_id, to_id: (b as any).data.item_id, relation_type: "references" }, ctx);
+  assert.equal(swallowed.ok, false, "must not answer ok:true on a link that landed differently than sent");
+  assert.match((swallowed as any).error, /does not match what was sent/);
+});
+
 test("doc_supersede: old immutable + new row + supersedes edge, code carried", async () => {
   const store: Store = {};
   seedProjects(store);
@@ -561,6 +699,113 @@ test("doc_supersede: refuses (not ok:true) when db is not a DocRwDb — no silen
   const sup = await docSupersede(db, { old_item_id: oldId, body: "v2" }, ctx);
   assert.equal(sup.ok, false, "must refuse, not silently skip the link transfer");
   assert.match((sup as any).error, /not a DocRwDb/i);
+});
+
+test("doc_supersede: detach-code write that silently affects 0 rows fails LOUD before the new row is created (D-132, GTD 8b97b1ca)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const real = makeDb(store) as any;
+
+  // A DB that accepts the code-detach UPDATE, raises nothing, and changes
+  // nothing — the exact shape of an RLS denial under doc_rw (no-RETURNING mode).
+  // Only the detach call (data.code === null) is swallowed; every other
+  // doc_items UPDATE in the same flow passes through untouched.
+  const db = {
+    ...real,
+    from: (table: string) => {
+      const q = real.from(table);
+      if (table !== "doc_items") return q;
+      const origUpdate = q.update.bind(q);
+      q.update = (data: any) => (data && data.code === null ? origUpdate({}) : origUpdate(data));
+      return q;
+    },
+  } as unknown as SupabaseClient;
+
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "sdes", title: "Sdes" }, ctx);
+  const up = await docItemUpsert(db, { project_id: PROJ_A, document_id: (doc as any).data.document_id, item_type: "sdes_entry", code: "SDES-050", body: "v1" }, ctx);
+  const oldId = (up as any).data.item_id;
+
+  const sup = await docSupersede(db, { old_item_id: oldId, body: "v2" }, ctx);
+  assert.equal(sup.ok, false, "must not answer ok:true when the detach did not land");
+  assert.match((sup as any).error, /Detach NOT applied/);
+
+  const oldRow = store.doc_items.find((r) => r.id === oldId);
+  assert.equal(oldRow!.code, "SDES-050", "old row untouched — code still attached");
+  assert.equal(store.doc_items.length, 1, "no new version was inserted after the failed detach");
+});
+
+test("doc_supersede: new-version insert that lands with different values than sent fails LOUD (D-132, GTD 8b97b1ca)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const real = makeDb(store) as any;
+
+  // Seed on the REAL (unwrapped) db first — the swallow below must only hit
+  // docSupersede's own insert, not docItemUpsert's (which has its own D-132
+  // read-back and would otherwise fail the seed setup itself).
+  const doc = await docCreate(real, { project_id: PROJ_A, document_type: "sdes", title: "Sdes" }, ctx);
+  const up = await docItemUpsert(real, { project_id: PROJ_A, document_id: (doc as any).data.document_id, item_type: "sdes_entry", code: "SDES-052", body: "v1" }, ctx);
+  const oldId = (up as any).data.item_id;
+
+  // A DB that accepts the new-row INSERT, raises nothing, but the row that
+  // actually lands has a different body than what was sent — same class as
+  // docItemUpsert's own insert path (no-RETURNING mode synthesizes the client
+  // side result, which is not proof of what the DB actually stored).
+  const db = {
+    ...real,
+    from: (table: string) => {
+      const q = real.from(table);
+      if (table !== "doc_items") return q;
+      const origInsert = q.insert.bind(q);
+      q.insert = (data: any) => origInsert({ ...data, body: "SWALLOWED" });
+      return q;
+    },
+  } as unknown as SupabaseClient;
+
+  const sup = await docSupersede(db, { old_item_id: oldId, body: "v2" }, ctx);
+  assert.equal(sup.ok, false, "must not answer ok:true when the new row landed with different values than sent");
+  assert.match((sup as any).error, /does not match what was sent/);
+  assert.match((sup as any).error, /body/);
+
+  // The detach (which precedes the insert in the flow) already ran for real —
+  // caught only at the next step, not rolled back.
+  const oldRow = store.doc_items.find((r) => r.id === oldId);
+  assert.equal(oldRow!.code, null, "code was already detached before the insert mismatch was caught");
+  assert.notEqual(oldRow!.status, "superseded", "old row not marked superseded — caught before that step runs");
+});
+
+test("doc_supersede: mark-superseded write that silently affects 0 rows fails LOUD before relink runs (D-132, GTD 8b97b1ca)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const real = makeDb(store) as any;
+
+  // A DB that accepts the "mark old superseded" UPDATE, raises nothing, and
+  // changes nothing. Before this fix, docSupersede only noticed via
+  // gov.relink_superseded's 23514 bounce (it requires old.status='superseded'
+  // as its own precondition) — a bounce, not a check.
+  const db = {
+    ...real,
+    from: (table: string) => {
+      const q = real.from(table);
+      if (table !== "doc_items") return q;
+      const origUpdate = q.update.bind(q);
+      q.update = (data: any) => (data && data.status === "superseded" ? origUpdate({}) : origUpdate(data));
+      return q;
+    },
+  } as unknown as SupabaseClient;
+
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "sdes", title: "Sdes" }, ctx);
+  const up = await docItemUpsert(db, { project_id: PROJ_A, document_id: (doc as any).data.document_id, item_type: "sdes_entry", code: "SDES-051", body: "v1" }, ctx);
+  const oldId = (up as any).data.item_id;
+
+  const sup = await docSupersede(db, { old_item_id: oldId, body: "v2" }, ctx);
+  assert.equal(sup.ok, false, "must not answer ok:true when the old item was not actually marked superseded");
+  assert.match((sup as any).error, /was NOT marked superseded/);
+
+  const oldRow = store.doc_items.find((r) => r.id === oldId);
+  assert.notEqual(oldRow!.status, "superseded", "old row untouched — still not superseded");
+  // Left in place deliberately (per the error message) — not orphaned/deleted.
+  const placeholderEdges = store.doc_item_links.filter((l) => l.relation_type === "supersedes" && l.to_item === oldId);
+  assert.equal(placeholderEdges.length, 1, "placeholder supersede edge still present, not yet cleaned up");
 });
 
 test("doc_query traceability: req_without_sdes flags uncovered REQ then clears after link", async () => {
@@ -871,6 +1116,39 @@ test("doc_query summary: compact rows with body_chars, headline, link counts (no
   assert.equal(row.links.wi, 0);
 });
 
+test("doc_query summary: a same-project 'references' link is visible via cross_project_out/in, not silently 0 (GTD fb2f17e9)", async () => {
+  // Reproduces the reported symptom: doc_link_by_code(from=deliverable,
+  // relation_type='references') answers ok+link_id, but the link never
+  // showed up under doc_out/doc_in. Root cause: 'references' ALWAYS routes
+  // to doc_item_xproject_links (D-074), even when from/to share a
+  // project_id — docSummarize used to only scan doc_item_links.
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const sowDoc = await docCreate(db, { project_id: PROJ_A, document_type: "sow", title: "SoW" }, ctx);
+  const sdesDoc = await docCreate(db, { project_id: PROJ_A, document_type: "sdes", title: "Sdes" }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: (sowDoc as any).data.document_id, item_type: "deliverable", code: "DEL-F3" }, ctx);
+  await docItemUpsert(db, { project_id: PROJ_A, document_id: (sdesDoc as any).data.document_id, item_type: "sdes_entry", code: "SDES-GOV-133" }, ctx);
+
+  const link = await docLinkByCode(db, { project_id: PROJ_A, from_code: "DEL-F3", to_code: "SDES-GOV-133", link_type: "references" }, ctx);
+  assert.ok(link.ok, `link ok: ${JSON.stringify(link)}`);
+  assert.equal(store.doc_item_xproject_links.length, 1, "references routed cross-project despite same project_id");
+  assert.equal(store.doc_item_links.length, 0);
+
+  const res = await docQuery(db, { project_id: PROJ_A, item_type: "deliverable", summary: true }, ctx);
+  assert.ok(res.ok);
+  const del = (res as any).data.items[0];
+  assert.equal(del.code, "DEL-F3");
+  assert.equal(del.links.doc_out, 0, "not in doc_item_links, so same-project count stays 0");
+  assert.equal(del.links.cross_project_out, 1, "but the link is not invisible — it shows here");
+  assert.ok((res as any).data.notes?.some((n: string) => n.includes("cross_project_out")), "notes explain the split when it's load-bearing");
+
+  const sdesRes = await docQuery(db, { project_id: PROJ_A, item_type: "sdes_entry", summary: true }, ctx);
+  const sdes = (sdesRes as any).data.items[0];
+  assert.equal(sdes.links.doc_in, 0);
+  assert.equal(sdes.links.cross_project_in, 1);
+});
+
 test("doc_query fields: rejects unknown column, accepts a valid projection", async () => {
   const store: Store = {};
   seedProjects(store);
@@ -1028,11 +1306,36 @@ test("doc_query 0 rows + no project membership: visibility_gap:true (D-167, clos
   seedProjects(store);
   const db = makeDb(store); // no memberships granted
 
-  const res = await docQuery(db, { project_id: PROJ_A, item_type: "requirement" }, { selfSlug: "auditor", isLoomy: false });
+  const res = await docQuery(
+    db,
+    { project_id: PROJ_A, item_type: "requirement" },
+    { selfSlug: "auditor", isLoomy: false, serviceDb: db } // PROJ_A exists — existence probe must fall through to the membership check
+  );
   assert.ok(res.ok);
   assert.equal((res as any).data.count, 0);
   assert.equal((res as any).data.visibility_gap, true);
   assert.match((res as any).data.note, /RLS block rather than an empty corpus/);
+});
+
+test("doc_query 0 rows + project_id does not exist: honest note, no permissions talk (GTD 89c232d4, D-167 false positive)", async () => {
+  // Measured live 2026-08-20: an invented project_id got the SAME "request
+  // membership from dba" note as a real project with no membership — a false
+  // diagnosis, since no membership grant could ever help a made-up id.
+  const store: Store = {};
+  seedProjects(store); // only PROJ_A / PROJ_B exist
+  const db = makeDb(store); // no memberships granted either
+  const bogusProjectId = "00000000-0000-4000-9000-0000000000ff";
+
+  const res = await docQuery(
+    db,
+    { project_id: bogusProjectId, item_type: "requirement" },
+    { selfSlug: "auditor", isLoomy: false, serviceDb: db }
+  );
+  assert.ok(res.ok);
+  assert.equal((res as any).data.count, 0);
+  assert.equal((res as any).data.visibility_gap, true);
+  assert.match((res as any).data.note, /does not exist in loomx_projects/);
+  assert.doesNotMatch((res as any).data.note, /request.*membership/i, "must not suggest requesting membership for an id that was never real");
 });
 
 test("doc_query 0 rows + caller IS a project member: no visibility_gap noise (D-167)", async () => {

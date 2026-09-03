@@ -4,6 +4,138 @@
 
 ---
 
+## Sessione #158 — 2026-09-03 (autopilot dispatch, GTD `b4e07ba6`, WI `7b8c289f`)
+
+**Task:** follow-on di `#153` (GTD `8b97b1ca`, D-132 armato su `doc_create`/`doc_supersede`) — estendere la rilettura-e-confronto ai 4 INSERT di `doc_link` (`doc_item_gtd_links`, `doc_item_wi_links`, `doc_item_links` intra-progetto, `doc_item_xproject_links` cross-progetto), oggi scoperti. Il GTD stesso vietava di armare a memoria: la migration dba `20260816110000` ha tolto UPDATE da `doc_rw` su quelle 4 tabelle (msg `51ae3289`, verificato in `#154`), e andava misurato se una SELECT di rilettura post-INSERT le vede ancora, prima di riusare `diffAgainstRow`.
+
+**Misurato prima di scrivere codice** (`tests/verify-doc-link-reread.ts`, transazione annullata, stesso pattern di `verify-create-supersede-reread.ts`): tutti e 4 gli INSERT seguiti da una SELECT sulla stessa riga la vedono correttamente — SELECT/INSERT non toccati dalla revoca, solo UPDATE. Per i target `gtd`/`wi` (FK verso `loomx_items`/`loomx_work_items`) usati come riferimenti di sola lettura il GTD stesso e il WI di questa sessione — righe reali già esistenti, mai mutate, e il link stesso non persiste (rollback). 11/11 controlli verdi.
+
+**Armato** (`src/docs.ts`, `docLink`): tutti e 4 i percorsi ora rileggono per id e confrontano contro l'intento prima di rispondere `ok`, stessa forma di `docCreate`/`docSupersede` — mismatch esplicito, mai un `ok:true` su una scrittura RLS-negata che sotto `doc_rw` avrebbe affetto 0 righe in silenzio (D-133).
+
+**Gap di copertura trovato e chiuso a margine:** `target_kind='gtd'`/`'wi'` non avevano NESSUN test in `tests/docs.test.ts` (solo nel pilota live e nel nuovo script di verifica) — aggiunti 4 test nuovi (uno per tabella), ciascuno con un fake che simula un INSERT "swallowed" (atterra con un valore diverso da quello inviato) per provare che la rilettura lo intercetta.
+
+**Verifiche.** `tsc --noEmit` pulito. `npm test` 366/366 verdi (362 preesistenti + 4 nuovi). `npm run build` pulito. Rieseguito `tests/verify-doc-link-reread.ts` DOPO l'arming: 11/11 verdi anche col codice nuovo (nessuna regressione sul percorso reale).
+
+**Documentato:** CLAUDE.md, riga `doc_link` — nota sulla rilettura estesa con riferimento al GTD e allo script di misura.
+
+**Decisioni prese:** nessuna nuova decisione — estensione di un pattern già ratificato (D-132) a percorsi scoperti, non una scelta di design.
+**Blocchi / note:** nessuno.
+**Prossima sessione:** nessun follow-on aperto da questo task.
+
+---
+
+## Sessione #157 — 2026-09-03 (autopilot dispatch, GTD `e0c60109`, WI `aeca4af8`)
+
+**Task:** sweep D-227 (28/08) segnalava due righe CLAUDE.md in drift (ALN-001: lettura decisioni cross con `document_id`, parametro inesistente su `doc_query`; ALN-003: tabella skill puntava a `.skills/` legacy invece di `~/.claude/skills`).
+
+**Verificato: già corretto.** Entrambi i drift erano stati risolti nello stesso commit `6ecf18a` (sessione `#132`, 2026-08-28 23:54) — poche ore dopo la creazione di questo GTD, mai chiuso. Nessuna regressione nel CLAUDE.md attuale. Nessun codice/documento toccato in questa sessione.
+
+**Decisioni prese:** nessuna.
+**Blocchi / note:** nessuno — l'auditor verificherà al prossimo giro sweep, come dichiarato nel GTD stesso.
+**Prossima sessione:** nessun follow-on.
+
+---
+
+## Sessione #156 — 2026-09-03 (autopilot dispatch, GTD `b9614110`, WI `d6d23d56`)
+
+**Task:** follow-on della `#130` — valutare la pubblicazione del SDES «Solution Design — Board MCP Server» (mio, 1 sottoscrizione, mai pubblicato) e decidere se rischiare il rumore di `gov.doc_frozen_row_touches` (D-201) su un documento in scrittura attiva, o prima verificarlo dal vivo in transazione annullata (come fatto per `doc_repoint` in `#127`).
+
+**Misurato (`doc_structure`), non deciso a occhio:** il documento ha header `status=draft` e 37 righe: 31 `active` / 6 `draft`. Non soddisfa il criterio di pubblicabilità usato per gli altri documenti della flotta in `#130` (header non-`draft` + tutte le righe in stato terminale — proposto a loomy, mai scritto come decisione formale, D-136 §5) — stesso profilo dei documenti esclusi allora (SDES/UAT di items-subscription con righe `draft`/`in_review` residue). **Decisione: NON pubblicare ora.** Nessun changelog creato (nessun publish avvenuto).
+
+**Il valore reale del GTD era un altro** (dichiarato dal GTD stesso: provare il congelamento prima che loomy pubblichi i suoi 12 documenti/146 sottoscrizioni bloccate, misura di `#130`) — e quello è stato ottenuto comunque, senza toccare il documento reale: costruito un documento temporaneo usa-e-getta (sdes + changelog + riga), pubblicato, poi la riga riscritta **fuori** dall'atto di pubblicazione, tutto dentro un'unica transazione annullata (`tests/verify-frozen-row-touches.ts`, stesso pattern di `verify-repoint.ts`). **`gov.doc_frozen_row_touches` verificato dal vivo per la prima volta** (prima solo letto dal sorgente, CLAUDE.md lo dichiarava esplicitamente non provato): scatta correttamente sulla riscrittura post-pubblicazione, `changed_columns` include `body`, confermato sia dalla lettura diretta della tabella sia dalla superficie tool `doc_staleness_query` (stesso touch, due percorsi di codice indipendenti). 5/5 controlli verdi, zero residuo dopo il rollback.
+
+**Scoperta collaterale, non cercata:** `gov.doc_item_substantive_diff` — dichiarato `42501` (nessun grant EXECUTE a `doc_rw`) il 2026-08-29 — è risultato **eseguibile dal vivo** nello stesso probe (stessi due snapshot che confronta il trigger, risposta `["body"]`). Il grant deve essere atterrato lato dba senza un annuncio esplicito intercettato da questa sessione. Effetto pratico: `docPublishImpact` (D-233 fase 4, subscriptions.ts ~1721-1750) smette da sola di rispondere `touched:'unknown'` sulle righe reali — il codice gestiva già entrambi i rami, nessun cambio necessario. **Non verificato dal vivo qui** (fuori scope, il probe ha misurato solo il predicato nudo): aperto GTD follow-on `2ecf6c52` (planned, non armato) per il collaudo di `doc_publish_impact` stesso e per colmare un gap trovato a margine — il tool non è mai stato documentato in CLAUDE.md.
+
+**Verifiche.** `tsc --noEmit` pulito. Nessun test unitario aggiunto (lo script è una verifica dal vivo una-tantum, stesso registro degli altri `verify-*.ts` non eseguiti in CI).
+
+**Decisioni prese:** nessuna decisione formale — la non-pubblicazione è un'applicazione del criterio già proposto (non ratificato) in `#130`, non una nuova regola.
+**Blocchi / note:** nessuno.
+**Prossima sessione:** GTD `2ecf6c52` (verifica `doc_publish_impact` dal vivo + riga CLAUDE.md mancante) resta in coda, non urgente. Il debito reale di pubblicazione (loomy 12/146, it-manager 1/12) resta fuori dal mio raggio d'azione, come misurato in `#130`.
+
+---
+
+## Sessione #155 — 2026-09-03 (autopilot dispatch, GTD `89c232d4`, WI `606fb6a6`)
+
+**Task:** D-167 falso positivo misurato il 20/08 su me stesso — `doc_query` con un `project_id` **inventato** (UUID completato a caso) rispondeva `visibility_gap:true` + nota "richiedi membership a dba", la stessa diagnosi (e la stessa azione inutile) che avrebbe dato per un progetto reale senza membership. Causa: `loomx_agent_in_project()` ritorna `false` per entrambi i casi — inesistente e invisibile — e `visibilityGap()` non li distingueva.
+
+**Fix:** `visibilityGap()` prova prima l'**esistenza** del progetto, non solo la membership. `doc_rw` non ha grant su `loomx_projects` (stesso muro già documentato da `verifyProjectExists`/`docFactSync` in `factSync.ts`), quindi la prova gira su un client service-role passato dall'esterno: `DocContext` guadagna un campo opzionale `serviceDb`, valorizzato in `tools.ts` con `getSupabaseClient()` alla costruzione di `docCtx` (una volta sola, riusato da tutti e 21 i tool `doc_*`). Tre rami ora, non due: progetto inesistente → nota esplicita ("does not exist in loomx_projects... no membership request will fix it"), progetto esistente senza membership → nota preesistente invariata, progetto esistente con membership → nessuna nota (comportamento invariato). Opzionale e best-effort by design: nessun `serviceDb` o probe fallito ricade sul solo controllo di membership pre-fix, mai un errore nuovo.
+
+**Verificato:** 6 call site di `visibilityGap()` in `src/docs.ts` (docQuery diretto, `req_without_sdes`/`sdes_without_uat`, `req_without_origin`, `broken_refs`, e il ramo `document_type`-filter) tutti aggiornati a passare `ctx.serviceDb`. 2 nuovi/modificati test su fake DB (il fake già modella `loomx_projects` via `seedProjects`/`store.loomx_projects`, riusabile come `serviceDb` nei test senza nuova infrastruttura): un progetto inventato riceve la nota corretta senza menzionare "richiedi membership"; il test preesistente sulla membership ora passa `serviceDb` per confermare che con un progetto REALE la prova di esistenza cade a terra sul ramo membership invariato. `tsc --noEmit` pulito, `npm test` 362/362 verdi, `npm run build` pulito.
+
+**Documentato:** CLAUDE.md, riga `doc_query`/`visibility_gap` (D-167) — aggiunta nota sul fix con riferimento al GTD.
+
+**Nota collaterale:** ho chiuso anche la GTD `dae4542f` ("i doc_item_links sono mutabili?", 15/08) durante il task precedente della stessa sessione (WI `4ebabad0`, dispatch separato) — non pertinente a questo fix ma stesso filone D-167/contratto doc_rw, segnalato qui per continuità.
+
+**Decisioni prese:** nessuna nuova decisione formale — correzione di un difetto di diagnosi già descritto e proposto dal reporter (me stesso, sessione del 20/08), non una scelta di design.
+**Blocchi / note:** nessuno.
+**Prossima sessione:** nessun follow-on aperto da questo task.
+
+---
+
+## Sessione #154 — 2026-09-03 (autopilot dispatch, GTD `1dabc7e5`, WI `4ebabad0`)
+
+**Task:** dba segnalava (msg `51ae3289`, 15-16/08) di aver chiuso il perimetro UPDATE sulle 4 tabelle di link (`doc_item_links`/`doc_item_gtd_links`/`doc_item_wi_links`/`doc_item_xproject_links`): `REVOKE UPDATE ... FROM doc_rw, anon, authenticated` + drop delle 2 policy UPDATE superstiti, lasciando `gov.relink_superseded` come unica via. Chiedeva verifica board-mcp-side: qualcosa faceva ancora UPDATE diretto fuori da `docSupersede`?
+
+**Verificato (grep esaustivo, non a memoria):** zero occorrenze di `.update(` sulle 4 tabelle in tutto `src/*.ts`, incluse le modifiche locali non committate al momento (D-132 reread) e i moduli aggiunti dopo il commit che dba aveva ispezionato (`34cbc0a`): `factSync.ts`, `structure.ts`, `staleness.ts`, `subscriptions.ts` — nessuno tocca quelle tabelle con UPDATE. L'unico repoint è `gov.relink_superseded` via RPC raw-SQL (`docDb.ts:303-304`), chiamato solo da `docSupersede` (`docs.ts:1584`), con un commento nel codice che documenta esplicitamente perché serve la RPC (RLS gap su UPDATE diretto sotto `doc_rw`).
+
+**Riportato a dba** (`board_send done`): nessuna rottura, perimetro chiuso confermato lato board-mcp, coerente con la sua verifica pre-REVOKE su `34cbc0a` e ancora vera su HEAD.
+
+**Nessun codice toccato** — solo verifica. WI chiuso `done` (template `audit-agent-alignment`, bypass automatico gate D-074).
+
+**Decisioni prese:** nessuna.
+**Blocchi / note:** nessuno.
+**Prossima sessione:** nessun follow-on aperto da questo task.
+
+---
+
+## Sessione #153 — 2026-09-03 (autopilot dispatch, GTD `8b97b1ca`, WI `85964b9d`, v0.30.1)
+
+**Task:** estendere la rilettura-e-confronto (D-132) — chiusa per `doc_item_upsert` in v0.16.3 — agli altri write-path diretti su `doc_items`: `doc_supersede` e `doc_create`. Il GTD (session #83, 2026-08-16) chiedeva prima di **misurare quali write potessero davvero fallire muti sotto `doc_rw`**, poi decidere se armare su tutti o solo sul candidato a rischio più alto (`doc_supersede`).
+
+**Misurato (non a memoria):** `doc_supersede` fa **tre** scritture dirette su `doc_items` oltre all'INSERT già in parte coperto (`.select().maybeSingle()`, ma sintetizzato client-side sotto `doc_rw` no-RETURNING, F4.5/v0.8.1 — quindi non prova nulla): (1) detach del `code` dalla vecchia riga, (2) INSERT della nuova versione, (3) mark `status='superseded'`. Di questi, solo il (3) aveva una rete di sicurezza **indiretta**: `gov.relink_superseded` rifiuta con `23514` se `old.status<>'superseded'` — ma è una precondizione della funzione, non un controllo dedicato ("si accorge per rimbalzo", come scriveva il GTD). I punti (1) e (2) non avevano nessuna verifica. `doc_create` aveva lo stesso gap del punto (2): INSERT + `.select().maybeSingle()` senza rilettura.
+
+**Deciso:** armare su **tutti e quattro** i punti (non solo `doc_supersede`), riusando lo stesso materiale già scritto per `doc_item_upsert` (`diffAgainstRow` + `canonical`, `src/docs.ts`) invece di inventare una seconda implementazione — la rilettura di ciascuno segue esattamente lo stesso schema: scrivi, rileggi per id, confronta contro l'intento, `ok:false` esplicito su mismatch (mai un `ok:true` silenzioso). Per il mark-superseded la rilettura sostituisce il "rimbalzo" di `gov.relink_superseded` con un controllo diretto **prima** che il placeholder heir edge venga rimosso — se il mark non è atterrato, la funzione si ferma lì, senza toccare il placeholder né tentare il relink.
+
+**Verificato:**
+- Unit test su fake DB (`tests/docs.test.ts`, +4 test): ciascuno dei 4 punti simula lo swallow (stesso schema del test D-132 già esistente per `doc_item_upsert`: un update/insert che "atterra" senza sollevare errore ma con valori diversi da quelli inviati) e conferma `ok:false` con messaggio esplicito, e che lo stato downstream non viene toccato oltre il punto di fallimento (es.: il placeholder heir edge resta se il mark fallisce, il detach non-rollbackato resta visibile se l'insert successivo fallisce).
+- Verifica dal vivo (`tests/verify-create-supersede-reread.ts`, nuovo script, pattern rollback-safe di `verify-upsert-patch.ts`): happy path di `doc_create` + `doc_supersede` sul progetto reale board-mcp (`596cd5fc`), dentro una transazione `runDocRw` chiusa con rollback deliberato — 8/8 controlli verdi, nessun residuo nel corpus. Conferma che le tre nuove riletture non introducono falsi positivi sul percorso reale (incluso il trabocchetto del riordino chiavi JSONB che `canonical()` già gestisce).
+- Suite completa: 359/359 verdi (355 preesistenti + 4 nuovi). `tsc --noEmit` pulito, `npm run build` pulito.
+
+**Documentato:** CLAUDE.md righe `doc_create`/`doc_supersede` aggiornate con nota sintetica sul comportamento nuovo. Versione bumpata a **0.30.1** (`package.json`).
+
+**Non toccato (fuori scope, dichiarato):** la migration DBA `20260816110000` (REVOKE UPDATE da `doc_rw` sulle 4 tabelle di link) citata dal GTD come possibile causa di perimetro cambiato non impatta questo fix — i tre write aggiunti sono tutti su `doc_items` (non sulle tabelle di link), dove `doc_rw` ha sempre avuto UPDATE grant (stesso perimetro di `doc_item_upsert`).
+
+---
+
+## Sessione #152 — 2026-09-03 (D-118: registrati i run reali E2E-RW/MODEL in loomx_evals, GTD `29e56be7`, msg dba `a35fbf3a`, WI `00e7d97c`)
+
+**Task:** dba aveva seminato `loomx_evals` (migration `20260811080000`, 24 codici E2E-RW-01..13/E2E-MODEL-01..11) e chiedeva a board-mcp di registrare via `eval_run_add` i run reali già verdi delle sessioni #65 (RW-04/05/06/07/11/13, 111/111 test) e #66 (MODEL-02/05/06/08, 118/118 test) — la sua stessa smoke-check (`triggered_by=dba`, `verdict=advisory`) non bastava come prova, serviva un run vero dal proprietario della suite.
+
+**Gap trovato prima di registrare alla cieca:** rileggendo il codice attuale (non solo HISTORY), il guard (a+) inbox-pending — testato da E2E-RW-06/07 all'11/08 — è stato **rimosso** il 23/08 (commit `e49bff3`, SDES-GOV-157), superseduto da D-205 `pending_inbox`. Registrarli come `pass` oggi avrebbe affermato il falso su una feature non più esistente. Stessa cautela per E2E-MODEL-05 (il campo `requested_model` è scritto lato board-mcp ma nessuna prova end-to-end che il destinatario lanci davvero con quel modello — metà reconciler) e per MODEL-03/10 (alias↔ID e modello deprecato: mai implementati, decisione roster pendente con loomy, D-101) — la nota di dba diceva "non serve che li tocchi" per questi ultimi due, ma li ho comunque registrati come `not_run` invece di lasciarli a zero righe: uno zero muto è indistinguibile da "dimenticato", la stessa igiene di D-206 applicata qui.
+
+**Registrati 12/24 run** (`triggered_by=board-mcp`, `model=sonnet`):
+- **pass** (evidenza corrente, riverificata su HEAD `a19da81`, `npx tsx --test tests/wi.test.ts tests/model-switch-guards.test.ts` → 84/84 verdi): E2E-RW-04/05/11/13, E2E-MODEL-06/08. E2E-MODEL-02 pass da probe DB live documentato in sessione #66 (non un unit test ripetibile).
+- **not_run** (motivato, mai fabbricato): E2E-RW-06/07 (guard rimosso), E2E-MODEL-03/05/10 (mai implementati o mai verificati end-to-end).
+- **non toccati** (fuori perimetro board-mcp per dichiarazione esplicita di dba): RW-01/02/03/08/09/10/12, MODEL-01/04/07/09/11 — seminati per FK futuro, di competenza it-manager o non ancora implementati.
+
+**Riportato a dba** (`board_send done`, ref `a35fbf3a`) con l'elenco dei 12 run id e la correzione esplicita su RW-06/07 rispetto alla sua richiesta originale (scritta prima della rimozione del guard).
+
+**Nessun codice toccato** — solo registrazione dati. Versione invariata 0.30.0. WI chiuso `done` (bypass automatico gate D-074: nessun `template_name` → layer `on-the-fly`).
+
+---
+
+## Sessione #151 — 2026-09-01 (autopilot dispatch, GTD `a88d4a71`, msg it-manager `0c1ea2fa`, WI `9833c2a6`)
+
+**Task:** it-manager segnala che `SUPABASE_SERVICE_ROLE_KEY` in `loomx-board-mcp/.env` è la stessa chiave stantia (fp sha256 `ecd336fb0846`, "Unregistered API key") dietro il crash-loop di `loomx-chat.service`, workaround silenzioso già citato in questo file da ≥3 sessioni.
+
+**Verificato:** `sha256(SUPABASE_SERVICE_ROLE_KEY)` in `.env` tronca esattamente a `ecd336fb0846` — combacia. Il `.mcp.json` reale di board-mcp non legge affatto quella coppia: gira su `DATABASE_URL`/`DOC_RW_DATABASE_URL` (D-084, espansi da `${LOOMX_DB_URL}`/`${LOOMX_DOC_RW_URL}` dal launcher Claude Code) — il runtime live non è mai stato sulla via service_role/.env, solo eventuali smoke/dev senza `DATABASE_URL` settato.
+
+**Fix (bonifica, non rotazione):** commentata la coppia `SUPABASE_URL`/`SUPABASE_SERVICE_ROLE_KEY` in `.env` (file gitignored, nessun impatto git) con nota che spiega il perché e riferisce msg/GTD. Chi riattiva il fallback service_role senza `DATABASE_URL` ora vede l'errore esplicito già presente in `src/supabase.ts` ("Missing DB credentials: set DATABASE_URL, or SUPABASE_URL + SUPABASE_SERVICE_ROLE_KEY") invece di un 401 silenzioso su chiave morta.
+
+**Fuori scope board-mcp (escalato):** la rotazione vera — serve una `SUPABASE_SERVICE_ROLE_KEY` fresh dal progetto Supabase (`fvoxccwfysazwpchudwp`), che richiede accesso al progetto e non è generabile da qui. `board_send` a it-manager (msg `7f9d448a`, ref `0c1ea2fa`) con la richiesta di sorgere/rotare + propagare (BWS + consumer come loomx-chat). GTD `a88d4a71` → `waiting`, `waiting_on=it-manager`. WI chiuso `waiting` (non `done`: il root cause reale — chiave assente — non è risolto da board-mcp).
+
+---
+
 ## Sessione #150 — 2026-08-31 (autopilot dispatch, GTD `f5c2f646`, msg loomy `09421611`, WI `4e8f2738`)
 
 **Task:** loomy segnala che la descrizione del tool `doc_link` contraddice D-155/SDES-SUB-005 e ha già causato un errore reale ("stanotte, nel mandato che avevo scritto io").

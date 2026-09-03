@@ -184,6 +184,20 @@ test("buildAutoGtdInsertPayload: priority passthrough for wake-marked messages",
   assert.equal(payload.priority, "urgent");
 });
 
+// GTD fc61f4d0 (loomy, 2026-08-22): board_agents.slug "Achille" (capital) vs
+// the real GTD queue "achille" (lowercase, 36 open items) — auto_gtd items
+// landed on the capital-cased owner and went unwatched. Recipient slugs must
+// always be lowercased on the way into loomx_items.owner.
+test("buildAutoGtdInsertPayload: owner is lowercased (board_agents.slug casing must not leak into loomx_items.owner)", () => {
+  const payload = buildAutoGtdInsertPayload({
+    owner: "Achille",
+    title: "t",
+    body: null,
+    source_ref: "44444444-4444-4444-4444-444444444444",
+  });
+  assert.equal(payload.owner, "achille");
+});
+
 // Stream B-4 (GTD 3acb2328): gtd_add soft-warn when project_id is omitted.
 test("buildProjectWarning: warns when project_id is omitted (G1)", () => {
   const warning = buildProjectWarning(undefined);

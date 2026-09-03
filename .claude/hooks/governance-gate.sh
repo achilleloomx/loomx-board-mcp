@@ -87,6 +87,59 @@
 #   non quello effettivamente active — un wi_resume su un WI piu' vecchio di
 #   un WI gia' chiuso restava scavalcato dal chiuso. Testo ora generico
 #   (rimanda a wi-status/wi-resume/wi-switch), niente colpa pre-assegnata.
+# v1.8 (2026-08-23, fix GTD 2e33474e riaperto da dev-hq msg 52545ee4, it-manager):
+#   il v1.7 (e le versioni precedenti) citavano wi-start/wi-resume/wi-switch/
+#   wi-status/wi-update come comandi shell in $PATH — non sono mai esistiti
+#   (nessun wrapper CLI deployato in nessun ambiente, solo documentati nella
+#   skill session-manager). Diagnosi gia' fatta il 10/08 (msg cf9f676a): board-mcp
+#   sincronizza gia' la cache server-side (src/wiCache.ts) su ogni tool wi_* MCP
+#   raw, quindi i wrapper sarebbero comunque ridondanti — fix cosmetico, non
+#   funzionale. Tutte le occorrenze (sezioni "no WI"/paused/done-failed/mismatch
+#   agent/pre-conditions mancanti) ora indicano il tool MCP raw equivalente
+#   (es. "chiama mcp__board__wi_status()") invece del comando shell fantasma.
+#   Nota: nessun tool MCP aggiorna pre_conditions in-place su un WI gia' aperto
+#   (era gia' vero prima, "wi-update" era gia' fantasma) — la sezione 4 ora lo
+#   dice esplicitamente invece di suggerire un comando inesistente.
+# v1.9 (2026-08-23, REQ-GOV-127/PM-10, GTD faf79bdc, it-manager):
+#   hub/governance-policy.yaml era dichiarato "letto dal gate" ma non lo era —
+#   89/89 occorrenze di "governance-policy" negli .sh della flotta erano
+#   commenti, zero righe di codice (misurato dall'auditor 16/08,
+#   sweep-governance-non-tracciata.md). EXTERNAL_RE era hardcoded qui e
+#   divergeva dallo yaml in entrambe le direzioni: mancava "gh pr merge" (che
+#   lo yaml dichiara external e il gate non intercettava — passava ungoverned);
+#   il gate aveva "supabase functions deploy"/"secrets set", "systemctl
+#   restart/stop/disable", "docker push/rm" che lo yaml non dichiarava.
+#   Riconciliati in governance-policy.yaml v1.1 (superset di entrambe le
+#   liste). Nuovo lettore hub/scripts/governance_policy.py (27/27 collaudi,
+#   test_governance_policy.py) espone external-regex/category; il gate lo
+#   invoca via _resolve_external_regex() con cache su mtime di
+#   governance-policy.yaml (CACHE_DIR/.governance-policy-external.cache) — non
+#   un parse YAML per ogni tool-call gated. Se python3/PyYAML/il reader
+#   mancano, fallback dichiarato su HARDCODED_EXTERNAL_RE (il valore v1.8):
+#   questo fix non introduce mai un fail-open nuovo, solo aggiunge una fonte
+#   piu' fresca quando disponibile. Sezione Paths spostata prima di section 0
+#   (serviva CACHE_DIR per la cache della regex, prima calcolato dopo).
+# v2.0 (2026-08-29, D-135, GTD fded964a, it-manager):
+#   sezione 2 — il case dello stato WI non conosceva escalation_pending/
+#   escalated (nuovi stati D-135, migration DB 20260828140000): ci cadeva
+#   dentro come `*` "status sconosciuto", che blocca TUTTO senza passare
+#   dalla whitelist post-chiusura (gtd_update/board_send/runtime_request/...).
+#   Effetto reale: l'operatore il cui wi_end porta il WI a escalation_pending
+#   non poteva nemmeno mandare il board_send al target che il protocollo
+#   D-135 gli richiede — il gate murava esattamente la scrittura che
+#   l'escalation esige. Fix: entrambi gli stati ora nel ramo
+#   paused|done|failed, con messaggi dedicati (escalation_pending = terminale,
+#   nessuna via d'uscita da qui; escalated = serve wi_resume).
+# v2.1 (2026-09-03, GTD 8e712e27, it-manager):
+#   HARDCODED_EXTERNAL_RE (il floor bash, usato quando python3/PyYAML/il
+#   reader mancano del tutto) non aveva "gh pr merge" — proprio il comando
+#   che il fix v1.9 doveva coprire. Il fallback Python nello stesso ruolo
+#   (governance_policy.py::_FALLBACK_EXTERNAL_COMMANDS, usato quando python3
+#   c'e' ma lo YAML e' irraggiungibile) lo aveva gia': i due fallback per lo
+#   stesso scopo erano gia' divergenti fra loro, undici giorni dopo il fix
+#   che li ha creati — la stessa classe di difetto di questo intero GTD,
+#   dentro il codice che lo aveva appena chiuso. Sincronizzato. EVAL-it-
+#   manager-004 aggiunto per non fidarsi piu' del confronto a mano.
 #
 # Spec: hub/initiatives/governance-compliance/design.md sezione 6
 #
@@ -149,6 +202,66 @@ if [[ -z "$AGENT_SLUG" ]]; then
 fi
 
 # ------------------------------------------------------------------------------
+# Paths — risolti come ASSOLUTI, indipendenti dalla cwd del chiamante (v1.4).
+# Priorita': CLAUDE_PROJECT_DIR (se valorizzato dall'harness) > self-locating
+# dalla posizione dello script (questo file vive in <project-root>/.claude/hooks/).
+# Spostato PRIMA della sezione 0 in v1.9: la cache della external-regex (sotto)
+# vive in CACHE_DIR e serve gia' in modalita' --bash, prima di section 0 legacy.
+# ------------------------------------------------------------------------------
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$SCRIPT_DIR}"
+CACHE_DIR="$PROJECT_ROOT/.claude/cache"
+WI_CACHE="$CACHE_DIR/current-work-item.json"
+mkdir -p "$CACHE_DIR" 2>/dev/null || true
+
+# ------------------------------------------------------------------------------
+# 0a. External-regex da governance-policy.yaml (v1.9, REQ-GOV-127).
+# Fino a v1.8 EXTERNAL_RE era hardcoded qui e divergeva in entrambe le direzioni
+# da hub/governance-policy.yaml (misurato dall'auditor il 16/08: il file era
+# dichiarato "letto dal gate" ma 89/89 occorrenze erano commenti, zero codice —
+# mancava qui "gh pr merge" che lo yaml dichiara external; il gate aveva
+# "supabase functions deploy"/"systemctl ..."/"docker push|rm" che lo yaml non
+# dichiarava — riconciliati in yaml v1.1, stesso giorno).
+#
+# Cache su mtime (non un parse YAML per ogni tool-call gated, che girerebbe
+# python3 su OGNI Bash/Edit/Write della flotta): la regex si ricalcola solo
+# quando governance-policy.yaml cambia. HARDCODED_EXTERNAL_RE resta il
+# floor/fallback — se python3/PyYAML/il reader mancano, il gate non perde MAI
+# la copertura esistente, degrada al comportamento pre-v1.9 (mai un fail-open
+# nuovo introdotto da questo fix).
+HARDCODED_EXTERNAL_RE='git push|git push --force|supabase (db push|functions deploy|secrets set)|vercel (--prod|deploy)|npm publish|gh (release|pr merge)|systemctl (restart|stop|disable)|docker (push|rm)'
+POLICY_FILE="${LOOMX_GOVERNANCE_POLICY_FILE:-/home/loomy/workspace/hub/governance-policy.yaml}"
+POLICY_READER="${LOOMX_GOVERNANCE_POLICY_READER:-/home/loomy/workspace/hub/scripts/governance_policy.py}"
+POLICY_CACHE="$CACHE_DIR/.governance-policy-external.cache"
+
+_resolve_external_regex() {
+  local policy_mtime cached_mtime cached_regex fresh_regex
+  policy_mtime=$(stat -c %Y "$POLICY_FILE" 2>/dev/null || echo "")
+  if [[ -n "$policy_mtime" && -f "$POLICY_CACHE" ]]; then
+    cached_mtime=$(sed -n '1p' "$POLICY_CACHE" 2>/dev/null || echo "")
+    if [[ "$cached_mtime" == "$policy_mtime" ]]; then
+      cached_regex=$(sed -n '2p' "$POLICY_CACHE" 2>/dev/null || echo "")
+      if [[ -n "$cached_regex" ]]; then
+        EXTERNAL_RE="$cached_regex"
+        return
+      fi
+    fi
+  fi
+  # Cache assente/stale: ricalcola, ma solo se abbiamo di che farlo.
+  if [[ -n "$policy_mtime" ]] && command -v python3 &>/dev/null && [[ -f "$POLICY_READER" ]]; then
+    fresh_regex=$(python3 "$POLICY_READER" external-regex 2>/dev/null || echo "")
+    if [[ -n "$fresh_regex" ]]; then
+      EXTERNAL_RE="$fresh_regex"
+      { printf '%s\n%s\n' "$policy_mtime" "$fresh_regex" > "$POLICY_CACHE.tmp.$$" \
+        && mv "$POLICY_CACHE.tmp.$$" "$POLICY_CACHE"; } 2>/dev/null || rm -f "$POLICY_CACHE.tmp.$$" 2>/dev/null || true
+      return
+    fi
+  fi
+  # python3/reader assenti, o lettura fallita: fallback dichiarato, mai un crash.
+  EXTERNAL_RE="$HARDCODED_EXTERNAL_RE"
+}
+
+# ------------------------------------------------------------------------------
 # 0. Bash mode: applica il gate solo a comandi write/external
 # ------------------------------------------------------------------------------
 # I comandi bash di sola lettura (ls, cat, grep, git status...) passano senza WI.
@@ -182,7 +295,7 @@ EOF
   # Payload vuoto/non ispezionabile (jq presente, ma niente da leggere): permissive
   [[ -z "$BASH_CMD" ]] && exit 0
 
-  EXTERNAL_RE='git push|git push --force|supabase (db push|functions deploy|secrets set)|vercel (--prod|deploy)|npm publish|gh release|systemctl (restart|stop|disable)|docker (push|rm)'
+  _resolve_external_regex   # popola EXTERNAL_RE da governance-policy.yaml (cache su mtime, v1.9)
   WRITE_RE='(^|[^>])>>?[[:space:]]*[^&[:space:]]|sed[[:space:]]+-i|\btee\b|\brm[[:space:]]|\bmv[[:space:]]|\bcp[[:space:]]|mkdir|chmod|chown|truncate|\bln[[:space:]]|psql .*(-c|-f)|curl .*-(X[[:space:]]*(POST|PUT|PATCH|DELETE)|d[[:space:]])|python[0-9.]*[[:space:]].*(setup|install)|pip[0-9.]*[[:space:]]+install|npm[[:space:]]+(install|ci)|git[[:space:]]+(commit|merge|rebase|reset|checkout[[:space:]]+-b|cherry-pick|tag)'
   # Redirezioni innocue (fd-dup, /dev/null) NON sono scritture "gated": ripulisci
   # prima di matchare WRITE_RE, altrimenti `2>/dev/null` triggera un falso BLOCK.
@@ -197,16 +310,6 @@ EOF
     exit 0          # bash read-only: nessun gate
   fi
 fi
-
-# ------------------------------------------------------------------------------
-# Paths — risolti come ASSOLUTI, indipendenti dalla cwd del chiamante (v1.4).
-# Priorita': CLAUDE_PROJECT_DIR (se valorizzato dall'harness) > self-locating
-# dalla posizione dello script (questo file vive in <project-root>/.claude/hooks/).
-# ------------------------------------------------------------------------------
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PROJECT_ROOT="${CLAUDE_PROJECT_DIR:-$SCRIPT_DIR}"
-CACHE_DIR="$PROJECT_ROOT/.claude/cache"
-WI_CACHE="$CACHE_DIR/current-work-item.json"
 
 # ------------------------------------------------------------------------------
 # 0.5 Lock: serializza le esecuzioni concorrenti del gate (fix WI ccde9d50).
@@ -245,12 +348,11 @@ if [[ ! -f "$WI_CACHE" ]]; then
 Nessun Work Item attivo per agente '$AGENT_SLUG'.
 
 Prima di eseguire scritture persistenti (codice, docs, DB, messaggi), DEVI
-aprire un Work Item:
+aprire un Work Item chiamando il tool MCP mcp__board__wi_start:
 
-  wi-start --gtd-id <uuid>                    # se il GTD esiste gia'
-  wi-start --new --intent "..." --template <name>   # nuovo GTD + WI
-  wi-start --emergency --reason "..."         # bypass per emergenze (audit follow-up)
-  wi-start --read-only-session                # dichiara sessione esplorativa
+  mcp__board__wi_start(gtd_item_id=<uuid>)                       # se il GTD esiste gia'
+  mcp__board__wi_start(intent="...", template_name=<name>)       # nuovo GTD + WI
+  mcp__board__wi_start(intent="...", pre_conditions={"emergency": "..."})  # bypass per emergenze (audit follow-up)
 
 Vedi: hub/initiatives/governance-compliance/design.md sezione 5.
 Spec governance: D-024.
@@ -293,7 +395,7 @@ case "$WI_STATUS" in
   active|emergency|exempt)
     # OK, procede a verifica pre-conditions
     ;;
-  paused|done|failed)
+  paused|done|failed|escalation_pending|escalated)
     # Whitelist post-chiusura (D-069 two-phase close + summary D-014):
     # dopo wi_end (incl. status=waiting -> WI.status=paused) o wi_pause sono
     # legittimi SOLO gli step di chiusura/segnalazione — arm GTD, summary a
@@ -306,6 +408,15 @@ case "$WI_STATUS" in
     # agent_slug) bloccava la chiusura pulita del PROPRIO WI (active a DB)
     # quando un'altra window dello stesso agente aveva appena scritto
     # status=done/paused nella cache condivisa.
+    # v2.0 (2026-08-29, GTD fded964a, D-135, it-manager): aggiunti
+    # escalation_pending/escalated al case — prima cadevano nel ramo `*`
+    # "status sconosciuto", che blocca SENZA passare dalla whitelist qui
+    # sotto. Effetto reale: un operatore il cui wi_end porta il WI a
+    # escalation_pending non poteva nemmeno mandare il board_send al target
+    # che il protocollo D-135 gli chiede di mandare — il gate murava
+    # esattamente la scrittura legittima che l'escalation richiede. Stessa
+    # famiglia di difetto del GTD 97356594 (gate che tratta un WI chiuso in
+    # anticipo come se l'agente non stesse più lavorando).
     POST_CLOSE_TOOL=""
     if command -v jq &>/dev/null && [[ -n "$HOOK_INPUT" ]]; then
       POST_CLOSE_TOOL=$(printf '%s' "$HOOK_INPUT" | jq -r '.tool_name // empty' 2>/dev/null || echo "")
@@ -325,10 +436,45 @@ Work Item corrente e in pausa (status=paused).
 WI id: $WI_ID
 Intent: $WI_INTENT
 
-Prima di scrivere, riprendi il WI con:
-  wi-resume $WI_ID
+Prima di scrivere, riprendi il WI chiamando il tool MCP:
+  mcp__board__wi_resume(wi_id="$WI_ID")
 
-Oppure aprine uno nuovo con wi-start.
+Oppure aprine uno nuovo con mcp__board__wi_start.
+EOF
+    elif [[ "$WI_STATUS" == "escalation_pending" ]]; then
+      cat >&2 <<EOF
+[governance-gate BLOCK]
+
+Work Item in escalation_pending (D-135) — terminale per l'operatore.
+
+WI id: $WI_ID
+Intent: $WI_INTENT
+
+Dopo il terzo rifiuto di verifica, wi_end ha portato questo WI a
+escalation_pending: il verdetto e' salvo, ma un trigger DB rifiuta ogni
+scrittura ulteriore sulla riga. NON c'e' modo di sbloccarlo da qui (niente
+wi_resume, niente retry) — l'unica uscita e' la promozione automatica a
+escalated (trigger sul messaggio collegato al WI, o il generico dello sweep
+del reconciler sui pending stantii se non evochi in tempo).
+
+Se devi ancora avvisare il destinatario (escalation_target), puoi: quella
+scrittura passa (whitelist sopra). Tutto il resto sul WI resta bloccato per
+progetto (D-135) — non e' un bug del gate.
+EOF
+    elif [[ "$WI_STATUS" == "escalated" ]]; then
+      cat >&2 <<EOF
+[governance-gate BLOCK]
+
+Work Item in escalated (D-135) — richiede risoluzione prima di riprendere.
+
+WI id: $WI_ID
+Intent: $WI_INTENT
+
+Il WI e' stato promosso a escalated (rifiuti di verifica esauriti + target
+notificato). Prima di scrivere ancora, risolvi e riprendi con:
+  mcp__board__wi_resume(wi_id="$WI_ID")
+
+Oppure aprine uno nuovo con mcp__board__wi_start.
 EOF
     else
       cat >&2 <<EOF
@@ -337,18 +483,19 @@ EOF
 Work Item corrente e gia chiuso (status=$WI_STATUS).
 
 La cache locale (.claude/cache/current-work-item.json) non riflette lo stato
-reale in DB. Verifica con:
-  wi-status
+reale in DB. Verifica chiamando il tool MCP:
+  mcp__board__wi_status()
 
-Se in DB risulta un WI diverso attivo o in pausa, riallinea con:
-  wi-resume <id>      # se paused
-  wi-switch <id> ...   # per riallineare la cache al volo
+Se in DB risulta un WI diverso attivo o in pausa, riallinea chiamando:
+  mcp__board__wi_resume(wi_id=<id>)   # se paused
+  mcp__board__wi_switch(wi_id=<id>, ...)   # per riallineare la cache al volo
 
-Altrimenti apri un nuovo WI con:
-  wi-start --new --intent "..."
+Altrimenti apri un nuovo WI chiamando:
+  mcp__board__wi_start(intent="...")
 
-Se wi-status mostra un WI 'active' MENTRE questo messaggio appare (cache e DB
-in disaccordo), e' un falso positivo noto (GTD 4f05821c) — segnala a it-manager.
+Se mcp__board__wi_status mostra un WI 'active' MENTRE questo messaggio appare
+(cache e DB in disaccordo), e' un falso positivo noto (GTD 4f05821c) — segnala
+a it-manager.
 EOF
     fi
     exit 2
@@ -369,10 +516,10 @@ if [[ -n "$WI_AGENT" && "$WI_AGENT" != "$AGENT_SLUG" ]]; then
 
 Mismatch agent_slug: WI cache dice '$WI_AGENT', hook invocato per '$AGENT_SLUG'.
 
-Possibile causa: cache stale da altra sessione. Esegui:
-  wi-status         # per verificare
-  wi-end            # se il WI non e piu rilevante
-  wi-start --new    # per aprirne uno nuovo
+Possibile causa: cache stale da altra sessione. Chiama i tool MCP:
+  mcp__board__wi_status()               # per verificare
+  mcp__board__wi_end(wi_id=..., status=...)   # se il WI non e piu rilevante
+  mcp__board__wi_start(intent="...")     # per aprirne uno nuovo
 EOF
   exit 2
 fi
@@ -404,11 +551,13 @@ $(printf '  - %s\n' "${MISSING[@]}")
 WI id: $WI_ID
 Intent: $WI_INTENT
 
-Compila le pre-conditions PRIMA di scrivere. Usa:
-  wi-update <field> <value>
+Compila le pre-conditions PRIMA di scrivere. Nessun tool MCP aggiorna le
+pre_conditions in-place su un WI gia' aperto: chiudi questo WI (mcp__board__
+wi_end) e riaprilo con mcp__board__wi_start(gtd_item_id=..., pre_conditions=
+{<field>: <value>, ...}) valorizzato correttamente.
 
 Oppure, se l'urgenza lo giustifica:
-  wi-start --emergency --reason "..."   # bypass con audit follow-up
+  mcp__board__wi_start(intent="...", pre_conditions={"emergency": "..."})   # bypass con audit follow-up
 EOF
     exit 2
   fi

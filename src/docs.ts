@@ -38,6 +38,12 @@ export type DocResult<T> = { ok: true; data: T } | { ok: false; error: string };
 export interface DocContext {
   selfSlug: string;
   isLoomy: boolean;
+  // D-167 false positive (GTD 89c232d4): visibilityGap()'s existence probe needs
+  // loomx_projects, which doc_rw holds no grant on (factSync.ts verifyProjectExists
+  // hit the same wall) — so it runs on the SERVICE-ROLE client, threaded in here.
+  // Optional: tests that don't supply it just fall back to the pre-fix membership-
+  // only check, never a hard failure.
+  serviceDb?: SupabaseClient;
 }
 
 function nowIso(): string {
@@ -232,6 +238,29 @@ export async function docCreate(
   }
 
   const row = data as { id: string; document_type: string; title: string };
+
+  // D-132 (GTD 8b97b1ca): the insert result above is synthesized client-side
+  // under doc_rw's no-RETURNING mode (F4.5 / v0.8.1) — it is not evidence the
+  // row exists. Same class docItemUpsert already closed on its own insert path.
+  const { data: after, error: afterErr } = await db
+    .from(DOCUMENTS)
+    .select("id, project_id, document_type, title, owner, status, version, visibility")
+    .eq("id", row.id)
+    .maybeSingle();
+  if (afterErr || !after) {
+    return err(
+      `Document insert reported success but the row is not readable at id '${row.id}': ` +
+      `${afterErr?.message ?? "row not found"}. Treat the write as UNCONFIRMED — nothing may have been persisted.`
+    );
+  }
+  const mismatches = diffAgainstRow(payload, after as Record<string, unknown>);
+  if (mismatches.length > 0) {
+    return err(
+      `Document '${row.id}' was inserted but does not match what was sent, and the DB raised no error ` +
+      `(RLS denial under doc_rw affects 0 rows silently):\n  - ${mismatches.join("\n  - ")}`
+    );
+  }
+
   return { ok: true, data: { document_id: row.id, document_type: row.document_type, title: row.title } };
 }
 
@@ -1134,33 +1163,47 @@ export async function docLink(
 
   // D-070: gtd/wi tables have no relation_type column — only doc↔doc links need it.
   if (args.target_kind === "gtd") {
-    const { data, error } = await db
-      .from(DOC_ITEM_GTD_LINKS)
-      .insert({ doc_item_id: args.from_id, gtd_item_id: args.to_id })
-      .select("id")
-      .maybeSingle();
+    const insert = { doc_item_id: args.from_id, gtd_item_id: args.to_id };
+    const { data, error } = await db.from(DOC_ITEM_GTD_LINKS).insert(insert).select("id").maybeSingle();
     if (error || !data) {
       const m = error?.message ?? "no row";
       if (/duplicate key|doc_item_gtd_links_unique/i.test(m)) return err(`This doc↔gtd link already exists.`);
       if (/foreign key/i.test(m)) return err(`doc_item or gtd item not found (UUID wrong?). Original: ${m}`);
       return err(`Failed to create doc↔gtd link: ${m}`);
     }
-    return { ok: true, data: { link_id: (data as any).id, target_kind: "gtd", relation_type: null } };
+    const linkId = (data as { id: string }).id;
+    // D-132 (GTD b4e07ba6): the INSERT result above is synthesized client-side
+    // under doc_rw's no-RETURNING mode — reread and compare before answering ok.
+    const { data: after, error: afterErr } = await db.from(DOC_ITEM_GTD_LINKS).select("id, doc_item_id, gtd_item_id").eq("id", linkId).maybeSingle();
+    if (afterErr || !after) {
+      return err(`doc↔gtd link insert reported success but the row is not readable at id '${linkId}': ${afterErr?.message ?? "row not found"}. Treat as UNCONFIRMED.`);
+    }
+    const mismatches = diffAgainstRow(insert, after as Record<string, unknown>);
+    if (mismatches.length > 0) {
+      return err(`doc↔gtd link '${linkId}' was inserted but does not match what was sent (D-132):\n  - ${mismatches.join("\n  - ")}`);
+    }
+    return { ok: true, data: { link_id: linkId, target_kind: "gtd", relation_type: null } };
   }
 
   if (args.target_kind === "wi") {
-    const { data, error } = await db
-      .from(DOC_ITEM_WI_LINKS)
-      .insert({ doc_item_id: args.from_id, wi_id: args.to_id })
-      .select("id")
-      .maybeSingle();
+    const insert = { doc_item_id: args.from_id, wi_id: args.to_id };
+    const { data, error } = await db.from(DOC_ITEM_WI_LINKS).insert(insert).select("id").maybeSingle();
     if (error || !data) {
       const m = error?.message ?? "no row";
       if (/duplicate key|doc_item_wi_links_unique/i.test(m)) return err(`This doc↔wi link already exists.`);
       if (/foreign key/i.test(m)) return err(`doc_item or wi not found (UUID wrong?). Original: ${m}`);
       return err(`Failed to create doc↔wi link: ${m}`);
     }
-    return { ok: true, data: { link_id: (data as any).id, target_kind: "wi", relation_type: null } };
+    const linkId = (data as { id: string }).id;
+    const { data: after, error: afterErr } = await db.from(DOC_ITEM_WI_LINKS).select("id, doc_item_id, wi_id").eq("id", linkId).maybeSingle();
+    if (afterErr || !after) {
+      return err(`doc↔wi link insert reported success but the row is not readable at id '${linkId}': ${afterErr?.message ?? "row not found"}. Treat as UNCONFIRMED.`);
+    }
+    const mismatches = diffAgainstRow(insert, after as Record<string, unknown>);
+    if (mismatches.length > 0) {
+      return err(`doc↔wi link '${linkId}' was inserted but does not match what was sent (D-132):\n  - ${mismatches.join("\n  - ")}`);
+    }
+    return { ok: true, data: { link_id: linkId, target_kind: "wi", relation_type: null } };
   }
 
   // target_kind === "doc": relation_type is required and must be in the allowed set.
@@ -1207,17 +1250,23 @@ export async function docLink(
   const crossProject = args.relation_type === "references" || toProjectId !== fromProjectId;
 
   if (crossProject) {
-    const { data, error } = await db
-      .from(DOC_ITEM_XPROJECT_LINKS)
-      .insert({ from_item: args.from_id, to_item: args.to_id, relation_type: args.relation_type })
-      .select("id")
-      .maybeSingle();
+    const xInsert = { from_item: args.from_id, to_item: args.to_id, relation_type: args.relation_type };
+    const { data, error } = await db.from(DOC_ITEM_XPROJECT_LINKS).insert(xInsert).select("id").maybeSingle();
     if (error || !data) {
       const m = error?.message ?? "no row";
       if (/duplicate key|doc_item_xproject_links_unique/i.test(m)) return err(`This cross-project '${args.relation_type}' link already exists.`);
       if (/foreign key/i.test(m)) return err(`doc_item not found (UUID wrong?). Original: ${m}`);
       if (/check constraint|doc_item_xproject_links_relation_type/i.test(m)) return err(`relation_type '${args.relation_type}' is not allowed cross-project. Original: ${m}`);
       return err(`Failed to create cross-project link: ${m}`);
+    }
+    const xLinkId = (data as { id: string }).id;
+    const { data: xAfter, error: xAfterErr } = await db.from(DOC_ITEM_XPROJECT_LINKS).select("id, from_item, to_item, relation_type").eq("id", xLinkId).maybeSingle();
+    if (xAfterErr || !xAfter) {
+      return err(`Cross-project link insert reported success but the row is not readable at id '${xLinkId}': ${xAfterErr?.message ?? "row not found"}. Treat as UNCONFIRMED.`);
+    }
+    const xMismatches = diffAgainstRow(xInsert, xAfter as Record<string, unknown>);
+    if (xMismatches.length > 0) {
+      return err(`Cross-project link '${xLinkId}' was inserted but does not match what was sent (D-132):\n  - ${xMismatches.join("\n  - ")}`);
     }
     const xFact = await deriveFact(db, {
       from_id: args.from_id,
@@ -1232,21 +1281,27 @@ export async function docLink(
     });
     return {
       ok: true,
-      data: { link_id: (data as any).id, target_kind: "doc", relation_type: args.relation_type, ...(xFact ? { fact_subscription: xFact } : {}) },
+      data: { link_id: xLinkId, target_kind: "doc", relation_type: args.relation_type, ...(xFact ? { fact_subscription: xFact } : {}) },
     };
   }
 
-  const { data, error } = await db
-    .from(DOC_ITEM_LINKS)
-    .insert({ from_item: args.from_id, to_item: args.to_id, project_id: fromProjectId, relation_type: args.relation_type })
-    .select("id")
-    .maybeSingle();
+  const linkInsert = { from_item: args.from_id, to_item: args.to_id, project_id: fromProjectId, relation_type: args.relation_type };
+  const { data, error } = await db.from(DOC_ITEM_LINKS).insert(linkInsert).select("id").maybeSingle();
   if (error || !data) {
     const m = error?.message ?? "no row";
     if (/duplicate key|doc_item_links_unique/i.test(m)) return err(`This doc↔doc link already exists (${args.relation_type}).`);
     if (/no_self_link/i.test(m)) return err(`Cannot link an item to itself.`);
     if (/check constraint|doc_item_links_relation_type/i.test(m)) return err(`relation_type '${args.relation_type}' is not allowed intra-project (it may be cross-project-only, e.g. 'references'). Original: ${m}`);
     return err(translateLinkError(m));
+  }
+  const linkId = (data as { id: string }).id;
+  const { data: linkAfter, error: linkAfterErr } = await db.from(DOC_ITEM_LINKS).select("id, from_item, to_item, relation_type").eq("id", linkId).maybeSingle();
+  if (linkAfterErr || !linkAfter) {
+    return err(`doc↔doc link insert reported success but the row is not readable at id '${linkId}': ${linkAfterErr?.message ?? "row not found"}. Treat as UNCONFIRMED.`);
+  }
+  const linkMismatches = diffAgainstRow(linkInsert, linkAfter as Record<string, unknown>);
+  if (linkMismatches.length > 0) {
+    return err(`doc↔doc link '${linkId}' was inserted but does not match what was sent (D-132):\n  - ${linkMismatches.join("\n  - ")}`);
   }
   // D-225/4bis: on a project that has already opted into decay, a new
   // verifies/satisfies bond derives its own 'fact' subscription here and now.
@@ -1264,7 +1319,7 @@ export async function docLink(
   });
   return {
     ok: true,
-    data: { link_id: (data as any).id, target_kind: "doc", relation_type: args.relation_type, ...(fact ? { fact_subscription: fact } : {}) },
+    data: { link_id: linkId, target_kind: "doc", relation_type: args.relation_type, ...(fact ? { fact_subscription: fact } : {}) },
   };
 }
 
@@ -1397,27 +1452,74 @@ export async function docSupersede(
       .update({ code: null, updated_at: nowIso() })
       .eq("id", old.id);
     if (detachErr) return err(`Failed to detach code from old item: ${detachErr.message}`);
+
+    // D-132 (GTD 8b97b1ca): verify BEFORE inserting the new row with this same
+    // code. Under doc_rw's no-RETURNING mode an RLS-denied UPDATE affects 0 rows
+    // without raising — undetected here, the insert below would race the unique
+    // (project_id, code) constraint at best, or silently create a duplicate code
+    // holder at worst.
+    const { data: detachCheck, error: detachCheckErr } = await db
+      .from(DOC_ITEMS)
+      .select("code")
+      .eq("id", old.id)
+      .maybeSingle();
+    if (detachCheckErr || !detachCheck) {
+      return err(
+        `Detach reported success but old item '${old.id}' could not be re-read: ` +
+        `${detachCheckErr?.message ?? "row not found"}. Treat as UNCONFIRMED — supersede aborted, nothing else was touched.`
+      );
+    }
+    if ((detachCheck as { code: string | null }).code !== null) {
+      return err(
+        `Detach NOT applied to old item '${old.id}': code still reads '${(detachCheck as { code: string | null }).code}' ` +
+        `(RLS denial under doc_rw affects 0 rows silently). Supersede aborted before any new row was created.`
+      );
+    }
   }
 
   // Insert the new version FIRST (old row is untouched — still its original status).
+  const newInsertPayload: Record<string, unknown> = {
+    document_id: old.document_id,
+    project_id: old.project_id,
+    item_type: old.item_type,
+    code: carryCode ?? null,
+    status: newStatus,
+    owner: args.attrs ? old.owner : (old.owner ?? ctx.selfSlug),
+    sort_order: old.sort_order,
+    body: args.body !== undefined ? args.body : old.body,
+    priority: old.priority,
+    attrs: newAttrs,
+  };
   const { data: newRow, error: insErr } = await db
     .from(DOC_ITEMS)
-    .insert({
-      document_id: old.document_id,
-      project_id: old.project_id,
-      item_type: old.item_type,
-      code: carryCode ?? null,
-      status: newStatus,
-      owner: args.attrs ? old.owner : (old.owner ?? ctx.selfSlug),
-      sort_order: old.sort_order,
-      body: args.body !== undefined ? args.body : old.body,
-      priority: old.priority,
-      attrs: newAttrs,
-    })
+    .insert(newInsertPayload)
     .select("id, code")
     .maybeSingle();
   if (insErr || !newRow) return err(`Failed to insert new version: ${insErr?.message ?? "no row"}`);
   const created = newRow as { id: string; code: string | null };
+
+  // D-132 (GTD 8b97b1ca): same class as docItemUpsert's insert path — under
+  // doc_rw the insert result above is synthesized client-side (no RETURNING),
+  // so `newRow` is not proof the row exists. Read it back before the placeholder
+  // edge or the old-row mark treat it as real.
+  const { data: newAfter, error: newAfterErr } = await db
+    .from(DOC_ITEMS)
+    .select("id, document_id, project_id, item_type, code, status, owner, sort_order, body, priority, attrs")
+    .eq("id", created.id)
+    .maybeSingle();
+  if (newAfterErr || !newAfter) {
+    return err(
+      `New version insert reported success but the row is not readable at id '${created.id}': ` +
+      `${newAfterErr?.message ?? "row not found"}. Treat as UNCONFIRMED — nothing else was touched.`
+    );
+  }
+  const newMismatches = diffAgainstRow(newInsertPayload, newAfter as Record<string, unknown>);
+  if (newMismatches.length > 0) {
+    return err(
+      `New version '${created.id}' was inserted but does not match what was sent, and the DB raised no error ` +
+      `(RLS denial under doc_rw affects 0 rows silently):\n  - ${newMismatches.join("\n  - ")}. Nothing else was touched.`
+    );
+  }
 
   // Heir edge, new --supersedes--> old: needed TWICE, for two different DB-owned
   // mechanisms that conflict if the same row tries to satisfy both at once.
@@ -1453,6 +1555,31 @@ export async function docSupersede(
     .update({ status: "superseded", updated_at: nowIso() })
     .eq("id", old.id);
   if (supErr) return err(`New version created (${created.id}) and supersede edge (${placeholderId}) exist, but marking old item superseded failed: ${supErr.message}`);
+
+  // D-132 (GTD 8b97b1ca): verify BY MEASUREMENT, not by relying on
+  // gov.relink_superseded's 23514 bounce (comment above) — that only fires
+  // because relink happens to require old.status='superseded' as its own
+  // precondition, not because anything here checked. Read the row back before
+  // the placeholder is removed and relink runs against it.
+  const { data: supCheck, error: supCheckErr } = await db
+    .from(DOC_ITEMS)
+    .select("status")
+    .eq("id", old.id)
+    .maybeSingle();
+  if (supCheckErr || !supCheck) {
+    return err(
+      `New version created (${created.id}) and supersede edge (${placeholderId}) exist, but old item '${old.id}' ` +
+      `could not be re-read after marking it superseded: ${supCheckErr?.message ?? "row not found"}. Treat as ` +
+      `UNCONFIRMED — link transfer was NOT run.`
+    );
+  }
+  if ((supCheck as { status: string }).status !== "superseded") {
+    return err(
+      `New version created (${created.id}) but old item '${old.id}' was NOT marked superseded: status still reads ` +
+      `'${(supCheck as { status: string }).status}' (RLS denial under doc_rw affects 0 rows silently). Link ` +
+      `transfer was NOT run — the placeholder edge (${placeholderId}) is still in place, no manual repair needed yet.`
+    );
+  }
 
   // Remove the placeholder now that its only job (satisfying the trigger above) is
   // done — it must be gone before relink runs, or relink corrupts it (see (2) above).
@@ -1556,10 +1683,21 @@ export interface VisibilityGap {
 // answer (REQ-016: compliant), not "zero rows AND zero visibility" (the only
 // case this note is for). Membership stays as the fallback signal for that
 // remaining ambiguous case.
+// R4 fix (GTD 89c232d4, measured 2026-08-20 on a made-up project_id): the
+// membership check below returns false for BOTH "project exists but I hold no
+// membership" and "project does not exist at all" — visibilityGap used to
+// answer the same "request membership from dba" note for both, a false
+// diagnosis that sends the caller chasing a permission fix for an id that was
+// never real. Existence is not privileged information (project_list already
+// enumerates loomx_projects to anyone), so this probes it first via the
+// service-role client and reports the honest reason. Best-effort: no serviceDb,
+// or the probe itself errors, and this just falls through to the membership
+// check — never worse than before the fix.
 async function visibilityGap(
   db: SupabaseClient,
   projectId: string,
-  selfSlug: string
+  selfSlug: string,
+  serviceDb?: SupabaseClient
 ): Promise<VisibilityGap | undefined> {
   const { data: probeRows, error: probeErr } = await db
     .from(DOC_ITEMS)
@@ -1567,6 +1705,22 @@ async function visibilityGap(
     .eq("project_id", projectId)
     .limit(1);
   if (!probeErr && Array.isArray(probeRows) && probeRows.length > 0) return undefined;
+
+  if (serviceDb) {
+    const { data: proj, error: projErr } = await serviceDb
+      .from("loomx_projects")
+      .select("id")
+      .eq("id", projectId)
+      .maybeSingle();
+    if (!projErr && !proj) {
+      return {
+        visibility_gap: true,
+        note:
+          `0 rows — project_id '${projectId}' does not exist in loomx_projects. This is NOT a permissions/RLS ` +
+          `issue: no membership request will fix it. Use project_list to find the right id.`,
+      };
+    }
+  }
 
   const rw = docRwHandle(db);
   if (!rw || !rw.agentInProject) return undefined;
@@ -1589,7 +1743,7 @@ export async function docQuery(
   db: SupabaseClient,
   args: DocQueryArgs,
   ctx: DocContext
-): Promise<DocResult<{ mode: string; count: number; items: unknown[]; truncated?: true; documents?: Record<string, { title: string; document_type: string }>; visibility_gap?: true; note?: string }>> {
+): Promise<DocResult<{ mode: string; count: number; items: unknown[]; truncated?: true; documents?: Record<string, { title: string; document_type: string }>; visibility_gap?: true; note?: string; notes?: string[] }>> {
   if (args.traceability === "req_without_origin") {
     return docTraceabilityOrigin(db, args, ctx);
   }
@@ -1641,7 +1795,7 @@ export async function docQuery(
     if (de) return err(`Failed to filter by document_type: ${de.message}`);
     const ids = (Array.isArray(docs) ? docs : []).map((d) => (d as any).id);
     if (ids.length === 0) {
-      const gap = await visibilityGap(db, args.project_id, ctx.selfSlug);
+      const gap = await visibilityGap(db, args.project_id, ctx.selfSlug, ctx.serviceDb);
       return { ok: true, data: { mode: args.summary ? "summary" : "items", count: 0, items: [], ...gap } };
     }
     q = q.in("document_id", ids);
@@ -1653,15 +1807,27 @@ export async function docQuery(
   // CV-8 (D-203, msg 2190b6ae): count is the page size, never a full-table
   // total — `truncated` is the honest signal that the cap actually cut rows.
   const { page: rows, truncated } = paginate(rawRows, effectiveLimit);
-  const gap = rows.length === 0 ? await visibilityGap(db, args.project_id, ctx.selfSlug) : undefined;
+  const gap = rows.length === 0 ? await visibilityGap(db, args.project_id, ctx.selfSlug, ctx.serviceDb) : undefined;
 
   if (args.summary) {
-    const summarized = await docSummarize(db, args.project_id, rows);
+    const { items: summarized, hasCrossProject } = await docSummarize(db, args.project_id, rows);
     // GTD 4a591cfe: a project can span several documents, and 27 rows with no
     // hint of that made the split invisible. Each summary row carries its
     // document_id; this legend maps them to titles without a second query.
     const documents = await documentLegend(db, rows);
-    return { ok: true, data: { mode: "summary", count: summarized.length, items: summarized, ...(truncated ? { truncated } : {}), ...(documents ? { documents } : {}), ...gap } };
+    // GTD fb2f17e9: only surfaced when it's actually load-bearing for this
+    // page — a fixed note on every summary call would be noise for the
+    // common project that has no cross-project links at all.
+    const notes = hasCrossProject
+      ? [
+          "cross_project_out/cross_project_in count doc_item_xproject_links (D-074) separately from doc_out/doc_in " +
+          "(doc_item_links, same-project only). A 'references' link ALWAYS routes cross-project even when both " +
+          "ends share this project_id — it will show 0 in doc_out/doc_in by design, not as a sign the write failed.",
+          "cross_project_in is a floor, not a total: the link SELECT policy is anchored on the FROM end, so an " +
+          "inbound link from a project this identity cannot read stays invisible here.",
+        ]
+      : undefined;
+    return { ok: true, data: { mode: "summary", count: summarized.length, items: summarized, ...(truncated ? { truncated } : {}), ...(documents ? { documents } : {}), ...(notes ? { notes } : {}), ...gap } };
   }
 
   return { ok: true, data: { mode: "items", count: rows.length, items: rows, ...(truncated ? { truncated } : {}), ...gap } };
@@ -1692,12 +1858,14 @@ async function docSummarize(
   db: SupabaseClient,
   projectId: string,
   rows: any[]
-): Promise<unknown[]> {
+): Promise<{ items: unknown[]; hasCrossProject: boolean }> {
   const ids = rows.map((r) => r.id);
   const docOut = new Map<string, number>();
   const docIn = new Map<string, number>();
   const gtdCnt = new Map<string, number>();
   const wiCnt = new Map<string, number>();
+  const xOut = new Map<string, number>();
+  const xIn = new Map<string, number>();
   const bump = (m: Map<string, number>, k: string) => m.set(k, (m.get(k) ?? 0) + 1);
 
   if (ids.length > 0) {
@@ -1721,9 +1889,25 @@ async function docSummarize(
       .select("doc_item_id")
       .in("doc_item_id", ids);
     for (const l of (Array.isArray(wl) ? (wl as any[]) : [])) bump(wiCnt, l.doc_item_id);
+    // GTD fb2f17e9: 'references' ALWAYS routes to doc_item_xproject_links
+    // (D-074), even when from/to share this project_id — docLink's own
+    // comment says so. Without this, a same-project 'references' link is
+    // written correctly but invisible here: doc_out/doc_in silently read 0
+    // and looked like the write never happened. doc_item_xproject_links has
+    // no project_id column, so both ends are matched against this page's ids.
+    const { data: xo } = await db
+      .from(DOC_ITEM_XPROJECT_LINKS)
+      .select("from_item")
+      .in("from_item", ids);
+    for (const l of (Array.isArray(xo) ? (xo as any[]) : [])) bump(xOut, l.from_item);
+    const { data: xi } = await db
+      .from(DOC_ITEM_XPROJECT_LINKS)
+      .select("to_item")
+      .in("to_item", ids);
+    for (const l of (Array.isArray(xi) ? (xi as any[]) : [])) bump(xIn, l.to_item);
   }
 
-  return rows.map((r) => {
+  const items = rows.map((r) => {
     const body = typeof r.body === "string" ? r.body : "";
     const curatedTitle = typeof r.title === "string" && r.title.trim().length > 0 ? r.title.trim() : null;
     const curatedSummary = typeof r.summary === "string" && r.summary.trim().length > 0 ? r.summary.trim() : null;
@@ -1747,9 +1931,12 @@ async function docSummarize(
         doc_in: docIn.get(r.id) ?? 0,
         gtd: gtdCnt.get(r.id) ?? 0,
         wi: wiCnt.get(r.id) ?? 0,
+        cross_project_out: xOut.get(r.id) ?? 0,
+        cross_project_in: xIn.get(r.id) ?? 0,
       },
     };
   });
+  return { items, hasCrossProject: xOut.size > 0 || xIn.size > 0 };
 }
 
 // Traceability: items of a "source" type in the project with no link to a
@@ -1798,7 +1985,7 @@ async function docTraceability(
   if (srcErr) return err(`Traceability source query failed: ${srcErr.message}`);
   const sources = (Array.isArray(srcRows) ? (srcRows as any[]) : []).filter((s) => !RETIRED_STATUS_SET.has(s.status));
   if (sources.length === 0) {
-    const gap = await visibilityGap(db, args.project_id, ctx.selfSlug);
+    const gap = await visibilityGap(db, args.project_id, ctx.selfSlug, ctx.serviceDb);
     return { ok: true, data: { mode: `traceability:${args.traceability}`, count: 0, items: [], ...gap } };
   }
   const sourceIds = new Set(sources.map((s) => s.id as string));
@@ -1980,7 +2167,7 @@ async function docTraceabilityOrigin(
   if (srcErr) return err(`Traceability source query failed: ${srcErr.message}`);
   const sources = (Array.isArray(srcRows) ? (srcRows as any[]) : []).filter((s) => s.status !== "superseded");
   if (sources.length === 0) {
-    const gap = await visibilityGap(db, args.project_id, ctx.selfSlug);
+    const gap = await visibilityGap(db, args.project_id, ctx.selfSlug, ctx.serviceDb);
     return { ok: true, data: { mode: "traceability:req_without_origin", count: 0, items: [], ...gap } };
   }
   const sourceIds = new Set(sources.map((s) => s.id as string));
@@ -2222,7 +2409,7 @@ async function docBrokenRefs(
     projectItems.set(r.id, { code: r.code ?? null, item_type: r.item_type, status: r.status });
   }
   if (projectItems.size === 0) {
-    const gap = await visibilityGap(db, args.project_id, ctx.selfSlug);
+    const gap = await visibilityGap(db, args.project_id, ctx.selfSlug, ctx.serviceDb);
     return { ok: true, data: { mode: "traceability:broken_refs", count: 0, items: [], ...gap } };
   }
   const projectItemIds = Array.from(projectItems.keys());
@@ -2370,7 +2557,7 @@ async function docBrokenRefs(
   const effectiveLimit = args.limit ?? 50;
   const { page: brokenPage, truncated } = paginate(broken, effectiveLimit);
   const { page: abstainedPage } = paginate(abstained, effectiveLimit);
-  const gap = scanned.length === 0 ? await visibilityGap(db, args.project_id, ctx.selfSlug) : undefined;
+  const gap = scanned.length === 0 ? await visibilityGap(db, args.project_id, ctx.selfSlug, ctx.serviceDb) : undefined;
 
   return {
     ok: true,

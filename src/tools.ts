@@ -230,6 +230,13 @@ export function buildGtdUpdatePayload(fields: GtdUpdateFields): Record<string, u
 // the actual gap: each recipient gets its own GTD, one per owner, deduped
 // against re-sends of the same message via the same (owner, source_ref) rule
 // gtd_add already uses.
+// GTD fc61f4d0 (loomy, 2026-08-22): board_agents.slug for a recipient may
+// carry different casing than the GTD queue actually watched for that owner
+// (e.g. board_send recipient "Achille" vs the real "achille" queue — 36 open
+// items sat there while capital-cased auto_gtd items landed unseen). owner
+// has no FK to board_agents.slug and every other agent slug is already
+// lowercase, so lowercasing here is a safe no-op for the rest of the fleet
+// and the actual fix for a mismatched one.
 export function buildAutoGtdInsertPayload(params: {
   owner: string;
   title: string;
@@ -241,7 +248,7 @@ export function buildAutoGtdInsertPayload(params: {
     title: params.title,
     body: params.body,
     gtd_status: "inbox",
-    owner: params.owner,
+    owner: params.owner.toLowerCase(),
     priority: params.priority ?? "normal",
     source: "board",
     source_ref: params.source_ref,
@@ -297,13 +304,24 @@ export function registerTools(
     params: { owner: string; title: string; body: string | null; source_ref: string; priority?: "low" | "normal" | "high" | "urgent" }
   ): Promise<string | null> => {
     try {
-      const { data: existing } = await db
+      // Dedup pre-check must match on the same casing buildAutoGtdInsertPayload
+      // will write (see its comment) — otherwise a re-send with different
+      // to_agent casing than a prior insert would slip past the (owner,
+      // source_ref) dedup and create a duplicate.
+      const owner = params.owner.toLowerCase();
+      const { data: existing, error: dedupError } = await db
         .from(GTD_TABLE)
         .select("id")
-        .eq("owner", params.owner)
+        .eq("owner", owner)
         .eq("source_ref", params.source_ref)
         .not("gtd_status", "eq", "trash")
         .maybeSingle();
+      // it-manager msg 3385a4fa (GTD 224b3886): a discarded error here (RLS,
+      // network, or "multiple rows" — the exact state a first duplicate
+      // leaves behind) reads as "no duplicate" and inserts another one,
+      // self-perpetuating. Same fix as gtd_add's D-066 pre-check: fail loud
+      // instead of inserting blind.
+      if (dedupError) return `D-066 dedup pre-check failed: ${dedupError.message}`;
       if (existing) return null;
 
       const { error } = await db.from(GTD_TABLE).insert(buildAutoGtdInsertPayload(params));
@@ -1146,15 +1164,29 @@ export function registerTools(
         }
       }
 
-      // D-066 dedup: if source_ref given, return existing GTD (owner+source_ref) instead of inserting
+      // D-066 dedup: if source_ref given, return existing GTD (owner+source_ref) instead of inserting.
+      // it-manager msg 3385a4fa (GTD 224b3886): the pre-insert SELECT's `error`
+      // was discarded — any failure (RLS, network, or "multiple rows", which is
+      // exactly the state left behind by a first duplicate) silently produced
+      // existing=undefined, so the dedup was bypassed and inserted ANOTHER
+      // duplicate, self-perpetuating from then on. Fail loud instead: a dedup
+      // check that can't be trusted must not be treated as "no duplicate".
       if (source_ref) {
-        const { data: existing } = await db
+        const { data: existing, error: dedupError } = await db
           .from(GTD_TABLE)
           .select("id, title, gtd_status, owner, created_at")
           .eq("owner", targetOwner)
           .eq("source_ref", source_ref)
           .not("gtd_status", "eq", "trash")
           .maybeSingle();
+        if (dedupError) {
+          return {
+            content: [
+              { type: "text", text: `Error: D-066 dedup pre-check failed (${dedupError.message}). Refusing to insert blind — this could mask an existing duplicate for owner='${targetOwner}' source_ref='${source_ref}'. Investigate (RLS, network, or more than one non-trash row already sharing this owner+source_ref) before retrying.` },
+            ],
+            isError: true,
+          };
+        }
         if (existing) {
           return {
             content: [{
@@ -3545,7 +3577,10 @@ export function registerTools(
   // primary how-to surface (introspect schema + example per type).
   // =========================================================================
 
-  const docCtx = { selfSlug, isLoomy };
+  // serviceDb (GTD 89c232d4, D-167 fix): visibilityGap's project-existence probe
+  // needs loomx_projects, which doc_rw holds no grant on — same wall factSync.ts
+  // hit for docFactSync, same fix (service-role client, sourced outside doc_rw).
+  const docCtx = { selfSlug, isLoomy, serviceDb: getSupabaseClient() };
   const DOC_TYPES_LIST = DB_DOCUMENT_TYPES.join(", ");
   const ITEM_TYPES_LIST = DB_ITEM_TYPES.join(", ");
   const DOC_LINK_TYPES_LIST = DB_DOC_ITEM_LINK_TYPES.join(", ");
@@ -3766,8 +3801,7 @@ export function registerTools(
       `req_without_origin (GTD 1b793e87 follow-on, msg 28e9aa98) checks D-206's separate upstream axis — every requirement must be LINKED (doc_link / doc_link_by_code, same mechanism as req_without_sdes above — NOT doc_subscribe/gov.doc_subscriptions, which is a different axis entirely: staleness/decay tracking for readers who want to be notified of change, not provenance) to the thing it comes from, one of 4 admitted origins: a SoW element (objective/deliverable/stop_condition — "il capitolato"), a cross-project decision, a project-local decision, or a document it draws on. 'coverage.covered_by' breaks the total down by origin type (never fused). A cross-project link whose target can't be resolved (RLS-invisible from here) never counts as "no origin" — it lands in 'abstained_items'/'coverage.abstained' instead, distinct from a true gap in 'items'/'coverage.gap': per D-206, a true gap means the SoW is incomplete, not that the requirement is defective. ` +
       `broken_refs (msg forge 162add27 / loomy c473e347 — UAT-PG-008 step 1, auditor condition 11) checks LINK integrity across BOTH generic link tables (doc_item_links + doc_item_xproject_links), not just the req→sdes axis, and runs under doc_rw so each agent measures with its OWN identity (the permission-denied forge hit was on its native role, not on doc_rw). The unit is the LINK, not the item. Three outcomes, never fused: 'items' = links pointing at a RETIRED row (status in superseded/deprecated/archived/rejected, echoed as 'retired_statuses'), each with kind + a doc_item_chain hint when a successor is visible; 'abstained_items' = links whose target this identity cannot read (the link SELECT policy is anchored on the FROM end only, so a readable link can point at an unreadable row) — a limit of your view, never scored as a defect; the rest counts as ok. ` +
       `A DANGLING pointer (link → row that does not exist) is impossible by construction and is reported as 'dangling:{count:0, measured:false, basis}' — both tables FK both endpoints to doc_items ON DELETE CASCADE, so it is a structural fact, NOT something this check measured; an RLS-scoped SELECT could never tell 'deleted' from 'hidden' anyway. 'supersedes' edges are excluded from classification (coverage.skipped_supersedes) — they point from a retired row to its heir by construction. 'cross_project_in' is a FLOOR, not a total: inbound references whose FROM end lives in a project you cannot read are invisible here. ` +
-      `D-167: a 0-row result carries visibility_gap:true + a note when you have no membership/visibility on project_id — ` +
-      `that 0 may be an RLS block, not an empty corpus (verify before treating it as a clean gap-check pass). ` +
+      `D-167: a 0-row result carries visibility_gap:true + a note when the 0 is not trustworthy as a clean gap-check pass — either project_id does not exist in loomx_projects (GTD 89c232d4 fix: the note says so plainly, no membership request will help), or it exists and you have no membership/visibility on it (the 0 may be an RLS block, not an empty corpus). ` +
       `Example (filter): doc_query({project_id:"<uuid>", item_type:"requirement"}). ` +
       `Example (lean): doc_query({project_id:"<uuid>", document_type:"req", summary:true}). ` +
       `Example (gap): doc_query({project_id:"<uuid>", traceability:"req_without_sdes"}). ` +
