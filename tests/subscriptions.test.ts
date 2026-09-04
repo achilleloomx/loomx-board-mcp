@@ -223,6 +223,37 @@ test("doc_subscribe: admits 'module' and 'critical' on a hub cross-project decis
   assert.match((res as any).error, /REQ-SUB-014|informative/i);
 });
 
+// it-manager review of SDES-SUB-012 (msg cafe0eaf, 2026-09-04): REQ-SUB-014's
+// acceptance_criteria explicitly names a negative case ("doc_subscribe verso
+// una riga decision senza nota viene rifiutata con il motivo") that DEC-SUB-001
+// also asks for (positive AND negative collaudo). The note-mandatory check
+// itself predates REQ-SUB-014 (unconditional, line ~180 above — enforced
+// before the hub-decision branch is even reached), but no existing test
+// exercised it for doc_subscribe at all, let alone on a hub decision row.
+test("doc_subscribe: rejects module/critical on a hub cross-project decisions row when note is missing", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const hubDocId = uuid();
+  seedDocument(store, hubDocId, HUB_PROJECT_ID, "1.0", HUB_DECISION_DOCUMENT_TYPE);
+  const subId = uuid();
+  const localDocId = uuid();
+  seedDocument(store, localDocId, PROJ_A);
+  seedDocItem(store, subId, PROJ_A, localDocId, "board-mcp");
+
+  for (const intent of ["module", "critical"] as const) {
+    const targetId = uuid();
+    seedDocItem(store, targetId, HUB_PROJECT_ID, hubDocId, "loomy");
+    const res = await docSubscribe(
+      db,
+      { subscriber_item_id: subId, target_item_id: targetId, intent, note: "" },
+      ctx
+    );
+    assert.equal(res.ok, false, `intent=${intent} with empty note should be rejected`);
+    assert.match((res as any).error, /note is required/i);
+  }
+});
+
 test("doc_subscribe: rejects a document-level 'informative' watch on a hub cross-project decisions document", async () => {
   const store: Store = {};
   seedProjects(store);
