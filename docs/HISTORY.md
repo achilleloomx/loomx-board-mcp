@@ -4,6 +4,22 @@
 
 ---
 
+## Sessione #166 — 2026-09-04 (wake cold-start, msg it-manager `cafe0eaf`, WI `252ca68f`)
+
+**Task:** it-manager, in revisione dell'emendamento SDES-SUB-012 (D-250/REQ-SUB-014, sessione #165), ha trovato un gap di collaudo: REQ-SUB-014 (`acceptance_criteria`) nomina esplicitamente un caso negativo — "doc_subscribe verso una riga decision senza nota viene rifiutata con il motivo" — e DEC-SUB-001 chiede collaudo positivo E negativo, ma i 4 test REQ-SUB-014 in `tests/subscriptions.test.ts` (module/critical ammessi, informative rifiutato riga+documento, critical cross-progetto ammesso) coprono solo il ramo positivo.
+
+**Verificato prima di scrivere:** il controllo "nota obbligatoria" (`src/subscriptions.ts:180-181`) è generico e incondizionato — gira PRIMA del ramo hub-decision, quindi predata REQ-SUB-014 come dice it-manager. Ma grep su tutta `tests/subscriptions.test.ts` mostra zero test per questo controllo su `doc_subscribe` (l'unico match "note is required" nel file è su `doc_subscription_outcome`, tool diverso). Gap reale, non falso allarme.
+
+**Aggiunto:** un test in `tests/subscriptions.test.ts` — nota vuota su riga decision del progetto cappello, per entrambi i gradi ammessi (`module`/`critical`) → rifiuto con "note is required". `npm test` 380/380 verdi (era 379 prima del test aggiunto in sessione #165, +1 qui). Commit `025ce9a`.
+
+**Risposto a it-manager** (msg `9ecca2b8`, ref `cafe0eaf`): via libera a promuovere SDES-SUB-012 da `in_review` ad `active` da parte sua — nessun altro blocco lato board-mcp.
+
+**Decisioni prese:** nessuna — chiusura di un gap di collaudo su una decisione già ratificata (D-250).
+**Blocchi / note:** nessuno.
+**Prossima sessione:** nessun follow-on aperto da questo task; la promozione di SDES-SUB-012 spetta a it-manager.
+
+---
+
 ## Sessione #165 — 2026-09-04 (wake cold-start, msg loomy `8ec951ca`, WI `4da7d5dc`, v0.32.1)
 
 **Task:** D-250/REQ-SUB-014 — Achille ha sciolto nella notte 03-04/09 il conflitto misurato fra REQ-SUB-012 (`doc_subscribe` rifiutava OGNI intent verso una decisione cross del progetto cappello) e D-206 ("sottoscrive, non collega": decine di legami REQ→D-NNN creati senza sottoscrizione, sweep rifiutato). REQ-SUB-014 supera REQ-SUB-012: decisioni cross sottoscrivibili come dipendenza dichiarata, l'obbligo vale a prescindere (norme via D-235/CORE-012, non da qui).
