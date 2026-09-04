@@ -10,7 +10,7 @@ import { strict as assert } from "node:assert";
 
 import {
   docSubscribe, docUnsubscribe, docSubscriptionOutcome, docPublish, docRepoint, docVersionDelta, docPublishImpact,
-  HUB_PROJECT_ID, HUB_UNSUBSCRIBABLE_DOCUMENT_TYPE,
+  HUB_PROJECT_ID, HUB_DECISION_DOCUMENT_TYPE,
 } from "../src/subscriptions.ts";
 import { makeDb, uuid, ctx, PROJ_A, PROJ_B, seedProjects, type Store, type Row } from "./fakeDb.ts";
 
@@ -189,38 +189,46 @@ test("doc_subscribe: document-level watch (target_document_id) works", async () 
 });
 
 // ---------------------------------------------------------------------------
-// REQ-SUB-012 / SDES-SUB-012 — hub cross-decisions are never subscribable
-// (declared interim approximation for "core/ambient", loomy correction msg
-// 4162dfb7, 2026-08-27). Every intent is rejected, not just 'critical'.
+// REQ-SUB-014 (supersedes REQ-SUB-012, D-250, Achille 2026-09-04) — hub
+// cross-decisions are now subscribable as a declared dependency, but ONLY
+// at grade 'module' or 'critical' (note always mandatory); 'informative'
+// stays rejected — a lightweight watch on a hub decision isn't a dependency
+// (REQ-SUB-012's rationale still holds at that grade). 'critical' is admitted
+// even cross-project here, an explicit carve-out from the general D-186 Q2
+// refusal below (REQ-SUB-014 acceptance criteria).
 // ---------------------------------------------------------------------------
 
-test("doc_subscribe: rejects a row in a hub cross-project decisions document, any intent", async () => {
+test("doc_subscribe: admits 'module' and 'critical' on a hub cross-project decisions row, rejects 'informative'", async () => {
   const store: Store = {};
   seedProjects(store);
   const db = makeDb(store);
   const hubDocId = uuid();
-  seedDocument(store, hubDocId, HUB_PROJECT_ID, "1.0", HUB_UNSUBSCRIBABLE_DOCUMENT_TYPE);
+  seedDocument(store, hubDocId, HUB_PROJECT_ID, "1.0", HUB_DECISION_DOCUMENT_TYPE);
   const subId = uuid();
   const localDocId = uuid();
   seedDocument(store, localDocId, PROJ_A);
   seedDocItem(store, subId, PROJ_A, localDocId, "board-mcp");
+
+  for (const intent of ["module", "critical"] as const) {
+    const targetId = uuid();
+    seedDocItem(store, targetId, HUB_PROJECT_ID, hubDocId, "loomy");
+    const res = await docSubscribe(db, { subscriber_item_id: subId, target_item_id: targetId, intent, note: "n" }, ctx);
+    assert.ok(res.ok, `intent=${intent} should be admitted: ${JSON.stringify(res)}`);
+  }
+
   const targetId = uuid();
   seedDocItem(store, targetId, HUB_PROJECT_ID, hubDocId, "loomy");
-
-  for (const intent of ["informative", "module", "critical"] as const) {
-    const res = await docSubscribe(db, { subscriber_item_id: subId, target_item_id: targetId, intent, note: "n" }, ctx);
-    assert.equal(res.ok, false, `intent=${intent} should be rejected`);
-    assert.match((res as any).error, /REQ-SUB-012|not subscribable/i);
-    assert.equal((store["gov.doc_subscriptions"] ?? []).length, 0);
-  }
+  const res = await docSubscribe(db, { subscriber_item_id: subId, target_item_id: targetId, intent: "informative", note: "n" }, ctx);
+  assert.equal(res.ok, false, "intent=informative should still be rejected");
+  assert.match((res as any).error, /REQ-SUB-014|informative/i);
 });
 
-test("doc_subscribe: rejects a document-level watch on a hub cross-project decisions document", async () => {
+test("doc_subscribe: rejects a document-level 'informative' watch on a hub cross-project decisions document", async () => {
   const store: Store = {};
   seedProjects(store);
   const db = makeDb(store);
   const hubDocId = uuid();
-  seedDocument(store, hubDocId, HUB_PROJECT_ID, "1.0", HUB_UNSUBSCRIBABLE_DOCUMENT_TYPE);
+  seedDocument(store, hubDocId, HUB_PROJECT_ID, "1.0", HUB_DECISION_DOCUMENT_TYPE);
   const subId = uuid();
   const localDocId = uuid();
   seedDocument(store, localDocId, PROJ_A);
@@ -228,7 +236,39 @@ test("doc_subscribe: rejects a document-level watch on a hub cross-project decis
 
   const res = await docSubscribe(db, { subscriber_item_id: subId, target_document_id: hubDocId, intent: "informative", note: "n" }, ctx);
   assert.equal(res.ok, false);
-  assert.match((res as any).error, /REQ-SUB-012|not subscribable/i);
+  assert.match((res as any).error, /REQ-SUB-014|informative/i);
+});
+
+test("doc_subscribe: admits a document-level 'module' watch on a hub cross-project decisions document", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const hubDocId = uuid();
+  seedDocument(store, hubDocId, HUB_PROJECT_ID, "1.0", HUB_DECISION_DOCUMENT_TYPE);
+  const subId = uuid();
+  const localDocId = uuid();
+  seedDocument(store, localDocId, PROJ_A);
+  seedDocItem(store, subId, PROJ_A, localDocId, "board-mcp");
+
+  const res = await docSubscribe(db, { subscriber_item_id: subId, target_document_id: hubDocId, intent: "module", note: "n" }, ctx);
+  assert.ok(res.ok, JSON.stringify(res));
+});
+
+test("doc_subscribe: 'critical' on a hub cross-project decisions row is admitted across projects (REQ-SUB-014 carve-out from D-186 Q2)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const hubDocId = uuid();
+  seedDocument(store, hubDocId, HUB_PROJECT_ID, "1.0", HUB_DECISION_DOCUMENT_TYPE);
+  const subId = uuid();
+  const localDocId = uuid();
+  seedDocument(store, localDocId, PROJ_A);
+  seedDocItem(store, subId, PROJ_A, localDocId, "board-mcp");
+  const targetId = uuid();
+  seedDocItem(store, targetId, HUB_PROJECT_ID, hubDocId, "loomy");
+
+  const res = await docSubscribe(db, { subscriber_item_id: subId, target_item_id: targetId, intent: "critical", note: "n" }, ctx);
+  assert.ok(res.ok, JSON.stringify(res));
 });
 
 test("doc_subscribe: a hub-project document that is NOT document_type='decisions' stays subscribable (e.g. a future domain manifest)", async () => {

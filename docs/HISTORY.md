@@ -4,6 +4,64 @@
 
 ---
 
+## Sessione #165 — 2026-09-04 (wake cold-start, msg loomy `8ec951ca`, WI `4da7d5dc`, v0.32.1)
+
+**Task:** D-250/REQ-SUB-014 — Achille ha sciolto nella notte 03-04/09 il conflitto misurato fra REQ-SUB-012 (`doc_subscribe` rifiutava OGNI intent verso una decisione cross del progetto cappello) e D-206 ("sottoscrive, non collega": decine di legami REQ→D-NNN creati senza sottoscrizione, sweep rifiutato). REQ-SUB-014 supera REQ-SUB-012: decisioni cross sottoscrivibili come dipendenza dichiarata, l'obbligo vale a prescindere (norme via D-235/CORE-012, non da qui).
+
+**Letto REQ-SUB-014 dal DB prima di scrivere codice** (mai indovinato dal messaggio di loomy, D-136 §5): acceptance criteria espliciti — gradi ammessi ESATTAMENTE `module`/`critical` (nota sempre obbligatoria), `informative` non menzionato → resta rifiutato (la ragione originale di REQ-SUB-012 — "un vincolo a cui si aderisce volontariamente non è un vincolo" — resta valida a quel grado). Questo ha risolto un'ambiguità reale nel testo del messaggio di loomy ("il rifiuto resta solo per intent mancante/nota mancante" si sarebbe potuto leggere come "ammetti anche informative"): il REQ è la fonte, non il messaggio di wake.
+
+**Costruito** (`src/subscriptions.ts`): il gate hub-decisions (REQ-SUB-012, identificazione bersaglio invariata: project_id cappello + `document_type='decisions'`, interim finché non esiste un registro categorie core/ambient) non rifiuta più in blocco — rifiuta solo `intent='informative'`. Il rifiuto generale cross-progetto per `critical` (D-186 Q2, `SDES-SUB-001 §4`) ora esclude esplicitamente il caso hub-decisions: la chiamata `doc_subscribe` stessa è l'atto esplicito che quella regola richiedeva, nota obbligatoria come prova. Rinominata la costante `HUB_UNSUBSCRIBABLE_DOCUMENT_TYPE` → `HUB_DECISION_DOCUMENT_TYPE` (il vecchio nome era diventato falso — il tipo ORA è sottoscrivibile a due gradi su tre).
+
+**Verifiche:** `tsc` pulito, `npm test` 379/379 verdi (4 test riscritti/aggiunti in `tests/subscriptions.test.ts` — module/critical ammessi + informative rifiutato su riga e su documento, critical cross-progetto ammesso). Nessuna verifica dal vivo via MCP: questa window ha caricato `dist/` prima del fix (G4, no hot-reload) — round-trip reale rimandato alla prossima window che parte da questo build. `npm run build` pulito, versione 0.32.1.
+
+**Governance chiusa nello stesso giro:** CLAUDE.md aggiornato (riga `doc_subscribe`). `UAT-050` (progetto board-mcp, `1cf7528a-de42-4a1d-9a59-1379dcd91084`, `done`/`pass`, `verifies`→REQ-SUB-014) documenta esplicitamente il metodo di verifica (unit test, non live) e il perché. SDES-SUB-012 (documento di **it-manager**, progetto items-subscription) emendato con un draft che descrive il nuovo gate, `satisfies`→REQ-SUB-014 (già collegato da loomy) — **non pubblicato in autonomia**: proposto via `board_send` a it-manager per revisione, coerente con l'istruzione esplicita di loomy ("il doc SDES è di it-manager: coordinati") e con D-005 (non decido io il contenuto del documento di un altro agente, anche se come membro del progetto potrei scriverci).
+
+**Non fatto in questa sessione, deliberatamente:** il re-sweep delle sottoscrizioni rifiutate la notte scorsa (Ambiente 11, Decision Enforcement 10, Core, Ciclo di vita, dba 3) — sono chiamate fatte da altri agenti verso i LORO manifesti/requisiti, non da board-mcp; il rilascio del gate è la precondizione, non l'esecuzione del retry.
+
+**Decisioni prese:** nessuna nuova decisione formale — attuazione di D-250/REQ-SUB-014, già approvate da Achille.
+**Blocchi / note:** nessuno bloccante. In attesa: revisione it-manager sull'emendamento SDES-SUB-012 (draft, non bloccante per il rilascio — il codice è la fonte di verità, il documento la descrive).
+**Prossima sessione:** nessun follow-on aperto da questo task oltre alla revisione it-manager (fuori dal mio controllo). Il retry del sweep spetta a chi ha ricevuto il rifiuto la notte scorsa, non a board-mcp.
+
+---
+
+## Sessione #164 — 2026-09-04 (autopilot dispatch, DEL-BM-007 / PH-20 di REG-010, GTD `fc7cbba6`, WI `9bc8976f`)
+
+**Task LOW priority (segnaposto REG-010 PH-20, bonifica D-181):** DEL-BM-007 del SoW dichiarava REQ-024 (ruolo `doc_rw` a pavimento) e REQ-026 (credenziali solo da ambiente) "verificati dal vivo ripetutamente ma senza un `uat_case` dedicato" — gap dichiarato, non taciuto. Chiudere il gap creando i due collaudi.
+
+**UAT-048 (REQ-024)** — poggia su un test eseguibile reale già esistente, `tests/verify-docrw-write.ts`, mai prima formalizzato come `uat_case`: backend pg reale, `atlas` (membro del progetto Enablement) crea/aggiorna/supersede sotto `doc_rw` con successo (5 controlli); `dev-kinesis` (non membro) viene negato dalla RLS su `doc_create` sullo stesso progetto. Aggiunta la lettura di `src/docDb.ts:runDocRw` per il ramo di rifiuto senza backend configurato (mai un ripiego su `service_role`) e il contratto di transazione (`BEGIN/SET LOCAL ROLE doc_rw/SELECT loomx_set_agent_slug/COMMIT`, `$1` bound param).
+
+**UAT-049 (REQ-026)** — nessun harness eseguibile isolabile: `initClient()` (`src/supabase.ts`) è un singleton inizializzato una sola volta all'avvio del processo MCP stdio, non testabile senza spawnare un processo reale e catturarne l'exit. Verificato per lettura del sorgente (4 rami: due backend selezionati correttamente, conflitto DATABASE_URL+SUPABASE_SERVICE_ROLE_KEY rifiutato esplicitamente, assenza di entrambe le coppie rifiutata esplicitamente) + grep su `src/` per hardcode (JWT-like, URL Supabase literal, assegnazioni dirette alle tre env var) → zero occorrenze + `.env` confermato in `.gitignore`. La differenza di metodo rispetto a UAT-048 è dichiarata nel corpo del collaudo stesso (D-136 §5 / STP-BM-003: mai affermare più di quanto verificato).
+
+Entrambi creati status `done` nel documento UAT — Board MCP Server, legati `verifies` alla rispettiva riga requirement (`doc_link` ha derivato `fact_subscription` automaticamente, intent `critical` — il progetto board-mcp ha già l'opt-in al decadimento). Aggiornati DEL-BM-007 (riga Test:) e REG-010 PH-20 (chiusa con ✅, stesso pattern di PH-19).
+
+**Trovato mentre chiudevo, non un difetto proprio:** la tabella «Rimandi attesi — segnaposto» nel SoW board-mcp (mirror locale di REG-010, item `de5d2f44`) aveva ANCORA aperta la riga 1 (PH-19/`pending_inbox`), chiusa in REG-010 il 04/09 mattina (sessione precedente, GTD `3fa53413`) ma mai riportata qui — un mirror lasciato indietro. Chiuse entrambe le righe nello stesso giro, non segnalato come issue D-192 (nessun tool/flusso ha fallito: è una scrittura dimenticata in una sessione precedente, non un meccanismo rotto).
+
+**Nota di processo (auto-osservata):** in questa sessione `wi_end` è stato chiamato PRIMA dell'aggiornamento di questo file, invertendo l'ordine dei passi 10/11 del pre-flight — il gate pre-write ha bloccato la scrittura ("WI corrente già chiuso") e ha richiesto l'apertura di un secondo WI (`23d74fb5`, template `session-meta`, ephemeral) solo per questo aggiornamento. Nessun dato perso, nessun ok falso — il gate ha fatto esattamente il suo lavoro.
+
+**Decisioni prese:** nessuna decisione formale.
+**Blocchi / note:** nessuno.
+**Prossima sessione:** nessun follow-on aperto da questo task. GTD `fc7cbba6` chiuso, REG-010 non ha più righe PH aperte per board-mcp.
+
+---
+
+## Sessione #163 — 2026-09-03 (autopilot dispatch, GTD `e6090f42`, WI `775e2da9`)
+
+**Task LOW priority:** misurare dal vivo i due anelli del decadimento mai accesi prima (dichiarati esplicitamente "non ancora verificati" in CLAUDE.md, WI `32c21b86`): `gov.doc_frozen_row_touches` (secondo lato del rilevatore M2) e la propagazione "per onde" oltre il primo salto.
+
+**Frozen row touch — mai avvenuto prima su questo progetto.** `doc_structure` misurato prima di iniziare: `documents_published: 0/10` — nessun documento di board-mcp era mai stato pubblicato. Costruito un documento changelog reale (`39586b4c`) + un documento SDES probe dedicato (`cda1a9ea`, `[probe] Frozen Row Touch fixture`, riga `FRTEST-ROW-002`), eseguito un ciclo `doc_publish` vero (`1.1`, prima pubblicazione mai avvenuta sul progetto), poi riscritta la riga fuori dall'atto di pubblicazione. `doc_staleness_query` ha riportato l'entry in `frozen_row_touches` con `doc_item_id`/`document_id`/`changed_columns`/`changed_at` corretti — canale confermato vivo e letto correttamente.
+
+**Nota trovata per caso, non un difetto:** una riga (`PROPTEST-A`) aggiunta a `cda1a9ea` **dopo** la pubblicazione (mai parte dello snapshot 1.1) è stata comunque classificata come frozen-row-touch alla sua prima UPDATE, non come marcatura di staleness ordinaria verso i suoi sottoscrittori. Il detector è a livello di *documento pubblicato*, non di *riga-nello-snapshot* — coerente con la lettera della spec ("una riga di un documento pubblicato"), ma vale la pena saperlo prima di piazzare fixture di test in un documento già pubblicato. Corretto spostando il fixture di propagazione (`PROPTEST-A2`) in un documento mai pubblicato (`e5a8d30a`, Solution Design reale).
+
+**Propagazione a due salti — confermata senza intervento manuale.** Fixture A2→B→C: `PROPTEST-A2` (sdes_entry, documento non pubblicato) ← sottoscrizione critical ← `UAT-PROPTEST-B` (uat_case) ← sottoscrizione critical ← `UAT-PROPTEST-C` (uat_case). Riscritto A2 → marcatura M2 aperta su B (confermato). `doc_decay_apply` ha decaduto B (`attrs.decay_status`). Senza alcuna chiamata aggiuntiva, `doc_staleness_query` ha mostrato una NUOVA marcatura aperta con subscriber=C, target=B, `changed_columns:["attrs"]`, stesso timestamp esatto della scrittura di decadimento su B: il trigger M2 è rifirato da solo sulla riga appena decaduta, la cascata "per onde" descritta in `SDES-DECAY-002` è reale, non solo di progetto.
+
+**Documentato:** CLAUDE.md aggiornato (sezione Staleness/Decay Tools) sostituendo la nota "non ancora verificato dal vivo" con l'esito misurato e la nota sulla classificazione documento-pubblicato-vs-riga. I fixture (`FRTEST-ROW-*`, `PROPTEST-*`, documento probe `[probe] Frozen Row Touch fixture`) restano nel corpus come righe dedicate — stesso pattern additivo già in uso per `SDES-DECAY-001`/`UAT-DECAY-001`.
+
+**Decisioni prese:** nessuna decisione formale — misura, non design.
+**Blocchi / note:** nessuno. La nota sulla classificazione document-level dei frozen row touch non è segnalata come issue (D-192): è coerente con la spec dichiarata, non un malfunzionamento — solo un'interazione non ovvia, documentata perché non risulti "presunta" la prossima volta.
+**Prossima sessione:** nessun follow-on aperto da questo task. GTD `e6090f42` chiuso.
+
+---
+
 ## Sessione #162 — 2026-09-03 (autopilot dispatch, igiene `uq_doc_items_project_code`, GTD `3ba4ec39`, WI `e25da77e`)
 
 **Task LOW priority, "solo a coda vuota":** GTD dba `b8f94388` (DEL-C1, indice partial `uq_doc_items_project_code` droppato 2026-08-20) censiva due riferimenti morti nel codice applicativo. Uno (`src/docs.ts`, regex `/uq_doc_items_project_code|duplicate key/i` → `/duplicate key/i`) era già stato ripulito a v0.18.0 (commit `6219357`, sessione #101) — ma questo specifico GTD non era mai stato chiuso e continuava a essere ri-evocato.

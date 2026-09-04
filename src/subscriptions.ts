@@ -37,19 +37,22 @@ const GOV_PARAMS = "loomx_governance_params";
 // with its own copy of the rule is how two surfaces drift apart.
 export const ADMISSION_SUSPENDED_PARAM = "sottoscrizioni_ammissione_sospesa";
 
-// SDES-SUB-012 (REQ-SUB-012) — "what binds everyone is not subscribable", a
-// declared INTERIM approximation, not the durable rule. Loomy correction
-// 2026-08-27 (msg 4162dfb7, replying to bc24b35f): the real criterion is a
-// core/ambient CLASS read from a category/stream registry — a registry that
-// does not exist in code yet. Gating on project residency is the exact defect
-// class this rejects elsewhere; it is tolerated here ONLY as a transitional
-// stand-in because today every cross-project decision happens to live in the
-// hub project's two `decisions` documents. This decays at the domain-manifest
-// migration — a manifest is also cross-project and MUST stay subscribable, so
-// this check must never widen to "any hub-project item" and must be replaced,
-// not extended, once the class lives in the registry.
+// SDES-SUB-012 (REQ-SUB-012, superseded 2026-09-04 by REQ-SUB-014/D-250 —
+// see the isHubDecision gate in docSubscribe below) still supplies the
+// TARGET-IDENTIFICATION criterion: project residency + document_type, a
+// declared INTERIM approximation for "the hub decisions corpus", not the
+// durable rule. Loomy correction 2026-08-27 (msg 4162dfb7, replying to
+// bc24b35f): the real criterion is a core/ambient CLASS read from a
+// category/stream registry — a registry that does not exist in code yet.
+// Gating on project residency is the exact defect class this rejects
+// elsewhere; it is tolerated here ONLY as a transitional stand-in because
+// today every cross-project decision happens to live in the hub project's
+// two `decisions` documents. This decays at the domain-manifest migration —
+// a manifest is also cross-project and MUST stay subscribable at any grade,
+// so this identification must never widen to "any hub-project item" and
+// must be replaced, not extended, once the class lives in the registry.
 export const HUB_PROJECT_ID = "22ae4e79-1800-4975-ba46-cd2f86734257";
-export const HUB_UNSUBSCRIBABLE_DOCUMENT_TYPE = "decisions";
+export const HUB_DECISION_DOCUMENT_TYPE = "decisions";
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -261,22 +264,37 @@ export async function docSubscribe(
   const targetDoc = docRow as { id: string; version: unknown; document_type: string };
   const subscribedAtVersion = String(targetDoc.version ?? "");
 
-  // REQ-SUB-012: what binds the whole org is never subscribable — see
-  // HUB_PROJECT_ID comment above for why this specific gate (SDES-SUB-012).
-  // Applies to every intent, not just 'critical' — an org-wide constraint
-  // opted into voluntarily isn't a constraint (REQ-SUB-012 body).
-  if (targetProjectId === HUB_PROJECT_ID && targetDoc.document_type === HUB_UNSUBSCRIBABLE_DOCUMENT_TYPE) {
+  // D-250/REQ-SUB-014 (Achille, 2026-09-04, doc 7e3dbb35 item D-250, approved)
+  // SUPERSEDES REQ-SUB-012: a cross-project decision in the hub project IS
+  // subscribable now — as a declared DEPENDENCY-to-be-notified (D-206
+  // "sottoscrive, non collega"), never as inheritance or adhesion. Norms
+  // still bind everyone regardless of subscription and still arrive via
+  // D-235/CORE-012 inheritance, not this mechanism — REQ-SUB-014 keeps that
+  // guarantee explicit even while opening the target. Admitted grades are
+  // EXACTLY 'module' (marked-for-reread on publish) and 'critical' (decays
+  // the dependent) — REQ-SUB-014's acceptance criteria enumerate these two,
+  // not 'informative': for a hub decision, either it's a real dependency
+  // (module/critical) or it isn't subscribed — REQ-SUB-012's rationale ("an
+  // org-wide constraint opted into voluntarily isn't a constraint") still
+  // holds for the lightweight grade. Note stays mandatory — already enforced
+  // unconditionally above. The durable rule this stands in for — core/ambient
+  // CLASS read from a category registry, not project residency — remains the
+  // target state (SDES-SUB-012 amendment, not yet built).
+  const isHubDecision = targetProjectId === HUB_PROJECT_ID && targetDoc.document_type === HUB_DECISION_DOCUMENT_TYPE;
+  if (isHubDecision && args.intent === "informative") {
     return err(
-      `Cannot subscribe: the target is a cross-project decision in the hub project (${HUB_PROJECT_ID}) — these bind ` +
-      `the whole fleet without an opt-in act, so they are not subscribable (REQ-SUB-012). This check is a declared ` +
-      `INTERIM approximation (SDES-SUB-012): the durable rule is a core/ambient CLASS read from a category registry, ` +
-      `not project residency — it will replace this gate once that registry exists, and domain manifests (also ` +
-      `cross-project) will stay subscribable when it does.`
+      `Cannot subscribe with intent='informative' to a cross-project decision in the hub project (${HUB_PROJECT_ID}): ` +
+      `REQ-SUB-014 (superseding REQ-SUB-012) admits only 'module' or 'critical' on a hub decision — a declared ` +
+      `dependency, not a lightweight watch. Use intent='module' or intent='critical' (note is mandatory either way).`
     );
   }
 
-  // Critical cross-project: refused in v1 (SDES-SUB-001 §4, D-186 Q2).
-  if (args.intent === "critical" && targetProjectId !== sub.project_id) {
+  // Critical cross-project: refused in v1 (SDES-SUB-001 §4, D-186 Q2) — EXCEPT
+  // a hub cross-decision target, where REQ-SUB-014/D-250 explicitly admits
+  // 'critical' as a declared dependency: the doc_subscribe call itself IS the
+  // opt-in act, note mandatory (enforced above), so the "needs an explicit
+  // act plus acceptance" gap this general rule guards against doesn't apply.
+  if (args.intent === "critical" && targetProjectId !== sub.project_id && !isHubDecision) {
     return err(
       `A 'critical' subscription across projects is refused in v1 (D-186 Q2): it needs an explicit act plus ` +
       `acceptance from the target's owner, never automatic creation (that flow is A3/DEL-009, not yet built). ` +
