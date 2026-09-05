@@ -37,8 +37,12 @@ const GOV_PARAMS = "loomx_governance_params";
 // with its own copy of the rule is how two surfaces drift apart.
 export const ADMISSION_SUSPENDED_PARAM = "sottoscrizioni_ammissione_sospesa";
 
-// SDES-SUB-012 (REQ-SUB-012, superseded 2026-09-04 by REQ-SUB-014/D-250 —
-// see the isHubDecision gate in docSubscribe below) still supplies the
+// SDES-SUB-012 (REQ-SUB-012, superseded 2026-09-04 by REQ-SUB-014/DEC-SUB-001 —
+// see the isHubDecision gate in docSubscribe below. DEC-SUB-001 lives in the
+// Items Subscription project registry (52f9b563, doc c8a09111, item beaec340):
+// a decision lives where it applies (CORE-009/CORE-011), not in the hub cross
+// corpus — D-250 (hub project 22ae4e79) is a superseded pointer, corrected by
+// loomy 2026-09-04, msg c99bf826) still supplies the
 // TARGET-IDENTIFICATION criterion: project residency + document_type, a
 // declared INTERIM approximation for "the hub decisions corpus", not the
 // durable rule. Loomy correction 2026-08-27 (msg 4162dfb7, replying to
@@ -264,7 +268,10 @@ export async function docSubscribe(
   const targetDoc = docRow as { id: string; version: unknown; document_type: string };
   const subscribedAtVersion = String(targetDoc.version ?? "");
 
-  // D-250/REQ-SUB-014 (Achille, 2026-09-04, doc 7e3dbb35 item D-250, approved)
+  // DEC-SUB-001/REQ-SUB-014 (Achille, 2026-09-04, doc c8a09111 item beaec340,
+  // project 52f9b563 "Items Subscription" — residence corrected 2026-09-04
+  // by loomy, msg c99bf826: a decision lives where it applies, not in the hub
+  // cross corpus; D-250, hub project 22ae4e79, is now a superseded pointer)
   // SUPERSEDES REQ-SUB-012: a cross-project decision in the hub project IS
   // subscribable now — as a declared DEPENDENCY-to-be-notified (D-206
   // "sottoscrive, non collega"), never as inheritance or adhesion. Norms
@@ -290,7 +297,7 @@ export async function docSubscribe(
   }
 
   // Critical cross-project: refused in v1 (SDES-SUB-001 §4, D-186 Q2) — EXCEPT
-  // a hub cross-decision target, where REQ-SUB-014/D-250 explicitly admits
+  // a hub cross-decision target, where REQ-SUB-014/DEC-SUB-001 explicitly admits
   // 'critical' as a declared dependency: the doc_subscribe call itself IS the
   // opt-in act, note mandatory (enforced above), so the "needs an explicit
   // act plus acceptance" gap this general rule guards against doesn't apply.

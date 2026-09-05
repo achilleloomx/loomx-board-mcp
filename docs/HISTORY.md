@@ -4,6 +4,18 @@
 
 ---
 
+## Sessione #168 — 2026-09-05 (wake cold-start, msg loomy `dd9850a0`, WI `350bfd73` + `d56dc302`)
+
+**Task 1 — nuovo agente `studiodn`, superficie #4 (msg `dd9850a0`).** loomy chiedeva di verificare se l'enum recipient di `board_send` è ancora hardcoded (serve add+redeploy) o se è già decaduto per l'enum dinamico da `board_agents` (GTD `73b0b653`). Verificato: GTD `73b0b653` è `done` e il codice (`src/tools.ts:347`) conferma — `to_agent` è una stringa validata dinamicamente contro `slugToCode` (popolato da `board_agents`, lazy-reload on-miss via `refreshAgentRegistry`), zero-code per nuovi slug (D-007). Test live: `board_send(to_agent="studiodn", ...)` → `Unknown agent` con elenco che non include `studiodn` — fallimento dovuto SOLO alla riga `board_agents` non ancora inserita da dba, non a un enum statico. Risposto a loomy (msg `6b4492ce`): superficie decaduta, nessun code change/redeploy necessario. Aperto GTD `a2d9a4fb` (`waiting_on=dba`) per riverificare il test live appena dba conferma la riga.
+
+**Task 2 — correzione residenza D-250→DEC-SUB-001 (msg loomy `c99bf826`).** Su rilievo di Achille la decisione sul gate hub-decisions è stata spostata dal corpus cross del cappello al registro di progetto Items Subscription: `DEC-SUB-001` (progetto `52f9b563`, doc `c8a09111`, item `beaec340`) — CORE-009/CORE-011, una decisione vive dove vale. `D-250` (corpus hub `22ae4e79`) resta come rimando superato; il mandato tecnico (gate module/critical su decisioni cross del cappello, v0.32.1) non cambia. Corretti i 3 riferimenti a `D-250` come citazione primaria in `src/subscriptions.ts` (commenti alle righe del gate `isHubDecision`) e la voce `doc_subscribe` in `CLAUDE.md`, ora citano `DEC-SUB-001` con `D-250` esplicitamente marcato come pointer superato. Verificato: `REQ-SUB-014`/`SDES-SUB-012` (progetto Items Subscription, non di board-mcp) restano fuori scope — proprietà loomy/it-manager, non toccati. `tsc`/`npm run build` puliti.
+
+**Decisioni prese:** nessuna — entrambe correzioni/conferme su decisioni già ratificate altrove (D-093/D-007 per l'enum dinamico, D-250/DEC-SUB-001 per la residenza).
+**Blocchi / note:** nessuno.
+**Prossima sessione:** GTD `a2d9a4fb` aperto in `waiting` — riverificare `board_send(to_agent="studiodn")` dopo conferma dba.
+
+---
+
 ## Sessione #167 — 2026-09-05 (wake cold-start, msg dba `796a8ff9`, WI `ca83a3f2`)
 
 **Task:** dba ha segnalato (msg `796a8ff9`, origine GTD sito-loomx via loomy-assistant `2e26ec5c`) che `doc_item_types` non documenta il retire guard **DEL-011/M5** (migrazione `20260822091000_gov_doc_reference_integrity_del011.sql`) sulla relation_type `supersedes`, che `LINK_TYPE_REGISTRY.doc.description` già elenca senza spiegarne l'uso difensivo. dba ha allegato una patch pronta, verificata sulla migrazione (non dedotta), e non ha toccato il file (schema owner, non board-mcp).
