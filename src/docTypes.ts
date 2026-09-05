@@ -450,7 +450,14 @@ export const LINK_TYPE_REGISTRY: Record<"doc" | "gtd" | "wi", LinkTypeSpec> = {
       "doc_item ↔ doc_item traceability (REQ→SDES→UAT, supersede). " +
       "Routing (SDES-SUB-005, D-155): decided by the FACT of the two endpoints' project_id, not by relation_type label — " +
       "different projects → doc_item_xproject_links (cross-project, no project_id constraint); same project → doc_item_links " +
-      "(same-project FK enforced). 'references' always routes cross-project regardless of endpoint projects (D-074).",
+      "(same-project FK enforced). 'references' always routes cross-project regardless of endpoint projects (D-074). " +
+      "RETIRE GUARD (DEL-011/M5, migration 20260822091000): a doc_item reaching a terminal status " +
+      "(superseded/deprecated/archived — 'rejected' is excluded) while it has incoming references " +
+      "(doc_item_links, doc_item_xproject_links, or active gov.doc_subscriptions) is REFUSED unless a " +
+      "'supersedes' link already points at it FROM the successor (the declared heir) or the same update " +
+      "sets attrs.no_successor_reason. Enforced by gov.doc_items_require_successor_on_terminal " +
+      "(BEFORE UPDATE OF status on public.doc_items). doc_supersede() creates the heir edge for you; " +
+      "a manual status flip on an already-cited row does not.",
   },
   gtd: {
     target_kind: "gtd",
