@@ -4,6 +4,22 @@
 
 ---
 
+## Sessione #167 — 2026-09-05 (wake cold-start, msg dba `796a8ff9`, WI `ca83a3f2`)
+
+**Task:** dba ha segnalato (msg `796a8ff9`, origine GTD sito-loomx via loomy-assistant `2e26ec5c`) che `doc_item_types` non documenta il retire guard **DEL-011/M5** (migrazione `20260822091000_gov_doc_reference_integrity_del011.sql`) sulla relation_type `supersedes`, che `LINK_TYPE_REGISTRY.doc.description` già elenca senza spiegarne l'uso difensivo. dba ha allegato una patch pronta, verificata sulla migrazione (non dedotta), e non ha toccato il file (schema owner, non board-mcp).
+
+**Meccanismo documentato:** trigger `BEFORE UPDATE OF status ON public.doc_items` → `gov.doc_items_require_successor_on_terminal`. Scatta solo sulla transizione reale verso uno status terminale (`superseded`/`deprecated`/`archived` — `rejected` escluso apposta, ritira una proposal mai adottata). Se la riga ha riferimenti in entrata (`doc_item_links`, `doc_item_xproject_links`, o `gov.doc_subscriptions` attive, misurati da `gov.doc_item_incoming_refs`), la transizione è rifiutata (23514) a meno che esista già un link `supersedes` con `from_item`=successore verso la riga (l'"heir dichiarato"), o lo stesso UPDATE imposti `attrs.no_successor_reason`. `doc_supersede()` crea già l'edge per te; un flip manuale di status su una riga già citata no.
+
+**Applicato:** patch di dba appesa (append, non sostituzione) alla stringa `description` di `LINK_TYPE_REGISTRY.doc` in `src/docTypes.ts`, verbatim come proposta — nessuna riformulazione necessaria, il testo era già preciso e verificato dalla fonte (schema owner).
+
+**Verifiche.** `tsc --noEmit` pulito, `npm run build` pulito, `npm test` 380/380 verdi (nessun test nuovo necessario — cambio di sola stringa descrittiva, nessuna logica). Confermato dal **sorgente** via `tsx` (non dai tool MCP di questa window — vincolo G4, i moduli lazy sono già in cache dal boot) che `LINK_TYPE_REGISTRY.doc.description` porta il testo esteso.
+
+**Decisioni prese:** nessuna — applicazione diretta di una patch di documentazione già formulata e verificata dallo schema owner (D-005: schema `doc_*` resta del DBA, i tool sono solo il layer MCP; qui il layer MCP era la sola cosa mancante).
+**Blocchi / note:** nessuno.
+**Prossima sessione:** nessun follow-on aperto da questo task. Restart di flotta non deciso qui (G4) — le altre window continueranno a vedere la vecchia description finché non riavviano.
+
+---
+
 ## Sessione #166 — 2026-09-04 (wake cold-start, msg it-manager `cafe0eaf`, WI `252ca68f`)
 
 **Task:** it-manager, in revisione dell'emendamento SDES-SUB-012 (D-250/REQ-SUB-014, sessione #165), ha trovato un gap di collaudo: REQ-SUB-014 (`acceptance_criteria`) nomina esplicitamente un caso negativo — "doc_subscribe verso una riga decision senza nota viene rifiutata con il motivo" — e DEC-SUB-001 chiede collaudo positivo E negativo, ma i 4 test REQ-SUB-014 in `tests/subscriptions.test.ts` (module/critical ammessi, informative rifiutato riga+documento, critical cross-progetto ammesso) coprono solo il ramo positivo.
