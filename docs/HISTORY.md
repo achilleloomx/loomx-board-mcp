@@ -4,6 +4,25 @@
 
 ---
 
+## Sessione #169 — 2026-09-05/06 (wake cold-start, msg it-manager `e360ea18`, WI `23f20c9d`)
+
+**Task — ISS-063: verificare contratto wi_end/pending_wakes (D-238)** su 2 wake non ack-ati in 24h (cro 04/09 14:43 msg `6d10c5a1`, app 05/09 08:08 msg `65257759`) nonostante WI chiuso.
+
+**Codice verificato sano** (`src/pendingInbox.ts:157-196` + `src/wi.ts:750-755/775/872`): `computePendingWakes` gira su ogni close-path reale (incluso il ramo con GTD-sync fallito), filtro `wake_priority IS NOT NULL AND archived_at IS NULL AND status<>'acknowledged'` non scarta nulla di genuino, `undefined` solo su `callerSlug≠ownerSlug` (orphan sweep by design, non bug), try/catch da `8b57998` (31/08) impedisce un throw interno di abortire la cascata. Nessun difetto trovato.
+
+**Verifica empirica dei 2 message_id: FUORI dalla mia visibilità.** board-mcp gira sotto identità DB nativa (DATABASE_URL, D-084) — RLS (D-015) lo scopa a `agent_code='005'` su `board_messages`/`loomx_work_items`/`loomx_agent_runtime`, stesso muro che la produzione rispetta per ogni agente. Confermato dal vivo via psql (stesso backend/ruolo): zero visibilità su righe cro (044)/app (003) — vuoto di visibilità, non prova di inesistenza. Nessun bypass RLS esiste per `board_get`/`wi_query` su questo path. Il check richiede `auditor` (`auditor_select_all`) o `loomy-assistant` (broker, `SELECT` cross-owner) — girato a it-manager con questa raccomandazione.
+
+**Gap strutturale trovato in aggiunta:** nessun audit-log delle risposte tool (solo `doc_item_resolve` ce l'ha, D-a5) — anche con accesso DB pieno, "cosa restituì `wi_end` al chiamante in quel momento" vive solo nella transcript della sessione di cro/app. Aperta GTD `acb26106` (proposta, non armata, mandato loomy prima di costruire).
+
+**Ipotesi principale comunicata a it-manager, con precedente concreto:** staleness G4 (nessun hot-reload, CLAUDE.md §Rollout). Stesso codepath ha rotto `wi_end` in flotta per 36h (ISS-040, sessioni #147-149, 30-31/08) prima del fix `.neq()` in `pg-shim.ts` (`8b57998`, 31/08 10:10); D-238/`pending_wakes` stesso è del 30/08 22:16 (`d90698c`). Una finestra cro/app viva ininterrottamente da prima di una di queste due date avrebbe, alla chiusura, o zero codice `pending_wakes` o un crash esplicito — entrambi combaciano con "WI chiuso ma wake non consegnato" senza essere una regressione del codice attuale (dist/ 2026-09-05 verificato con `.neq()` e `pending_wakes` correttamente wired). Suggerito a it-manager di verificare l'età delle finestre cro/app prima di ipotizzare altro.
+
+**Verifiche:** lettura codice (`pendingInbox.ts`, `wi.ts`), query dirette su `LOOMX_DB_URL` (psql, `\d` su `board_messages`/`loomx_work_items`/`loomx_agent_runtime` per le policy RLS), `git log`/`git show` su `d90698c`/`8b57998`, ispezione `dist/` corrente.
+**Decisioni prese:** nessuna nuova decisione formale.
+**Blocchi / note:** verifica empirica passata a it-manager (serve auditor/loomy-assistant, fuori dalla mia identità).
+**Prossima sessione:** nessun follow-on aperto su ISS-063 lato board-mcp — resta la GTD `acb26106` (proposta audit-log, in attesa di mandato loomy) come unico item pendente.
+
+---
+
 ## Sessione #168 — 2026-09-05 (wake cold-start, msg loomy `dd9850a0`, WI `350bfd73` + `d56dc302`)
 
 **Task 1 — nuovo agente `studiodn`, superficie #4 (msg `dd9850a0`).** loomy chiedeva di verificare se l'enum recipient di `board_send` è ancora hardcoded (serve add+redeploy) o se è già decaduto per l'enum dinamico da `board_agents` (GTD `73b0b653`). Verificato: GTD `73b0b653` è `done` e il codice (`src/tools.ts:347`) conferma — `to_agent` è una stringa validata dinamicamente contro `slugToCode` (popolato da `board_agents`, lazy-reload on-miss via `refreshAgentRegistry`), zero-code per nuovi slug (D-007). Test live: `board_send(to_agent="studiodn", ...)` → `Unknown agent` con elenco che non include `studiodn` — fallimento dovuto SOLO alla riga `board_agents` non ancora inserita da dba, non a un enum statico. Risposto a loomy (msg `6b4492ce`): superficie decaduta, nessun code change/redeploy necessario. Aperto GTD `a2d9a4fb` (`waiting_on=dba`) per riverificare il test live appena dba conferma la riga.
