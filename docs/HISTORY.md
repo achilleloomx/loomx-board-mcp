@@ -4,6 +4,23 @@
 
 ---
 
+## Sessione #170 — 2026-09-10 (wake cold-start, msg loomy `565931ec`, WI `7f4a9cef`)
+
+**Task — DEC-002: estendere a it-manager la lettura cross-owner sul register issue tracker.** `gtd_query` oggi abilita la lettura cross-owner solo a `loomy`/broker; il register `agent-issue-tracker` (progetto `d4528e72`) lavora per interrogazione-per-progetto (DEC-001/002/003, guida operativa `GUI-003`/`GUI-004`, non leggibile io stesso: board-mcp non è membro del progetto, solo `visibility='org'` mi è visibile lì), quindi it-manager non vedeva le righe segnalate da altri agenti. Vincolo esplicito nel task: si allarga una **lettura**, mai una scrittura — `gtd_add(owner)`/`gtd_update(owner)` restano loomy-only, il modello di identità non si tocca.
+
+**Scelta fra le due opzioni proposte da loomy: la (a), permesso per progetto.** Non un'abilitazione hardcoded su `it-manager` (opzione b) ma una regola generale: nel branch `project_id` di `gtd_query`, il chiamante ottiene lettura cross-owner — oltre a loomy/broker come già — se `loomx_projects.agent_id` del `project_id` interrogato coincide col proprio slug. Scoped al singolo progetto, mai un allargamento di flotta. Estratta in funzione pura testabile (`gtdQueryProjectCrossOwnerRead`, `src/tools.ts`), stesso pattern di `brokerAutopilotArmBlocked`.
+
+**Verificato dal vivo, non solo per lettura del codice, che l'enforcement è nel punto giusto.** Preoccupazione: la connessione DB di board-mcp è già identità nativa per agente (`current_user=board-mcp`, D-084/rls-security-v2) — se `loomx_items`/`loomx_item_projects` avessero RLS per-owner, il fix applicativo sarebbe insufficiente (bloccato comunque a monte). Misurato (`tests/_scratch-rls-check.ts`, poi rimosso): la connessione `board-mcp` legge senza restrizione righe `loomx_items` di altri owner (`loomy`, `assistant`) — zero RLS su queste tabelle, l'enforcement è interamente applicativo in `tools.ts`, coerente con quanto CLAUDE.md già documentava per `runtime_status`/`wi_query`. Il fix è quindi nel posto giusto e sufficiente da solo.
+
+**Discrepanza trovata, non risolta qui, girata a loomy nella risposta.** Il messaggio di loomy stimava "una sessantina" di righe nascoste a it-manager; misurato (`tests/verify-dec002-gtd-query-cross-owner.ts`, read-only): solo **7** righe risultano linkate al progetto `d4528e72` via `loomx_item_projects`, tutte con `owner='board-mcp'` (le mie). Non ho un secondo owner su cui dimostrare l'effetto visibile del fix sul dato reale — la logica è comunque corretta e testata (unit + dal vivo contro `loomx_projects.agent_id`), ma la cifra di loomy non trova riscontro nel link project_id↔item oggi. Possibili letture (non investigate, fuori scope di questo task): le ~60 righe non sono linkate a `loomx_item_projects` (created prima dell'auto-link, o via un percorso diverso), o loomy le contava su un altro criterio (es. `source`/titolo). Segnalato nella risposta a loomy invece di indovinare.
+
+**Verifiche:** `tsc`/`npm run build` puliti; `npm test` **385/385** verdi (+5 nuovi su `gtdQueryProjectCrossOwnerRead`); verifica dal vivo contro `LOOMX_DB_URL` reale (read-only, `tests/verify-dec002-gtd-query-cross-owner.ts`, lasciato nel repo come gli altri `verify-*.ts`).
+**Decisioni prese:** nessuna nuova decisione — DEC-002 esisteva già, questo è solo il lato implementazione richiesto.
+**Blocchi / note:** discrepanza sul conteggio (~60 attese vs 7 misurate) girata a loomy, non investigata oltre — fuori dal perimetro del task (permesso di lettura, non audit del dato). G4 (CLAUDE.md §Rollout): il fix non è visibile alle altre window finché non riavviano — non ho forzato restart, segnalo a loomy nel `board_send` di chiusura.
+**Prossima sessione:** nessun follow-on aperto da questo task.
+
+---
+
 ## Sessione #169 — 2026-09-05/06 (wake cold-start, msg it-manager `e360ea18`, WI `23f20c9d`)
 
 **Task — ISS-063: verificare contratto wi_end/pending_wakes (D-238)** su 2 wake non ack-ati in 24h (cro 04/09 14:43 msg `6d10c5a1`, app 05/09 08:08 msg `65257759`) nonostante WI chiuso.

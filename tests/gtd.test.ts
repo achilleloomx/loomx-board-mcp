@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 
-import { buildGtdUpdatePayload, brokerAutopilotArmBlocked, resolveBoardActorFilterCode, buildAutoGtdInsertPayload, buildProjectWarning } from "../src/tools.ts";
+import { buildGtdUpdatePayload, brokerAutopilotArmBlocked, resolveBoardActorFilterCode, buildAutoGtdInsertPayload, buildProjectWarning, gtdQueryProjectCrossOwnerRead } from "../src/tools.ts";
 
 test("buildGtdUpdatePayload: body-only leaves gtd_status untouched (footgun regression)", () => {
   const updates = buildGtdUpdatePayload({ body: "just a note" });
@@ -207,4 +207,46 @@ test("buildProjectWarning: warns when project_id is omitted (G1)", () => {
 
 test("buildProjectWarning: silent when project_id is given (G2)", () => {
   assert.equal(buildProjectWarning("11111111-1111-1111-1111-111111111111"), undefined);
+});
+
+// DEC-002 (agent-issue-tracker, msg loomy 565931ec): gtd_query project_id
+// branch — cross-owner read for a project's responsible agent, scoped to
+// that project only.
+test("gtdQueryProjectCrossOwnerRead: loomy always gets cross-owner read", () => {
+  assert.equal(
+    gtdQueryProjectCrossOwnerRead({ isLoomy: true, isBroker: false, selfSlug: "loomy", projectOwnerAgentId: "someone-else" }),
+    true
+  );
+});
+
+test("gtdQueryProjectCrossOwnerRead: broker always gets cross-owner read", () => {
+  assert.equal(
+    gtdQueryProjectCrossOwnerRead({ isLoomy: false, isBroker: true, selfSlug: "loomy-assistant", projectOwnerAgentId: "someone-else" }),
+    true
+  );
+});
+
+test("gtdQueryProjectCrossOwnerRead: it-manager gets cross-owner read on its own project (agent-issue-tracker)", () => {
+  assert.equal(
+    gtdQueryProjectCrossOwnerRead({ isLoomy: false, isBroker: false, selfSlug: "it-manager", projectOwnerAgentId: "it-manager" }),
+    true
+  );
+});
+
+test("gtdQueryProjectCrossOwnerRead: a non-responsible agent stays self-scoped on someone else's project", () => {
+  assert.equal(
+    gtdQueryProjectCrossOwnerRead({ isLoomy: false, isBroker: false, selfSlug: "forge", projectOwnerAgentId: "it-manager" }),
+    false
+  );
+});
+
+test("gtdQueryProjectCrossOwnerRead: unresolved project (agent_id missing/null) never grants cross-owner read", () => {
+  assert.equal(
+    gtdQueryProjectCrossOwnerRead({ isLoomy: false, isBroker: false, selfSlug: "it-manager", projectOwnerAgentId: null }),
+    false
+  );
+  assert.equal(
+    gtdQueryProjectCrossOwnerRead({ isLoomy: false, isBroker: false, selfSlug: "it-manager", projectOwnerAgentId: undefined }),
+    false
+  );
 });

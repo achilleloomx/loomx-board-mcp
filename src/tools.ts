@@ -267,6 +267,21 @@ export function buildProjectWarning(project_id: string | undefined): string | un
   return `No project_id given. If this GTD is cross-project or personal (coordination, meta-task, stall-triage), that's a valid state — no action needed. If it belongs to a project, add project_id (see project_list for the id).`;
 }
 
+// DEC-002 (agent-issue-tracker, msg loomy 565931ec): gtd_query's project_id
+// branch grants cross-owner read to loomy/broker as before, plus — scoped
+// to that single project_id, never fleet-wide — the project's responsible
+// agent (loomx_projects.agent_id). A read-only extension: gtd_add(owner)/
+// gtd_update(owner) stay loomy-only, the identity model is untouched.
+export function gtdQueryProjectCrossOwnerRead(params: {
+  isLoomy: boolean;
+  isBroker: boolean;
+  selfSlug: string;
+  projectOwnerAgentId: string | null | undefined;
+}): boolean {
+  const { isLoomy, isBroker, selfSlug, projectOwnerAgentId } = params;
+  return isLoomy || isBroker || projectOwnerAgentId === selfSlug;
+}
+
 const MessageTypeSchema = z.enum(MESSAGE_TYPES);
 const StatusFilterSchema = z.enum(MESSAGE_STATUSES);
 const WakePrioritySchema = z.enum(WAKE_PRIORITIES);
@@ -1456,7 +1471,7 @@ export function registerTools(
   // --- gtd_query ---
   server.tool(
     "gtd_query",
-    `Flexible query for GTD items. ${isLoomy || isBroker ? "Cross-agent read enabled (loomy/broker)." : "Filters to your own items."} By default omits body and adds body_preview (200 chars) — use gtd_get(id) for full content. ` +
+    `Flexible query for GTD items. ${isLoomy || isBroker ? "Cross-agent read enabled (loomy/broker)." : "Filters to your own items, UNLESS project_id names a project you are the responsible agent for (loomx_projects.agent_id) — then cross-owner read applies, scoped to that project only (DEC-002)."} By default omits body and adds body_preview (200 chars) — use gtd_get(id) for full content. ` +
       `fields (REQ-041/SDES-ID-004) projects ONLY the listed columns — id is ALWAYS included and always the FULL UUID — so a fleet sweep fits the response limit without external distillates (where truncated ids are born). ` +
       `Every row carries model_source ('explicit'|'default', null when autopilot=false): 'default' means autopilot=true with no autopilot_model — it will resolve to the class-based default at dispatch, not that dispatch was skipped.`,
     {
@@ -1559,8 +1574,20 @@ export function registerTools(
           .order("deadline", { ascending: true, nullsFirst: false })
           .limit(effectiveLimit + 1);
 
-        // Ownership filter: loomy/broker get cross-agent read; others scoped to self
-        if (isLoomy || isBroker) {
+        // Ownership filter: loomy/broker get cross-agent read everywhere;
+        // a project's responsible agent gets it scoped to this project_id
+        // only (DEC-002, see gtdQueryProjectCrossOwnerRead).
+        let projectOwnerAgentId: string | null | undefined;
+        if (!isLoomy && !isBroker) {
+          const { data: proj } = await db
+            .from(PROJECTS_TABLE)
+            .select("agent_id")
+            .eq("id", project_id)
+            .maybeSingle();
+          projectOwnerAgentId = proj?.agent_id;
+        }
+        const crossOwnerRead = gtdQueryProjectCrossOwnerRead({ isLoomy, isBroker, selfSlug, projectOwnerAgentId });
+        if (crossOwnerRead) {
           if (owner) query = query.eq("owner", owner);
         } else {
           query = query.eq("owner", selfSlug);
