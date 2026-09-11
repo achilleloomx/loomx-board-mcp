@@ -4,6 +4,21 @@
 
 ---
 
+## Sessione #171 — 2026-09-11 (wake cold-start, msg loomy `d7efa6c0`, WI `4c1b2434`)
+
+**Task — GO rollout DEC-002 (msg loomy `d7efa6c0`, ref `1b950385`).** Il codice (`gtdQueryProjectCrossOwnerRead`, commit `d40ce04`, sessione #170) era già committato ma non ancora rigenerato su `dist/` — il path che `agent_manager.py window` legge al lancio (CLAUDE.md §Rollout G4). Modalità richiesta esplicitamente: IE-002, propagazione naturale, nessun restart forzato (cambiamento additivo, solo un ramo di lettura in più).
+
+**Eseguito:** `npm run build` (tsc pulito, 0 errori) — `dist/tools.js` verificato contenere `gtdQueryProjectCrossOwnerRead` (3 occorrenze, pari a `src/tools.ts`), `git status` pulito prima e dopo. Nessuna window uccisa: le sessioni vive restano sul build con cui sono partite (comportamento G4 invariato), quelle nuove/a freddo — incluso it-manager, già armato su GTD `76479e9e` punto 3 — prendono il branch cross-owner da subito.
+
+**Comunicato:** `board_send(done)` a loomy (ref `d7efa6c0`) con conferma build+path; `board_send(info)` a it-manager con l'invito a verificare lui stesso al primo `gtd_query(project_id=d4528e72)` che veda righe di owner diversi dal proprio — verifica empirica fuori dalla mia identità nativa (stesso vincolo RLS/D-084 già documentato in sessione #169), delegata a chi la può fare.
+
+**Verifiche:** `npm run build` pulito, grep di conferma sorgente↔dist, `git log`/`git status`. Nessun test nuovo — nessuna modifica di codice in questa sessione, solo build+deploy+conferma.
+**Decisioni prese:** nessuna nuova decisione formale.
+**Blocchi / note:** nessuno. Il backfill `loomx_item_projects` (7/143 righe linkate, girato da loomy a dba) resta fuori scope di questa sessione — citato solo per contesto nel msg di loomy.
+**Prossima sessione:** nessun follow-on aperto su DEC-002 lato board-mcp. Restano in inbox gli item pre-esistenti non toccati qui (vedi sessioni precedenti per il backlog completo — inbox ha 20 item, non processata oltre il wake ricevuto).
+
+---
+
 ## Sessione #170 — 2026-09-10 (wake cold-start, msg loomy `565931ec`, WI `7f4a9cef`)
 
 **Task — DEC-002: estendere a it-manager la lettura cross-owner sul register issue tracker.** `gtd_query` oggi abilita la lettura cross-owner solo a `loomy`/broker; il register `agent-issue-tracker` (progetto `d4528e72`) lavora per interrogazione-per-progetto (DEC-001/002/003, guida operativa `GUI-003`/`GUI-004`, non leggibile io stesso: board-mcp non è membro del progetto, solo `visibility='org'` mi è visibile lì), quindi it-manager non vedeva le righe segnalate da altri agenti. Vincolo esplicito nel task: si allarga una **lettura**, mai una scrittura — `gtd_add(owner)`/`gtd_update(owner)` restano loomy-only, il modello di identità non si tocca.
