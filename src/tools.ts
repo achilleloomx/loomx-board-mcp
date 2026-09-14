@@ -2423,60 +2423,14 @@ export function registerTools(
         return { content: [{ type: "text", text: JSON.stringify({ agent: agentSlug, domain: domain ?? null, help_edges: enrichedEdges }, null, 2) }] };
       }
 
-      // mode === "card" (default)
-      const { data: card, error: cardErr } = await db
-        .from(ROLE_CARDS_TABLE)
-        .select("mission, does, does_not, scope_notes, human_ref, updated_at")
-        .eq("agent_slug", agentSlug)
-        .maybeSingle();
-      if (cardErr) {
-        return { content: [{ type: "text", text: `Error reading role card: ${cardErr.message}` }], isError: true };
+      // mode === "card" (default) — same module agent_context().role uses
+      // (SDES-001), one implementation for both call sites.
+      const { buildRoleCard } = await import("./agentContext.js");
+      const cardRes = await buildRoleCard(db, agentSlug);
+      if (!cardRes.ok) {
+        return { content: [{ type: "text", text: `Error: ${cardRes.error}` }], isError: true };
       }
-
-      const { data: edges, error: edgesErr } = await db
-        .from(ORG_EDGES_TABLE)
-        .select("to_agent, edge_type, domain, note")
-        .eq("from_agent", agentSlug);
-      if (edgesErr) {
-        return { content: [{ type: "text", text: `Error reading org edges: ${edgesErr.message}` }], isError: true };
-      }
-
-      const edgeRows = (edges ?? []) as { to_agent: string; edge_type: string; domain: string | null; note: string | null }[];
-      const reportsTo = edgeRows.find((e) => e.edge_type === "reports_to")?.to_agent ?? null;
-      const escalatesTo = edgeRows.filter((e) => e.edge_type === "escalates_to");
-      const asksHelpFrom = edgeRows.filter((e) => e.edge_type === "asks_help_from");
-      const cardHumanRef = card ? (card as { human_ref: string }).human_ref : null;
-
-      if (!card && edgeRows.length === 0) {
-        return {
-          content: [
-            {
-              type: "text",
-              text: JSON.stringify({ agent: agentSlug, role_card: null, reports_to: null, human_ref: null, escalates_to: [], asks_help_from: [], note: "no org-registry data for this agent yet (F2 seed pending?)" }, null, 2),
-            },
-          ],
-        };
-      }
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(
-              {
-                agent: agentSlug,
-                role_card: card ?? null,
-                reports_to: reportsTo,
-                human_ref: cardHumanRef,
-                escalates_to: escalatesTo,
-                asks_help_from: asksHelpFrom,
-              },
-              null,
-              2
-            ),
-          },
-        ],
-      };
+      return { content: [{ type: "text", text: JSON.stringify(cardRes.data, null, 2) }] };
     }
   );
 
@@ -3043,6 +2997,20 @@ export function registerTools(
   // auto-set waiting_on heuristic (a) query board_messages (keyed by agent
   // code) without duplicating the registry lookup.
   const wiCtx = { selfSlug, isLoomy, slugToCode, codeToSlug };
+
+  // --- agent_context ---
+  server.tool(
+    "agent_context",
+    "SDES-001 (progetto frame-method-as-service, MaaS fase 0). No parameters — identity is always the caller's own (ctx.selfSlug), never an input. " +
+      "One-call orientation payload: role (same module org_lookup(agent=self) uses), constitution (single RPC gov.applicable_norms(p_agent) — fail-open with constitution_unavailable until dba ships the function; never a TS-side query over decision rows, REQ-009), " +
+      "and work (active WI, top-5 armed/next_action GTD items with no body, pending_inbox/pending_wakes D-205/D-238). payload_version \"0\".",
+    {},
+    async () => {
+      const { agentContext } = await import("./agentContext.js");
+      const db = getSupabaseClient();
+      return toText(await agentContext(db, { selfSlug, slugToCode, codeToSlug }));
+    }
+  );
 
   // --- wi_start ---
   server.tool(

@@ -36,6 +36,7 @@ const LAZY_MODULES = [
   "./factSync.js",
   "./idResolve.js",
   "./structure.js",
+  "./agentContext.js",
 ] as const;
 
 async function preloadLazyModules(): Promise<void> {

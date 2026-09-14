@@ -480,13 +480,21 @@ export class PgShimClient {
     params: Record<string, unknown>
   ): Promise<DbResult<unknown>> {
     try {
-      if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(fn)) {
-        throw new Error(`Invalid function name: ${fn}`);
-      }
+      // ident() (schema-qualified, same helper `.from()` uses for "gov.*"
+      // tables) instead of the old bare identifier regex — a schema-qualified
+      // function call (e.g. "gov.applicable_norms", agent_context/SDES-001)
+      // was previously rejected outright as "Invalid function name", even
+      // though it's exactly as safe: still fully regex-validated per segment,
+      // never string-built from unvalidated input.
+      const fnIdent = ident(fn);
+      // Postgres names a scalar function's result column after the function's
+      // own (unqualified) name, never schema-qualified — "gov.applicable_norms"
+      // comes back as a column called "applicable_norms".
+      const baseName = fn.includes(".") ? fn.split(".")[1]! : fn;
       const keys = Object.keys(params);
       const values = keys.map((k) => params[k]);
       const placeholders = keys.map((k, i) => `${k} => $${i + 1}`);
-      const sql = `SELECT * FROM ${fn}(${placeholders.join(", ")})`;
+      const sql = `SELECT * FROM ${fnIdent}(${placeholders.join(", ")})`;
       const res = await this.pool.query(sql, values);
 
       // Mirror supabase-js behavior: scalar-returning functions return the
@@ -494,9 +502,9 @@ export class PgShimClient {
       if (
         res.rows.length === 1 &&
         Object.keys(res.rows[0]!).length === 1 &&
-        Object.prototype.hasOwnProperty.call(res.rows[0], fn)
+        Object.prototype.hasOwnProperty.call(res.rows[0], baseName)
       ) {
-        return { data: (res.rows[0] as Row)[fn], error: null };
+        return { data: (res.rows[0] as Row)[baseName], error: null };
       }
       return { data: res.rows, error: null };
     } catch (e) {

@@ -98,7 +98,7 @@ loomx-board-mcp/
 
 ## MCP Tools
 
-46 tool base esposti a ogni agente (24 board/gtd/wi/runtime/ping + 11 doc_* document model — incl. `doc_rename` e `doc_structure`, v0.25.0 — + 7 subscription tool — incl. `doc_fact_sync` — + 3 staleness/decay tool + 1 `org_lookup`) + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
+47 tool base esposti a ogni agente (24 board/gtd/wi/runtime/ping + 11 doc_* document model — incl. `doc_rename` e `doc_structure`, v0.25.0 — + 7 subscription tool — incl. `doc_fact_sync` — + 3 staleness/decay tool + 1 `org_lookup` + 1 `agent_context`) + 8 tool home_* (condizionali, richiedono HOME_FAMILY_ID + HOME_USER_ID):
 
 > **Validazione argomenti STRICT su tutti i tool (v0.32.0, msg forge `0b7ef2ae`, GTD `9856f4ce`).** Un parametro sconosciuto è **rifiutato e nominato** (`-32602`, `Unrecognized key(s) in object: '<chiave>'`), non più scartato in silenzio. Prima: `server.tool(name, desc, rawShape, cb)` faceva costruire all'SDK uno `z.object` **non-strict** — zod scartava le chiavi ignote — mentre il JSON Schema pubblicato dichiarava già `additionalProperties:false`. Schema e runtime dicevano due cose diverse, e su alcuni tool il silenzio cambiava **ramo**: `wi_start` con `gtd_id` invece di `gtd_item_id` perdeva il link e auto-creava un GTD duplicato rispondendo `ok`; un `wake_priority` con refuso spediva un messaggio senza wake (la classe di deadlock D-118); un `autopilot` con refuso lasciava il GTD non armato, mai dispacciato.
 > **Dove sta il fix:** `src/strictTools.ts` — `withStrictToolArgs()` avvolge il server e irrigidisce il **punto di registrazione**, applicato in `registerTools` (`tools.ts`) e `registerHumanTools` (`humanTools.ts`). Zero diff sui call site, e un tool aggiunto domani nasce strict per costruzione. Il perimetro reale è **72** registrazioni, non 67: i 5 di `humanTools.ts` non erano nel conteggio segnalato.
@@ -281,6 +281,18 @@ Design: `hub/initiatives/governance-compliance/design.md` §3 (schema) + §5.2 (
 > **Fallback RACI:** se il progetto non ha righe in `loomx_sow_raci`, la risposta ritorna `raci: null` + `fallback.owner = loomx_projects.agent_id` (comportamento attuale, D-091).
 >
 > **Nota persone in RACI:** `loomx_sow_raci.person_id` non ha ancora FK verso `loomx_people` (tabella non esiste, D-084 pending) — i soggetti persona vengono ritornati come `person:<uuid>` finché la tabella non atterra.
+
+### Agent Context Tool (SDES-001, progetto frame-method-as-service — MaaS fase 0, v0.32.3)
+
+1 tool read-only, **nessun parametro** — identità sempre `selfSlug` del chiamante, mai un input. Payload di orientamento in una sola chiamata: `role` (stesso modulo di `org_lookup(agent=self, question="card")` — `buildRoleCard()` in `src/agentContext.ts`, un'unica implementazione per i due call site), `constitution` (una sola RPC `gov.applicable_norms(p_agent)`, altri parametri lasciati al default SQL) e `work` (WI attivo, GTD armati/`next_action` top 5 senza body, `pending_inbox`/`pending_wakes` D-205/D-238). `payload_version: "0"`, nessun body libero nel payload.
+
+| Tool | Descrizione | Operazione DB |
+|---|---|---|
+| `agent_context` | Nessun parametro. `constitution` **fail-open**: se `gov.applicable_norms` non esiste ancora (dba la costruisce in parallelo, SDES-005/006), risponde `constitution: null, constitution_unavailable: "gov.applicable_norms missing: <dettaglio>"` — mai un blocco, mai una query TS diretta su `decision` (REQ-009). `work.gtd_top`: fetch bounded (100) filtrato in JS per `autopilot=true \|\| gtd_status='next_action'`, ordinato `priority_rank DESC, deadline ASC`, troncato a 5 — mai `.or()` PostgREST-style contro il pg-shim (booleano vs parametro testuale non verificato, stessa cautela D-119) | SELECT loomx_role_cards/loomx_org_edges/loomx_work_items/loomx_items/board_messages + RPC gov.applicable_norms |
+
+> **Fix collegato — RPC schema-qualificate (v0.32.3, `src/pg-shim.ts`):** `PgShimClient.rpc()` accettava solo nomi funzione senza punto (`^[a-zA-Z_][a-zA-Z0-9_]*$`) — una `gov.applicable_norms` veniva rifiutata a monte con "Invalid function name", mai raggiungendo il DB. Ora riusa lo stesso `ident()` già fidato per le tabelle `gov.*` (`.from("gov.doc_subscriptions")`), quotato per segmento; il match del risultato scalare usa il nome **non qualificato** (Postgres nomina la colonna del ritorno scalare `applicable_norms`, non `gov.applicable_norms`). Verificato dal vivo (`tests/verify-agent-context.ts`): l'errore live è `function gov.applicable_norms(p_agent => unknown) does not exist` (42883, DB raggiunto) invece del vecchio errore di validazione client-side.
+>
+> **Non leggibile da qui:** SDES-001 completo vive nel progetto `frame-method-as-service` (`c0f419d8`), su cui board-mcp non ha `loomx_project_members` — costruito dal contratto riassunto nel messaggio di frame (`f7ff99d9`), non dal documento (D-136 §5, D-167). Verifica alla consegna richiesta esplicitamente a frame.
 
 ### Document Model Tools (documents / doc_items — D-a5 F1)
 
