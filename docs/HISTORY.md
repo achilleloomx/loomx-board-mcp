@@ -4,6 +4,23 @@
 
 ---
 
+## Sessione #172 — 2026-09-14 (wake cold-start, msg loomy `00e00010`, WI `53599a17`, modello fable)
+
+**Task — fattibilità e piano, NON build (GTD `ed2f4f6a`, progetto Items Subscription):** loomy, su mandato Achille 14/09, chiede se e come `wi_start` possa consegnare la lista chiusa delle norme applicabili (codice, versione, gradino, fonte) e `wi_end` raccogliere un esito per norma — principio 2.7 del manifesto Frame v0.3, attuazione di D-235. Disegno in `hub/notes/wi-norme-applicabili-design-2026-09-14.md` (nel workspace di loomy, `/home/loomy/workspace/hub/notes/`, NON in `00. LoomX Consulting/hub/` come dice il path relativo del CLAUDE.md).
+
+**Misurato dal vivo (read-only, identità board-mcp), cinque fatti che cambiano il disegno:**
+1. `doc_item_wi_links` NON ha `citation_scope` (colonne: id, doc_item_id, wi_id, created_at) — la migrazione dba `20260903130000_..._citation_scope.sql` tocca solo RLS. `doc_rw` ha INSERT ma non UPDATE. E le norme CORE/AMB sono `item_type=decision`, che il gate D-074 accetta come artefatto durevole → persistere lì le norme consegnate farebbe passare il gate a ogni WI. Proposta: tabella dedicata `gov.wi_norms` (consegna + esito, `outcome IS NULL` = consegnata senza esito).
+2. La mappa progetto→casa non esiste: `loomx_category_home_map` 0 righe, `loomx_decision_category_map` 1 fixture, nessuna mappa progetto→categoria nello schema (`loomx_projects.parent_project_id` non punta mai ai 15 «Metodo LoomX»). Percorso critico: DDL dba + popolamento loomy.
+3. `attrs.scope` sulla decisione è già occupato (enum `project|cross`, D-065, `src/docTypes.ts`), usato da tutte le 30 righe CORE/AMB → il vocabolario del disegno va sotto `attrs.applies_when`; `attrs.applies_to` esistente va dichiarato come asse.
+4. Vocabolari chiusi in YAML (catalogo template, governance-policy.yaml) vs funzione SQL → vocab in DB, `activity`/`domains` passati da `wi_start` come parametri.
+5. Il preambolo live non trascrive CORE/AMB (`GOVERNANCE_PREAMBLE` = pre-flight D-024; `_governance_contract()` = contratto operativo) e gira prima di `wi_start` senza conoscere il template → funzione con parametri nulli, due consumatori con input diversi.
+
+Altri fatti: CORE/AMB 30 righe `proposed`, 0 pubblicazioni (12/15 manifesti di dominio ne hanno ≥1); 118/118 documenti `visibility='org'`; `doc_rw` senza SELECT su `loomx_projects`/`loomx_item_projects` → funzione SECURITY DEFINER; sui WI di board-mcp (unici visibili sotto RLS, 186 in 30 gg) 34% senza template e solo 35% con GTD→progetto.
+
+**Consegna:** piano completo a loomy (msg `c1273a65`, ref `00e00010`): risposte alle 5 domande, DDL proposta (3 oggetti), punti di innesto (`wiStart` fail-open + persistenza; `wiEnd` `norm_outcomes[]` con soft-warn fase 1 e flag `LOOMX_NORM_GATE_ENFORCED` fase 2, ordinato dopo il gate D-074 e prima dell'UPDATE; `docTypes.ts`, `wiTemplates.ts`, shim `rpc()` in fakeDb), sequenza, stima 13-14,5 gg-agente (dba 3 · loomy 1 · forge 1,5-2 · board-mcp 4,5-5,5 · it-manager 1 · auditor 2; +1,5-2 rispetto alla nota gap per la mappa progetto→categoria data per esistente). Gradino derivato dalla `reason` (constitution 1 / thread 2 / project 3, CORE-013), non da DEL-003 pubblicato.
+
+**Decisioni prese:** nessuna (mandato esplicito: nessun D-NNN). **Codice:** nessuna riga. WI linkato a D-235 (`doc_link` wi, link `b2b7c9d8`) per il gate D-074. GTD follow-on «Build fase 1» creato in `waiting` su loomy, non armato (cost-consent Achille). Ackato anche il `done` di loomy `c90f3061` (REQ-GOV-171, nessun lavoro).
+
 ## Sessione #171 — 2026-09-11 (wake cold-start, msg loomy `d7efa6c0`, WI `4c1b2434`)
 
 **Task — GO rollout DEC-002 (msg loomy `d7efa6c0`, ref `1b950385`).** Il codice (`gtdQueryProjectCrossOwnerRead`, commit `d40ce04`, sessione #170) era già committato ma non ancora rigenerato su `dist/` — il path che `agent_manager.py window` legge al lancio (CLAUDE.md §Rollout G4). Modalità richiesta esplicitamente: IE-002, propagazione naturale, nessun restart forzato (cambiamento additivo, solo un ramo di lettura in più).
