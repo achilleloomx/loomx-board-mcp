@@ -1,23 +1,50 @@
 // agent_context() — SDES-001 (project frame-method-as-service, MaaS fase 0).
 // Mandate: msg frame f7ff99d9 (2026-09-14), R assigned to board-mcp in the
-// project's RACI (SoW DEL-000). Full SDES-001 not readable from this agent's
-// identity (D-015 confidentiality — board-mcp has no loomx_project_members
-// row on c0f419d8, see board_send c9d8d991 to frame) — built strictly from
-// the contract frame's message states, with every field frame did not spell
-// out declared explicitly rather than guessed (D-136 §5).
+// project's RACI (SoW DEL-000).
 //
-// Contract (per frame, subject to frame's review at delivery):
+// Rework (2026-09-15, msg frame 30b4b1f7): the first delivery (msg 64af622b)
+// was built from frame's dispatch summary — board-mcp could not read SDES-001
+// itself yet (D-015/RLS gap, msg c9d8d991). frame has since been granted
+// viewer membership on c0f419d8 (msg dba bcd08fd2) and this build now reads
+// the SDES-001 item body directly (doc_item_resolve → doc_query, code
+// SDES-001, item f5577218/6e57bb5a). Four form deviations from the canonical
+// schema, all fixed here:
+//   1. `agent` is now `{slug, identity}`, not a bare string.
+//   2. `work` carries two separate lists, `armed_gtd` and `next_actions`,
+//      not one merged `gtd_top`.
+//   3. top-level `ok` — was already present in the live tool response (the
+//      `toText` wrapper in tools.ts does `{ok: true, ...res.data}`); the
+//      hand-written example pasted into msg 64af622b's body just omitted it.
+//      Verified live 2026-09-15 before touching anything.
+//   4. `session_hints` added (was missing entirely).
+//
+// `agent.identity`: SDES-001's schema names the field but does not spell out
+// its shape anywhere in the document body (checked: no other item in the
+// project mentions it). Not inventing a new concept for it (D-136 §5) — using
+// the one dual-identifier system this codebase already has for an agent,
+// visible on every board_messages row (`from_agent`/`to_agent` = agent_code,
+// `from_agent_slug`/`to_agent_slug` = slug): `identity` = ctx.slugToCode.get(
+// selfSlug), the agent_code. Flagged explicitly to frame at delivery so it
+// can be corrected if the design meant something else.
+//
+// Contract (per SDES-001, now read directly):
 //   - no parameters, identity = ctx.selfSlug (never an input).
 //   - role: SAME module org_lookup(agent=self, question="card") uses —
 //     buildRoleCard below, shared by both call sites, not a duplicate.
 //   - constitution: ONE call to gov.applicable_norms(p_agent := self), every
-//     other parameter left to its SQL-side DEFAULT (NULL). dba is building
-//     this function in parallel (session #172 findings folded into SDES-005/
-//     006 per frame's message) — until it exists, fail-open and SAY SO:
-//     constitution: null, constitution_unavailable: "gov.applicable_norms missing: <detail>".
-//     Never a query built in TS against decision rows directly (REQ-009).
-//   - work: active WI (findActiveForAgent) + GTD armed/next_action (top 5,
-//     no body — same omission the rest of the payload follows) +
+//     other parameter left to its SQL-side DEFAULT (NULL). Live now (dba msg
+//     bcd08fd2), but EXECUTE is granted to `doc_rw` only, on purpose — the
+//     native board-mcp role this tool runs under gets `permission denied`
+//     (measured live 2026-09-15). Fail-open already covers this exactly as
+//     it covered "function missing": constitution: null,
+//     constitution_unavailable: "gov.applicable_norms missing: <detail>".
+//     Not routing this call through the doc_rw transaction machinery here —
+//     that is an architectural change (this tool is not a doc_* tool) frame/
+//     dba should decide, not something to invent unilaterally (D-136 §5);
+//     flagged at delivery instead. Never a query built in TS against decision
+//     rows directly (REQ-009).
+//   - work: active WI (findActiveForAgent) + GTD armed_gtd/next_actions (top
+//     5 each, no body — same omission the rest of the payload follows) +
 //     pending_inbox/pending_wakes (D-205/D-238, self-close semantics: caller
 //     IS the owner here by construction, so these are never the orphan-sweep
 //     `undefined`).
@@ -131,10 +158,25 @@ async function fetchConstitution(
   }
 }
 
+interface ArmedGtdRow {
+  id: unknown;
+  title: unknown;
+  priority: unknown;
+  autopilot_model: unknown;
+}
+
+interface NextActionRow {
+  id: unknown;
+  title: unknown;
+  priority: unknown;
+  deadline: unknown;
+}
+
 interface WorkResult {
   active_wi: Record<string, unknown> | null;
-  gtd_top: Record<string, unknown>[];
-  gtd_top_error?: string;
+  armed_gtd: ArmedGtdRow[];
+  next_actions: NextActionRow[];
+  gtd_error?: string;
   pending_inbox: PendingInboxInfo | undefined;
   pending_wakes: PendingWakesInfo | undefined;
 }
@@ -156,21 +198,29 @@ async function fetchWork(
 
   const { data: gtdRows, error: gtdErr } = await db
     .from(GTD_TABLE)
-    .select("id,title,gtd_status,priority,priority_rank,deadline,waiting_on,autopilot,autopilot_model,project_id,updated_at")
+    .select("id,title,gtd_status,priority,priority_rank,deadline,autopilot,autopilot_model")
     .eq("owner", selfSlug)
     .not("gtd_status", "in", "(done,trash)")
     .order("priority_rank", { ascending: false })
     .order("deadline", { ascending: true, nullsFirst: false })
     .limit(GTD_FETCH_CAP);
 
-  let gtdTop: Record<string, unknown>[] = [];
-  let gtdTopError: string | undefined;
+  let armedGtd: ArmedGtdRow[] = [];
+  let nextActions: NextActionRow[] = [];
+  let gtdError: string | undefined;
   if (gtdErr) {
-    gtdTopError = gtdErr.message;
+    gtdError = gtdErr.message;
     process.stderr.write(`[agent_context] GTD read failed (non-blocking): ${gtdErr.message}\n`);
   } else {
     const rows = (gtdRows ?? []) as Record<string, unknown>[];
-    gtdTop = rows.filter((r) => r.autopilot === true || r.gtd_status === "next_action").slice(0, GTD_TOP_N);
+    armedGtd = rows
+      .filter((r) => r.autopilot === true)
+      .slice(0, GTD_TOP_N)
+      .map((r) => ({ id: r.id, title: r.title, priority: r.priority, autopilot_model: r.autopilot_model }));
+    nextActions = rows
+      .filter((r) => r.gtd_status === "next_action")
+      .slice(0, GTD_TOP_N)
+      .map((r) => ({ id: r.id, title: r.title, priority: r.priority, deadline: r.deadline }));
   }
 
   const { computePendingInbox, computePendingWakes } = await import("./pendingInbox.js");
@@ -179,20 +229,32 @@ async function fetchWork(
 
   return {
     active_wi: activeWi,
-    gtd_top: gtdTop,
-    ...(gtdTopError ? { gtd_top_error: gtdTopError } : {}),
+    armed_gtd: armedGtd,
+    next_actions: nextActions,
+    ...(gtdError ? { gtd_error: gtdError } : {}),
     pending_inbox: pendingInbox,
     pending_wakes: pendingWakes,
   };
 }
 
+export interface AgentIdentity {
+  slug: string;
+  identity: string | null;
+}
+
+export interface SessionHints {
+  call_wi_start_before_writes: true;
+  close_sequence: "AUTOPILOT_NORMS";
+}
+
 export interface AgentContextPayload {
   payload_version: "0";
-  agent: string;
+  agent: AgentIdentity;
   role: RoleCardResult;
   constitution: unknown[] | null;
   constitution_unavailable?: string;
   work: WorkResult;
+  session_hints: SessionHints;
 }
 
 export interface AgentContextCtx {
@@ -215,11 +277,12 @@ export async function agentContext(db: SupabaseClient, ctx: AgentContextCtx): Pr
     ok: true,
     data: {
       payload_version: "0",
-      agent: ctx.selfSlug,
+      agent: { slug: ctx.selfSlug, identity: ctx.slugToCode.get(ctx.selfSlug) ?? null },
       role: roleRes.data,
       constitution: constitutionRes.constitution,
       ...(constitutionRes.constitution_unavailable ? { constitution_unavailable: constitutionRes.constitution_unavailable } : {}),
       work,
+      session_hints: { call_wi_start_before_writes: true, close_sequence: "AUTOPILOT_NORMS" },
     },
   };
 }

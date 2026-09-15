@@ -35,12 +35,14 @@ async function main() {
   if (!res.ok) throw new Error(`agent_context failed: ${res.error}`);
 
   console.log("payload_version:", res.data.payload_version);
+  console.log("agent:", res.data.agent);
   console.log("role.role_card present:", res.data.role.role_card !== null, "note:", res.data.role.note ?? null);
   console.log("constitution:", res.data.constitution, "unavailable:", res.data.constitution_unavailable ?? null);
   console.log("work.active_wi:", res.data.work.active_wi ? (res.data.work.active_wi as any).id : null);
-  console.log("work.gtd_top count:", res.data.work.gtd_top.length, "error:", res.data.work.gtd_top_error ?? null);
+  console.log("work.armed_gtd count:", res.data.work.armed_gtd.length, "work.next_actions count:", res.data.work.next_actions.length, "error:", res.data.work.gtd_error ?? null);
   console.log("work.pending_inbox:", res.data.work.pending_inbox);
   console.log("work.pending_wakes:", res.data.work.pending_wakes);
+  console.log("session_hints:", res.data.session_hints);
 
   // Parity check (SDES-001 explicit ask): agent_context().role must be byte-
   // identical to org_lookup(agent=self, question="card") — both now call the

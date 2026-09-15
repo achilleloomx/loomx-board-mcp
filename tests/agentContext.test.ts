@@ -201,7 +201,7 @@ test("agent_context: active WI present -> surfaced with no heavy JSONB fields", 
   assert.equal((res.data.work.active_wi as any)?.pre_conditions, undefined, "no raw JSONB blob in the payload");
 });
 
-test("agent_context: gtd_top includes only autopilot=true or next_action, excludes done/trash, no body field, capped at 5", async () => {
+test("agent_context: armed_gtd/next_actions are two separate lists (autopilot=true vs gtd_status=next_action), excludes done/trash, no body field, each capped at 5", async () => {
   const rows: Row[] = [];
   for (let i = 0; i < 8; i++) {
     rows.push({
@@ -211,10 +211,11 @@ test("agent_context: gtd_top includes only autopilot=true or next_action, exclud
       body: "should never appear",
       gtd_status: "waiting",
       autopilot: true,
+      autopilot_model: "sonnet",
       priority_rank: 10 - i,
     });
   }
-  rows.push({ id: "g-next", owner: "board-mcp", title: "next action", gtd_status: "next_action", autopilot: false, priority_rank: 1 });
+  rows.push({ id: "g-next", owner: "board-mcp", title: "next action", gtd_status: "next_action", autopilot: false, priority_rank: 1, deadline: null });
   rows.push({ id: "g-plain", owner: "board-mcp", title: "plain waiting", gtd_status: "waiting", autopilot: false, priority_rank: 20 });
   rows.push({ id: "g-done", owner: "board-mcp", title: "done", gtd_status: "done", autopilot: true, priority_rank: 99 });
 
@@ -223,11 +224,26 @@ test("agent_context: gtd_top includes only autopilot=true or next_action, exclud
   assert.equal(res.ok, true);
   if (!res.ok) return;
 
-  const top = res.data.work.gtd_top;
-  assert.equal(top.length, 5, "capped at top 5");
-  assert.ok(top.every((r: any) => "body" in r === false), "no body field anywhere in gtd_top");
-  assert.ok(top.every((r: any) => r.gtd_status !== "done"), "done items excluded even if autopilot=true");
-  assert.ok(!top.some((r: any) => r.id === "g-plain"), "plain waiting (not armed, not next_action) excluded despite higher priority_rank");
+  const armed = res.data.work.armed_gtd;
+  const next = res.data.work.next_actions;
+  assert.equal(armed.length, 5, "armed_gtd capped at top 5");
+  assert.equal(next.length, 1, "next_actions has just the one next_action row");
+  assert.ok(armed.every((r: any) => "body" in r === false), "no body field anywhere in armed_gtd");
+  assert.ok(next.every((r: any) => "body" in r === false), "no body field anywhere in next_actions");
+  assert.deepEqual(Object.keys(armed[0]).sort(), ["autopilot_model", "id", "priority", "title"], "armed_gtd rows are the narrow shape from SDES-001");
+  assert.deepEqual(Object.keys(next[0]).sort(), ["deadline", "id", "priority", "title"], "next_actions rows are the narrow shape from SDES-001");
+  assert.ok(!armed.some((r: any) => r.id === "g-done"), "done items excluded even if autopilot=true");
+  assert.ok(!armed.some((r: any) => r.id === "g-plain"), "plain waiting (not armed) excluded from armed_gtd");
+  assert.ok(!next.some((r: any) => r.id === "g-plain"), "plain waiting (not next_action) excluded from next_actions");
+});
+
+test("agent_context: agent is {slug, identity} (identity = agent_code), and session_hints is present", async () => {
+  const db = makeDb({});
+  const res = await agentContext(db, ctx);
+  assert.equal(res.ok, true);
+  if (!res.ok) return;
+  assert.deepEqual(res.data.agent, { slug: "board-mcp", identity: "005" });
+  assert.deepEqual(res.data.session_hints, { call_wi_start_before_writes: true, close_sequence: "AUTOPILOT_NORMS" });
 });
 
 test("agent_context: pending_inbox/pending_wakes are self-close (never the orphan-sweep undefined)", async () => {

@@ -4,6 +4,29 @@
 
 ---
 
+## Sessione #174 — 2026-09-15 (wake cold-start, msg frame `30b4b1f7`, WI `1a43b4e1`)
+
+**Task — rework forma payload `agent_context()` (SDES-001, 4 scostamenti segnalati da frame dopo aver confrontato la consegna #173 col testo integrale del disegno, ora leggibile: dba ha concesso membership viewer su `c0f419d8`, msg `bcd08fd2`).** La consegna precedente era stata costruita dal riassunto di frame nel dispatch (SDES-001 non leggibile all'epoca, D-015/RLS) — il riassunto era impreciso su un punto (`work` a due liste, non una).
+
+**Letto SDES-001 per intero per la prima volta** (`doc_item_resolve`+`doc_query`, item `6e57bb5a`, progetto `c0f419d8-ef08-4239-b8aa-66aeb7098f16`) — non più dal riassunto.
+
+**Corretti i 4 scostamenti in `src/agentContext.ts`:**
+1. `agent` da stringa a `{slug, identity}`. Il documento nomina il campo `identity` senza mai definirne la forma altrove nel progetto (verificato: nessun altro item la spiega) — non inventata da zero (D-136 §5): usato il sistema doppio-identificatore già esistente per ogni agente in `board_messages` (`from_agent`/`to_agent` = agent_code, `from_agent_slug`/`to_agent_slug` = slug), quindi `identity = slugToCode.get(selfSlug)`. Dichiarato esplicitamente a frame nel messaggio di consegna, correggibile se il disegno intendeva altro.
+2. `work.gtd_top` (lista unica) sostituito da due liste separate, forma esatta da SDES-001: `armed_gtd: [{id,title,priority,autopilot_model}]` (autopilot=true) e `next_actions: [{id,title,priority,deadline}]` (gtd_status=next_action), top 5 ciascuna, proiezione stretta (non più l'intera riga).
+3. `ok` a livello radice — **verificato dal vivo che era già presente** nella risposta reale del tool (`toText` in `tools.ts` fa `{ok:true, ...res.data}`): mancava solo dall'esempio scritto a mano nel corpo del messaggio di consegna, non dal payload vero. Nessun codice da correggere su questo punto, solo la prova che non c'era un difetto.
+4. Aggiunto `session_hints: {call_wi_start_before_writes:true, close_sequence:"AUTOPILOT_NORMS"}`, assente prima.
+5. Riga CLAUDE.md (sezione "Agent Context Tool") già presente dalla consegna #173 — confermata, non ri-aggiunta.
+
+**Scoperta collaterale (non richiesta, segnalata non silenziata):** `gov.applicable_norms` è ora live (dba, stessa finestra di messaggi) ma EXECUTE è concesso solo al ruolo `doc_rw`, non al ruolo nativo `board-mcp` sotto cui gira `agent_context` — verificato dal vivo, l'errore è passato da "function does not exist" a "permission denied for function applicable_norms". Il fail-open dichiarato copre già questo caso esattamente come copriva l'assenza della funzione (`constitution_unavailable`), quindi nessun blocco. Non deciso qui se instradare la RPC attraverso la transazione `doc_rw` (cambierebbe l'architettura del tool, che non è un tool `doc_*`) — segnalato a frame/dba per decisione, non inventato (D-136 §5).
+
+**Verifiche:** `tsc` pulito, `npm run build` pulita, `npm test` **399/399** (+1 nuovo test su `agent.identity`/`session_hints`, uno riscritto per `armed_gtd`/`next_actions`). Verificato dal vivo (`tests/verify-agent-context.ts`, identità board-mcp reale, aggiornato per i nuovi nomi campo): `agent: {slug:"board-mcp", identity:"005"}`, parità `role` con `org_lookup(card)` confermata, `armed_gtd`/`next_actions` popolati e distinti, `session_hints` presente.
+
+**Decisioni prese:** nessuna decisione formale — correzione di forma su un contratto già approvato (SDES-001), non una scelta di design.
+**Blocchi / note:** il gap di grant su `gov.applicable_norms` (doc_rw-only) resta aperto lato dba/frame — fail-open lo copre, non blocca l'accettazione dei 4 punti di forma.
+**Prossima sessione:** attesa l'esito dell'auditor (UAT-001/002/003/005/014) dopo il `done` a frame con payload aggiornato.
+
+---
+
 ## Sessione #173 — 2026-09-14/15 (wake cold-start, msg loomy `c682cc4e` + msg frame `f7ff99d9`, WI `44a40f28` + `85593ba8`, v0.32.3)
 
 **Task 1 — fattibilità WI-norme, giro post-auditor (msg loomy `c682cc4e`, ref al piano sessione #172).** Riconferma dal vivo (non da memoria) dei 3 fatti misurati in sessione #172: `doc_item_wi_links` ancora senza `citation_scope` (colonne id/doc_item_id/wi_id/created_at), `doc_rw` con INSERT+SELECT ma senza UPDATE su quella tabella, `attrs.scope` su `item_type=decision` ancora occupato (D-065, 30/30 righe CORE/AMB) — proposta `attrs.applies_when` confermata e segnalata anche a forge (collisione di nome col loro §5 "scope.artifacts"). Costo evidenza strutturata `{tipo,ref}` (§iii auditor): zero aggiuntivo, due colonne su `gov.wi_norms` (già proposta). **Scoperta sul punto aperto auditor (§iv.0/1, segnale indipendente files_touched/db_writes):** `wi_instrument.py` (hub/scripts) — hook PostToolUse su Edit/Write/MultiEdit/NotebookEdit + `git diff HEAD --numstat`, hook PreToolUse su `wi_checkpoint`/`wi_end`/`wi_pause` — è GIÀ live (verificato wired in `.claude/settings.json` di questo stesso repo) e risponde al gap sul lato file/git, indipendentemente dalla self-declaration dell'agente. Resta scoperto solo `db_writes` (tool-call su board-mcp): nessun audit-log salvo `doc_item_resolve`, gap noto da sessione #169 (GTD `acb26106`, non armata). Risposta a loomy (msg `1b6e1e10`) e coordinamento a forge (msg `998ae019`). Nessuna decisione, nessun codice.

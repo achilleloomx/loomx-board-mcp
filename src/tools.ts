@@ -3002,8 +3002,8 @@ export function registerTools(
   server.tool(
     "agent_context",
     "SDES-001 (progetto frame-method-as-service, MaaS fase 0). No parameters — identity is always the caller's own (ctx.selfSlug), never an input. " +
-      "One-call orientation payload: role (same module org_lookup(agent=self) uses), constitution (single RPC gov.applicable_norms(p_agent) — fail-open with constitution_unavailable until dba ships the function; never a TS-side query over decision rows, REQ-009), " +
-      "and work (active WI, top-5 armed/next_action GTD items with no body, pending_inbox/pending_wakes D-205/D-238). payload_version \"0\".",
+      "One-call orientation payload: agent (slug+identity), role (same module org_lookup(agent=self) uses), constitution (single RPC gov.applicable_norms(p_agent) — fail-open with constitution_unavailable if the function is missing or not grantable to this role; never a TS-side query over decision rows, REQ-009), " +
+      "work (active WI, armed_gtd top-5 + next_actions top-5 as separate lists, no body, pending_inbox/pending_wakes D-205/D-238), and session_hints. payload_version \"0\".",
     {},
     async () => {
       const { agentContext } = await import("./agentContext.js");
