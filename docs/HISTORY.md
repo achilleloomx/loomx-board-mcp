@@ -4,6 +4,30 @@
 
 ---
 
+## Sessione #179 — 2026-09-16 (wake cold-start, msg dba `9c2add8d`, WI `3f38b6fe` ripreso)
+
+**Task — «Ritiro progetto · fase 3», seguito:** dba ha applicato fase 2 in produzione (4 migrazioni, msg `9c2add8d`) e ha corretto 3 punti sulla mia lettura del trigger. Ripreso il WI in pausa della sessione #178, applicati i 3 punti + verificato dal vivo (non solo per lettura di codice) prima di richiudere.
+
+**Correzioni applicate (v0.32.7):**
+1. **Set terminale non cablato nel trigger** (correzione dba, non un bug mio ma un'assunzione sbagliata scritta nei commenti): `gov.doc_items_require_successor_on_terminal`/`gov.dangling_refs_count` leggono il parametro `docm_m5_terminal_statuses` via `gov.doc_m5_terminal_statuses()` — il letterale `superseded/deprecated/archived` è solo il fallback DELLA FUNZIONE, non del trigger. Aggiunta `fetchTerminalStatuses()` (docs.ts) che legge la stessa funzione invece di ricopiare la lista — richiede un nuovo metodo dedicato `docM5TerminalStatuses()` su `DocRwDb` (docDb.ts), perché quel client non ha un `.rpc()` generico (ogni funzione DB è un metodo a sé, per disciplina esplicita del file). Fallback locale allineato al valore reale del parametro: `'retired'` incluso, **`'rejected'` escluso** (dba: "ritira una proposta mai adottata" è un errore di categoria) — corregge la divergenza che dba aveva misurato (il mio `TERMINAL_STATUSES` includeva `'rejected'`).
+2. **Tombstone di progetto**: `project_retire` ora scrive `status='archived'` nella STESSA update di `retired_at`/`retired_reason`, come richiesto dal CHECK `loomx_projects_retired_implies_archived` che dba ha applicato (prima l'update scriveva solo le due colonne nuove, sarebbe stato rifiutato).
+3. **Chi scrive il tombstone**: confermato via `verifyIdentity()` che il ruolo nativo di questa istanza è `board-mcp` — richiesto a dba il GRANT UPDATE per-colonna su `loomx_projects(retired_at, retired_reason, status)` per quel ruolo (msg `e0c119a0`).
+
+**Verificato dal vivo** (`tests/verify-project-retire.ts`, transazione annullata, progetto board-mcp reale, fixture scratch): 13/14 verifiche verdi.
+- `gov.doc_m5_terminal_statuses()` reale include `'retired'`, esclude `'rejected'` — confermato leggendo il parametro vero, non assumendolo.
+- Riga con link `verifies` in ingresso reale e nessun erede: raw UPDATE senza `no_successor_reason` **rifiutato dal trigger live**; `doc_item_retire` con `no_successor_reason` dichiarato **riuscito**, link in ingresso riportato correttamente (1), `attrs.no_successor_reason` scritto, ri-ritiro di una riga già `retired` **rifiutato**.
+- **1 verifica fallita, un fatto reale non un errore del test**: `doc_rw` NON ha EXECUTE su `gov.doc_m5_terminal_statuses()` (`permission denied`) — scoperto misurando dal vivo, non nel disegno né nella msg di dba. **Bug reale trovato SOLO da questa misura**: il primo tentativo lasciava l'errore di permesso non gestito da SAVEPOINT, e la transazione **abortita** faceva fallire la query successiva di `doc_item_retire` con "current transaction is aborted" — lo stesso meccanismo già documentato per l'hook `fact_subscription` di `doc_link` (`deriveFactOnLink`, D-225/4bis). Fix: `fetchTerminalStatuses()` avvolge la chiamata in SAVEPOINT/ROLLBACK TO SAVEPOINT, stesso pattern. Richiesto l'EXECUTE a dba (non bloccante: il fallback regge e oggi coincide col valore reale).
+
+**Deploy ancora NON eseguito** (D-052, CP-009): resta un GRANT bloccante (tombstone su `loomx_projects`) e uno non bloccante (EXECUTE su `gov.doc_m5_terminal_statuses`) — preferito un solo giro di deploy amministrato con tutto pronto piuttosto che due parziali. Richiesta unica a dba (msg `e0c119a0`).
+
+**Verifiche.** `tsc` pulito, `npm run build` pulita, `npm test` **414/414** (+3 rispetto alla sessione #178: 2 su `fetchTerminalStatuses` gov-vs-fallback, 1 su `project_retire` con riga `'rejected'`). Commit separato dal lavoro precedente.
+
+**Decisioni prese:** nessuna decisione formale — correzioni tecniche su segnalazione dba, verifica dal vivo di un disegno già approvato.
+**Blocchi / note:** in `waiting_on=dba` per i 2 GRANT. `tests/verify-project-retire.ts` e `tests/verify-native-identity.ts` committati come misure permanenti (stesso pattern degli altri `verify-*.ts`).
+**Prossima sessione:** al wake di dba con i GRANT confermati — ri-verificare il tombstone dal vivo (unico pezzo non ancora provato in produzione, deliberatamente non tentato oggi contro il progetto board-mcp reale), poi coordinare il deploy amministrato con it-manager (CP-009), poi confermare a loomy, poi fase 4 (GTD `22640631`).
+
+---
+
 ## Sessione #178 — 2026-09-16 (autopilot dispatch, GTD `1061ce6e`, WI `3f38b6fe`, modello standard/sonnet)
 
 **Task — «Ritiro progetto · fase 3»: strumento di ritiro progetto + deploy amministrato** (mandato Achille 15/09, catena a 5 fasi — fase 1 già consegnata sessione #177, dba fase 2 non ancora confermata live). Prima di iniziare: committato separatamente il lavoro pendente non collegato della sessione #175 (guard `create_only`, v0.32.5, GTD `ad1df7ac`) rimasto sul working tree per 3 sessioni — 6 file, 400/400 test verdi, mai il mio task ma corretto metterlo a terra prima di aprire un nuovo diff sopra.

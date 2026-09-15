@@ -1760,14 +1760,19 @@ export async function docSupersede(
 // but instead of a heir edge this sets attrs.no_successor_reason on the SAME
 // update — the trigger's own documented escape hatch for exactly this case.
 //
-// DBA dependency, NOT yet confirmed live (2026-09-16): doc_items_status_check
-// must admit 'retired' AND the trigger's terminal-status set must be extended
-// to include it — see the DB_DOC_ITEM_STATUSES comment in docTypes.ts for why
-// both are required, not just the CHECK. Until both land, the UPDATE below
-// fails with a CHECK violation; this function's own read-only precheck
-// (incoming links/xproject_links/subscriptions, computed BEFORE the write,
-// independent of whether the trigger already knows about 'retired') is what
-// makes REQ-DOCM-025 hold even if the trigger extension lags the CHECK.
+// DBA fase 2 LIVE (2026-09-16, dba msg 9c2add8d): doc_items_status_check
+// admits 'retired' (migration 20260916120000). CORRECTION on the trigger
+// mechanism (dba's own, same message — the earlier comment here was wrong):
+// the terminal-status set is NOT hardcoded in the trigger. Both
+// gov.doc_items_require_successor_on_terminal and gov.dangling_refs_count
+// call gov.doc_m5_terminal_statuses(), which reads the governance parameter
+// docm_m5_terminal_statuses (stream A3-subscriptions) — the literal
+// superseded/deprecated/archived is only ITS fallback when the parameter is
+// unset. dba updated the parameter to include 'retired' via gov.param_set
+// (migration 20260916120200); 'rejected' is deliberately EXCLUDED ("ritira
+// una proposta mai adottata" — retiring something never adopted is a
+// category error). fetchTerminalStatuses() below reads the same function
+// instead of re-copying the list, so this file can never diverge from it.
 //
 // This tool does not BLOCK on what it finds (that would make it useless — its
 // whole purpose is the deliberate override doc_item_upsert refuses). It
@@ -1777,6 +1782,93 @@ export async function docSupersede(
 // ---------------------------------------------------------------------------
 
 const GOV_DOC_SUBSCRIPTIONS = "gov.doc_subscriptions";
+
+// Fallback mirrors gov.doc_m5_terminal_statuses()'s OWN fallback (dba msg
+// 9c2add8d) when the governance parameter is unset — 'retired' added here to
+// match its now-live value, 'rejected' deliberately excluded (a rejected
+// proposal was never adopted; retiring it is a category error, DB-decided).
+// Never the primary source: fetchTerminalStatuses() always tries the DB
+// function first so this file cannot silently drift from gov's own list.
+const FALLBACK_TERMINAL_STATUSES = ["superseded", "deprecated", "archived", "retired"] as const;
+
+function flattenRpcRows(data: unknown): string[] {
+  if (data == null) return [];
+  if (typeof data === "string") return [data];
+  if (!Array.isArray(data)) return [];
+  return data.flatMap((v) => {
+    if (typeof v === "string") return [v];
+    if (v && typeof v === "object") {
+      return Object.values(v as Record<string, unknown>).filter((x): x is string => typeof x === "string");
+    }
+    return [];
+  });
+}
+
+export interface TerminalStatusesResult {
+  statuses: Set<string>;
+  source: "gov" | "fallback";
+  warning?: string;
+}
+
+// Single source of truth for "is this doc_item terminal" — reads
+// gov.doc_m5_terminal_statuses() (SECURITY DEFINER-equivalent config read,
+// same RPC-schema-qualified pattern as gov.applicable_norms) instead of
+// re-declaring the list, so doc_item_retire/project_retire can never diverge
+// from what the DB trigger actually enforces (the divergence dba measured:
+// this file used to hardcode 'rejected' as terminal, the DB parameter
+// deliberately excludes it). Fail-open to FALLBACK_TERMINAL_STATUSES with an
+// explicit warning — never a hard block on a config read, but never silent
+// about having fallen back either.
+//
+// SAVEPOINT around the call (measured live 2026-09-16, verify-project-retire.ts:
+// doc_rw does NOT have EXECUTE on gov.doc_m5_terminal_statuses() yet —
+// permission-denied — and under doc_rw the whole tool call is ONE
+// transaction, so an uncaught error here would abort doc_item_retire's own
+// UPDATE right after it, exactly the failure mode deriveFactOnLink's own
+// SAVEPOINT comment already documents for doc_link's fact-subscription hook).
+// Falling back in JS is not enough by itself; the transaction has to be
+// un-poisoned too.
+export async function fetchTerminalStatuses(db: SupabaseClient): Promise<TerminalStatusesResult> {
+  // docItemRetire/projectRetire always run under doc_rw (runDocTool→runDocRw),
+  // whose DocRwDb has NO generic .rpc() — every DB function is its own named
+  // method (docDb.ts). docM5TerminalStatuses is that method for this call;
+  // checking for it (rather than a generic .rpc()) matches what this db
+  // object can actually do, and still degrades safely for any caller (tests
+  // included) that doesn't implement it.
+  const capable = db as unknown as {
+    docM5TerminalStatuses?: () => Promise<string[]>;
+    __docRw?: boolean;
+    savepoint?: (name: string) => Promise<void>;
+    rollbackToSavepoint?: (name: string) => Promise<void>;
+  };
+  if (typeof capable.docM5TerminalStatuses !== "function") {
+    return { statuses: new Set(FALLBACK_TERMINAL_STATUSES), source: "fallback", warning: "db has no docM5TerminalStatuses() — gov.doc_m5_terminal_statuses not queried." };
+  }
+  const sp = capable.__docRw && capable.savepoint && capable.rollbackToSavepoint
+    ? { savepoint: capable.savepoint, rollbackToSavepoint: capable.rollbackToSavepoint }
+    : null;
+  const SP = "fetch_terminal_statuses";
+  try {
+    if (sp) await sp.savepoint(SP);
+    const list = await capable.docM5TerminalStatuses();
+    const flat = flattenRpcRows(list);
+    if (flat.length === 0) {
+      if (sp) await sp.rollbackToSavepoint(SP);
+      return { statuses: new Set(FALLBACK_TERMINAL_STATUSES), source: "fallback", warning: "gov.doc_m5_terminal_statuses returned no recognizable status list." };
+    }
+    return { statuses: new Set(flat), source: "gov" };
+  } catch (e) {
+    if (sp) {
+      try {
+        await sp.rollbackToSavepoint(SP);
+      } catch {
+        /* transaction already unusable; the caller's own next query will surface it */
+      }
+    }
+    const msg = e instanceof Error ? e.message : String(e);
+    return { statuses: new Set(FALLBACK_TERMINAL_STATUSES), source: "fallback", warning: `gov.doc_m5_terminal_statuses threw: ${msg}` };
+  }
+}
 
 export interface DocItemRetireArgs {
   project_id: string;
@@ -1841,8 +1933,10 @@ export async function docItemRetire(
   if (current.project_id !== args.project_id) {
     return err(`item '${current.id}' belongs to project '${current.project_id}', not '${args.project_id}' (anti-divergence FK).`);
   }
-  const TERMINAL_STATUSES = new Set(["superseded", "deprecated", "archived", "rejected", "retired"]);
-  if (TERMINAL_STATUSES.has(current.status)) {
+  const terminalResult = await fetchTerminalStatuses(db);
+  const warnings: string[] = [];
+  if (terminalResult.warning) warnings.push(terminalResult.warning);
+  if (terminalResult.statuses.has(current.status)) {
     return err(`item '${current.id}' is already terminal (status='${current.status}'). Nothing to retire.`);
   }
 
@@ -1862,7 +1956,6 @@ export async function docItemRetire(
     id: string; subscriber_item_id: string; intent: string; origin: string;
   }>;
 
-  const warnings: string[] = [];
   const notify: DocItemRetireNotifyRow[] = [];
   if (subs.length > 0) {
     const { data: subscriberRows, error: subscriberErr } = await db

@@ -16,21 +16,26 @@
 // SDES-DOCM-034): blocks are computed on RAW incoming reference counts,
 // counting a referencer regardless of ITS OWN status. REQ-DOCM-029 proposes
 // excluding non-"in vigore" referencers (same filter already ratified for
-// traceability, REQ-DOCM-015), but that change lives in a DB trigger
-// (gov.doc_items_require_successor_on_terminal) this server does not own, and
-// SDES-DOCM-034 is explicit that it "cambia un comportamento già live" and
-// needs Achille's ratification first (D-136 §5) — NOT applied here. Until
-// then, project_retire will report a block on essentially any project with a
-// live internal REQ→SDES→UAT chain, even where every referencer is itself
-// about to be retired in the same sweep. Flagged to loomy at delivery, not
-// routed around silently.
+// traceability, REQ-DOCM-015), but that change lives in a DB trigger/function
+// (gov.doc_items_require_successor_on_terminal / gov.doc_m5_terminal_statuses)
+// this server does not own, and SDES-DOCM-034 is explicit that it "cambia un
+// comportamento già live" and needs Achille's ratification first (D-136 §5)
+// — NOT applied here. Until then, project_retire will report a block on
+// essentially any project with a live internal REQ→SDES→UAT chain, even
+// where every referencer is itself about to be retired in the same sweep.
+// Flagged to loomy at delivery, not routed around silently.
+//
+// Terminal-status set: read from gov.doc_m5_terminal_statuses() (docs.ts
+// fetchTerminalStatuses), never re-declared here — dba measured (msg
+// 9c2add8d) that an earlier draft of this file hardcoded 'rejected' as
+// terminal while the live governance parameter deliberately excludes it.
 //
 // project_id-scoped, not document-scoped: mirrors doc_structure's census
 // (every doc_items row across every document of the project).
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { DocResult, DocContext } from "./docs.js";
-import { docItemRetire } from "./docs.js";
+import { docItemRetire, fetchTerminalStatuses } from "./docs.js";
 
 const DOC_ITEMS = "doc_items";
 const DOC_ITEM_LINKS = "doc_item_links";
@@ -41,8 +46,6 @@ const GTD_TABLE = "loomx_items";
 const GTD_ITEM_PROJECTS_TABLE = "loomx_item_projects";
 const BOARD_MESSAGES_TABLE = "board_messages";
 const BOARD_AGENTS_TABLE = "board_agents";
-
-const TERMINAL_STATUSES = new Set(["superseded", "deprecated", "archived", "rejected", "retired"]);
 
 function err(msg: string): { ok: false; error: string } {
   return { ok: false, error: msg };
@@ -137,6 +140,10 @@ export async function projectRetire(
     );
   }
 
+  const terminalResult = await fetchTerminalStatuses(db);
+  const warnings: string[] = [];
+  if (terminalResult.warning) warnings.push(terminalResult.warning);
+
   // Census — every doc_items row in the project, mirroring doc_structure.
   const { data: itemRows, error: itemErr } = await db
     .from(DOC_ITEMS)
@@ -146,10 +153,9 @@ export async function projectRetire(
   const items = (Array.isArray(itemRows) ? itemRows : []) as Array<{
     id: string; document_id: string; item_type: string; code: string | null; status: string;
   }>;
-  const nonTerminal = items.filter((i) => !TERMINAL_STATUSES.has(i.status));
+  const nonTerminal = items.filter((i) => !terminalResult.statuses.has(i.status));
   const alreadyTerminal = items.length - nonTerminal.length;
 
-  const warnings: string[] = [];
   const blocks: ProjectRetireBlock[] = [];
   if (nonTerminal.length > 0) {
     const ids = nonTerminal.map((i) => i.id);
@@ -349,8 +355,15 @@ export async function projectRetire(
   }
 
   // Tombstone (SDES-DOCM-031) — ONLY after rows are clean AND no open
-  // needs_reassignment, tassative ordering per SDES-DOCM-031. DBA dependency,
-  // NOT yet confirmed live: loomx_projects.retired_at/retired_reason.
+  // needs_reassignment, tassative ordering per SDES-DOCM-031. Schema LIVE
+  // (dba msg 9c2add8d, migration 20260916120100): loomx_projects gained
+  // retired_at/retired_reason + a CHECK (loomx_projects_retired_implies_archived)
+  // requiring status='archived' in the SAME update as retired_at — written
+  // below, not left implicit. GRANT gap dba flagged in the same message:
+  // on loomx_projects, doc_rw and the native board-mcp role hold SELECT
+  // only; only loomy has per-column UPDATE, so this write needs a per-column
+  // GRANT to whatever role `ctx.serviceDb` resolves to before it can succeed
+  // in production — a permission-denied here is that gap, not a code bug.
   let tombstoneWritten = false;
   let tombstoneNote: string | undefined;
   if (retireErrors.length > 0) {
@@ -360,10 +373,10 @@ export async function projectRetire(
   } else {
     const { error: tombErr } = await serviceDb
       .from(PROJECTS_TABLE)
-      .update({ retired_at: nowIso(), retired_reason: reason })
+      .update({ retired_at: nowIso(), retired_reason: reason, status: "archived" })
       .eq("id", args.project_id);
     if (tombErr) {
-      tombstoneNote = `Tombstone write failed (likely loomx_projects.retired_at/retired_reason not yet added by dba, SDES-DOCM-031): ${tombErr.message}`;
+      tombstoneNote = `Tombstone write failed — likely the per-column GRANT on loomx_projects(retired_at, retired_reason, status) dba flagged as not yet granted to this role (msg 9c2add8d point 1): ${tombErr.message}`;
     } else {
       tombstoneWritten = true;
     }

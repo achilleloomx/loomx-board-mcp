@@ -175,6 +175,24 @@ test("project_retire dry_run=false: tombstone IS written when no GTD needs reass
   const proj = store.loomx_projects.find((r) => r.id === PROJ_A)!;
   assert.equal(proj.retired_reason, "done, superseded");
   assert.ok(proj.retired_at);
+  assert.equal(proj.status, "archived", "loomx_projects_retired_implies_archived CHECK requires status in the SAME update");
+});
+
+test("project_retire: 'rejected' rows are NOT terminal (dba correction, msg 9c2add8d) — included in the census, not silently skipped", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  seedOwnedProject(store, "board-mcp");
+  const db = makeDb(store);
+  const d = uuid();
+  seedDoc(store, d);
+  const rejected = seedItem(store, d, { code: "REQ-001", status: "rejected" });
+
+  const res = await projectRetire(db, { project_id: PROJ_A, reason: "cleanup", dry_run: false }, ctxFor(db, "board-mcp"));
+  assert.ok(res.ok, JSON.stringify(res));
+  if (!res.ok) return;
+  assert.equal(res.data.rows_already_terminal, 0, "'rejected' must not be pre-counted as terminal by this tool's own fallback");
+  assert.equal(res.data.retired.length, 1);
+  assert.equal(store.doc_items.find((r) => r.id === rejected)!.status, "retired");
 });
 
 test("project_retire: rows already terminal are excluded from the census and never re-touched", async () => {

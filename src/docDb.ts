@@ -118,6 +118,16 @@ export interface DocRwDb {
   // it, no code change needed. Handlers catch the 42501 and report a declared
   // gap (touched:'unknown'), never a guess.
   substantiveDiff: (before: Record<string, unknown> | null, after: Record<string, unknown>) => Promise<string[]>;
+  // Ritiro progetto fase 3 (GTD 1061ce6e, dba msg 9c2add8d): the governance
+  // parameter behind gov.doc_items_require_successor_on_terminal's terminal-
+  // status set — docs.ts's fetchTerminalStatuses() calls this instead of
+  // re-declaring the list (measured divergence: an earlier draft hardcoded
+  // 'rejected' as terminal, the live parameter deliberately excludes it).
+  // GRANTed to doc_rw per dba (same message covers the schema apply). NOT a
+  // generic .rpc() — this DocRwDb has no such method (every DB function is
+  // its own named entry, see the rest of this interface); adding a one-off
+  // generic escape hatch here would undo that discipline for one call site.
+  docM5TerminalStatuses: () => Promise<string[]>;
   // Bug d6a57035 (atlas, DEL-006 dogfood): a handler runs in ONE open transaction
   // (BEGIN…COMMIT, see runWithPool below). An INSERT that hits a unique constraint
   // aborts that transaction — any subsequent query (e.g. the idempotent-retry
@@ -343,6 +353,18 @@ function makeDb(exec: PgExecutor, opts: { persistentTx?: boolean } = {}): DocRwD
       const r = rows[0] as Row | undefined;
       const changed = r && r.changed;
       return Array.isArray(changed) ? (changed as string[]) : [];
+    },
+    docM5TerminalStatuses: async () => {
+      const { rows } = await exec("SELECT gov.doc_m5_terminal_statuses() AS statuses", []);
+      const r = rows[0] as Row | undefined;
+      const val = r && r.statuses;
+      if (Array.isArray(val)) return val.filter((v): v is string => typeof v === "string");
+      // SETOF-shaped fallback, in case the function returns one row per value
+      // rather than a single array column — same defensive normalization
+      // docs.ts's fetchTerminalStatuses() would otherwise have to redo.
+      return rows
+        .map((row) => (row as Row).statuses)
+        .filter((v): v is string => typeof v === "string");
     },
     docPublish: async (documentId, newVersion, bumpClass, changelogEntryId, deltaSummary) => {
       const { rows } = await exec(

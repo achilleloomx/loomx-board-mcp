@@ -1934,3 +1934,57 @@ test("doc_item_retire: does NOT block on active subscribers — surfaces them in
   assert.equal(res.data.notify[0].intent, "critical");
   assert.equal(store.doc_items.find((r) => r.id === targetId)!.status, "retired");
 });
+
+// ---------------------------------------------------------------------------
+// doc_item_retire — terminal-status source (dba correction, msg 9c2add8d):
+// gov.doc_m5_terminal_statuses() is the source of truth, NOT a hardcoded set.
+// Fallback excludes 'rejected' on purpose (a rejected proposal was never
+// adopted — retiring it is a category error, DB-decided).
+// ---------------------------------------------------------------------------
+
+test("doc_item_retire: fallback terminal set (no rpc()) treats 'rejected' as NOT terminal — retiring it succeeds", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store); // fake db has no .rpc() → fetchTerminalStatuses falls back
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "sow", title: "SoW" }, ctx);
+  const docId = (doc as any).data.document_id;
+  const up = await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "objective", code: "OBJ-001", body: "x" }, ctx);
+  const itemId = (up as any).data.item_id;
+  store.doc_items.find((r) => r.id === itemId)!.status = "rejected";
+
+  const res = await docItemRetire(db, { project_id: PROJ_A, item_id: itemId, reason: "x" }, ctx);
+  assert.ok(res.ok, `'rejected' must not be treated as terminal by the fallback list: ${JSON.stringify(res)}`);
+  if (!res.ok) return;
+  assert.match(res.data.warnings[0] ?? "", /gov\.doc_m5_terminal_statuses/);
+});
+
+test("doc_item_retire: when gov.doc_m5_terminal_statuses() IS reachable, its list wins over the fallback", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const base = makeDb(store) as any;
+  const withRpc = {
+    from: (t: string) => base.from(t),
+    __docRw: true,
+    resolveDocItem: base.resolveDocItem,
+    docM5TerminalStatuses: async () => ["archived"],
+  } as unknown as SupabaseClient;
+  const doc = await docCreate(withRpc, { project_id: PROJ_A, document_type: "sow", title: "SoW" }, ctx);
+  const docId = (doc as any).data.document_id;
+  const up = await docItemUpsert(withRpc, { project_id: PROJ_A, document_id: docId, item_type: "objective", code: "OBJ-001", body: "x" }, ctx);
+  const itemId = (up as any).data.item_id;
+  store.doc_items.find((r) => r.id === itemId)!.status = "draft";
+
+  // 'draft' is not in the gov-provided list (["archived"]) → retire proceeds.
+  const res = await docItemRetire(withRpc, { project_id: PROJ_A, item_id: itemId, reason: "x" }, ctx);
+  assert.ok(res.ok, JSON.stringify(res));
+
+  // A SECOND item already 'superseded' — NOT in the gov-provided list either
+  // (only 'archived' is) — so per the gov source it is NOT terminal, unlike
+  // the hardcoded fallback which would have refused it. Proves the gov list
+  // actually overrides the fallback rather than merely supplementing it.
+  const up2 = await docItemUpsert(withRpc, { project_id: PROJ_A, document_id: docId, item_type: "objective", code: "OBJ-002", body: "x" }, ctx);
+  const itemId2 = (up2 as any).data.item_id;
+  store.doc_items.find((r) => r.id === itemId2)!.status = "superseded";
+  const res2 = await docItemRetire(withRpc, { project_id: PROJ_A, item_id: itemId2, reason: "x" }, ctx);
+  assert.ok(res2.ok, `gov list (['archived']) should govern, not the fallback: ${JSON.stringify(res2)}`);
+});

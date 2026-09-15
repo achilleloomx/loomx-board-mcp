@@ -42,17 +42,17 @@ export const DB_ITEM_TYPES = [
   "config_pattern",      // D-070 onda-3
 ] as const;
 
-// "retired" (SDES-DOCM-026, Ritiro progetto fase 3): DBA dependency, NOT yet
-// confirmed live — see doc_item_retire in projectRetire.ts. Added here ahead
-// of the migration (same discipline as any other DB_* mirror edit) so the
-// code and tests exist and only the actual DB write is gated on dba. Two
-// DBA-side changes are required together, not one: (1) doc_items_status_check
-// CHECK must admit 'retired', AND (2) gov.doc_items_require_successor_on_terminal
-// (migration 20260822091000) must add 'retired' to its OWN terminal-status set
-// — SDES-DOCM-026 only asked for (1). Without (2) the trigger never fires for
-// a status='retired' transition and doc_item_retire's own read-only precheck
-// becomes the ONLY guard (see projectRetire.ts header note) — which is why
-// that precheck exists independent of the trigger, not merely as a UX nicety.
+// "retired" (SDES-DOCM-026, Ritiro progetto fase 3): LIVE (dba msg 9c2add8d,
+// 2026-09-16, migration 20260916120000 — doc_items_status_check admits it).
+// The terminal-status guard is NOT hardcoded in the trigger (an earlier
+// version of this comment claimed otherwise dba corrected it): both
+// gov.doc_items_require_successor_on_terminal and gov.dangling_refs_count
+// call gov.doc_m5_terminal_statuses(), which reads governance parameter
+// docm_m5_terminal_statuses — dba updated it to include 'retired' via
+// gov.param_set (migration 20260916120200; the hardcoded superseded/
+// deprecated/archived list is only that function's OWN fallback when the
+// parameter is unset). docs.ts's fetchTerminalStatuses() reads the same
+// function rather than re-declaring the list — see its own comment for why.
 export const DB_DOC_ITEM_STATUSES = [
   "draft", "proposed", "in_review", "approved", "committed",
   "active", "superseded", "deprecated", "rejected", "archived", "done", "retired",

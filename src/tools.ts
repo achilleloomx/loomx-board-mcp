@@ -3832,10 +3832,9 @@ export function registerTools(
       `(same discipline as doc_unsubscribe). Does NOT block on incoming links/subscriptions — that would defeat its ` +
       `purpose as the deliberate override; instead the response returns \`notify\`: every active subscription ` +
       `touched, for the caller to tell its owner (REQ-DOCM-027) — project_retire does this automatically, a direct ` +
-      `call does not send anything by itself. DBA dependency NOT yet confirmed live (2026-09-16): doc_items status ` +
-      `CHECK must admit 'retired' AND the trigger's own terminal-status set must be extended to include it — until ` +
-      `both land this call fails with a CHECK violation, or (if only the CHECK lands) this tool's own precheck is ` +
-      `the only real guard. Exactly one of item_id or code is required. ` +
+      `call does not send anything by itself. Schema LIVE (dba msg 9c2add8d, 2026-09-16): doc_items status CHECK ` +
+      `admits 'retired' and the governance parameter behind the guard (gov.doc_m5_terminal_statuses) includes it. ` +
+      `Exactly one of item_id or code is required. ` +
       `Example: doc_item_retire({project_id:"<uuid>", code:"REQ-001", reason:"superseded by a different approach, no direct heir"}).`,
     {
       project_id: z.string().uuid().describe("Must equal the item's project (anti-divergence FK)"),
@@ -3864,8 +3863,10 @@ export function registerTools(
       `subscriber's owner (SDES-DOCM-032), closes unambiguously-parked GTD items scoped to the project via ` +
       `loomx_item_projects (someday/waiting only — anything else lands in gtd_needs_reassignment, reassignment ` +
       `itself stays loomy-only per the 15/09 ratification on gtd_update(owner=...)), and ONLY THEN writes the ` +
-      `project tombstone (loomx_projects.retired_at/retired_reason, DBA dependency NOT yet confirmed live) — never ` +
-      `if any row failed or any GTD still needs reassignment. Not atomic across the whole project (each row is its ` +
+      `project tombstone (loomx_projects.retired_at/retired_reason + status='archived' in the same UPDATE, per its ` +
+      `CHECK constraint — schema LIVE, dba msg 9c2add8d, but the per-column GRANT for this role's write may still ` +
+      `be pending, see dba's point 1 in that message) — never if any row failed or any GTD still needs ` +
+      `reassignment. Not atomic across the whole project (each row is its ` +
       `own doc_rw transaction) — a partial failure reports exactly what landed, never a bare count. KNOWN GAPS, ` +
       `declared not hidden: blocks count RAW incoming references regardless of the referencer's own status ` +
       `(REQ-DOCM-029/SDES-DOCM-034 proposes the "in vigore" filter already used for traceability but is NOT applied ` +
