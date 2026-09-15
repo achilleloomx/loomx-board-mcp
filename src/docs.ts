@@ -501,6 +501,16 @@ export interface DocItemUpsertArgs {
   title?: string;
   /** One-two sentence index summary (DEC-01j / SDES-DOCM-022). Optional, patch semantics like every other field. */
   summary?: string;
+  /**
+   * Opt-in guard (it-manager msg 7c719c4a, GTD ad1df7ac): fail instead of
+   * updating when `code` already exists in the project. Idempotency is
+   * (project_id, code) by design — a caller who intends to CREATE a new item
+   * but passes a code that is already taken silently overwrites it instead
+   * (the "2nd overwrite of a REQ" defect: REQ-120, HISTORY #92). Default
+   * false (existing update-on-match behavior unchanged); only meaningful
+   * together with `code`.
+   */
+  create_only?: boolean;
 }
 
 export interface DocItemUpsertResult {
@@ -614,6 +624,20 @@ export async function docItemUpsert(
       .maybeSingle();
     if (error) return err(`Lookup by code failed: ${error.message}`);
     existing = (data as ExistingDocItem | null) ?? null;
+  }
+
+  if (args.create_only) {
+    if (!args.code) {
+      return err(`create_only is only meaningful with a code — it guards against overwriting an existing CODED row. Omit it for code-less rows (their idempotency key is client_token/sort_order, not code).`);
+    }
+    if (existing) {
+      return err(
+        `create_only=true but code '${args.code}' already exists in project ${args.project_id} ` +
+        `(item ${existing.id}, document ${existing.document_id}, status ${existing.status}). Refusing to overwrite. ` +
+        `This guard exists to catch an accidental second write onto an existing item when you intended to CREATE a new one — ` +
+        `call doc_item_resolve first if you are unsure whether the code is taken, or drop create_only if you meant to update it.`
+      );
+    }
   }
 
   let effectiveDocumentId: string;

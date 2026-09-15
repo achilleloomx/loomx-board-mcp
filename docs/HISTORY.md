@@ -4,6 +4,58 @@
 
 ---
 
+## Sessione #177 — 2026-09-15 (wake cold-start, msg forge `ab055a53`, WI `41c46f6a` + `6278df7d`)
+
+**Task — «Ritiro progetto · fase 1»: disegno del meccanismo di ritiro a grana progetto** (mandato Achille 15/09, catena a 5 fasi — forge fase 0 esplorativa già eseguita su `EVAL-PG-007`, mie le fasi 1/3/4). Nessuna build, tutto `draft`/proposto come da mandato. Casa: progetto Doc-in-DB (`1e59391d`).
+
+**Letto EVAL-PG-007 (progetto Project Governance, item `fe666dc0`) e la coppia SDES-DOCM-025/026 già draft** (macchina della pubblicazione + ritiro senza erede a grana riga, non ancora costruiti): il guard "nessun sottoscrittore senza erede" regge a grana riga (anche cross-project) ma è **assente a grana documento** (`doc_promote` passa senza controllo), **conta i referenzianti a prescindere dal loro stato** (un referenziante già `deprecated` blocca ancora), e **non notifica mai nessuno** — né su successo né quando blocca correttamente. Nessun tombstone a grana progetto, nessun repoint dei sottoscrittori alla dichiarazione di un erede.
+
+**Scritto:** 1 nuova consegna SoW (`DEL-006`, origine), 6 requisiti (`REQ-DOCM-025..030`), 6 voci di disegno (`SDES-DOCM-030..035`), 6 collaudi (`UAT-DOCM-030..035`, ciascuno con almeno un caso negativo esplicito). Decisioni di design principali: `project_retire` come iteratore a due fasi (`dry_run`/`dry_run=false`) sopra il guard esistente, mai un bypass via `doc_promote`; tombstone di progetto su 2 colonne nuove `loomx_projects.retired_at/retired_reason` (dba, zero nuove tabelle); notifica riusando `board_send` sull'owner già presente su ogni `doc_item` (zero nuovo canale); repoint offerto in risposta (`repoint_candidates`), mai automatico; filtro "solo referenzianti in vigore" esteso dal guard di tracciabilità (REQ-DOCM-015) al guard di ritiro — **proposta esplicita di ratifica**, perché cambia un comportamento di un guard già live (D-136 §5); chiusura/segnalazione dei GTD scoped al progetto via `loomx_item_projects`, eseguibile solo dal responsabile del progetto o da loomy (DEC-002).
+
+**Tracciabilità a zero scoperte** sul progetto dopo le righe nuove: `req_without_sdes` 0/30, `sdes_without_uat` 0/35, `req_without_origin` 0/30. WI collegato a tutte le 12 righe REQ+SDES nuove (gate D-074).
+
+**Secondo filone della stessa sveglia, non collegato al ritiro progetto:** risposta tecnica al dba sul disegno fase 2 di Items Subscription (msg `1fded82d`, progetto `52f9b563`, D-206) — 5 nodi misurati dal dba prima del DDL, punti 1-4 di mia competenza (punto 5 è di loomy). Confermati tutti e 4: due fact a versi opposti per `refines` req→del (con nota su idempotenza da testare); funzione SQL unica condivisa fra trigger e hook 4bis (allineerò `deriveFactOnLink` quando esiste); emendamento della guardia SEC-011 coerente col DETAIL già scritto; pin su `documents.version` del target, mai NULL — già la scelta documentata in SDES-SUB-014/CLAUDE.md, nessuna sorpresa.
+
+**Decisioni prese:** nessuna decisione formale — disegno in stato proposto/bozza; una proposta esplicita di ratifica a loomy (REQ-DOCM-029, cambio di comportamento di un guard live).
+**Blocchi / note:** `project_retire` dipende dalla costruzione di SDES-DOCM-026 (status `retired`, ancora draft) — non mia da forzare qui. `wi_query` con scoping per `project_id` non verificato: gap dichiarato in SDES-DOCM-035, da chiarire in fase 3.
+**Prossima sessione:** fase 3 (GTD `1061ce6e`, `waiting_on=dba`) parte al wake di dba a fine fase 2 (schema: `loomx_projects.retired_at/retired_reason` + CHECK `doc_items.status` con `'retired'`). Done a loomy `178a8906`; wake a dba `cda72783` (fase 2 ritiro) e risposta dba `be63acd6` (fase 2 sottoscrizioni) inviati.
+
+---
+
+## Sessione #176 — 2026-09-15 (autopilot dispatch, GTD `b29fc8cd`, WI `02223b79`, modello planning/fable)
+
+**Task — «Sottoscrizioni in due versi · fase 1»: verifica del verso requisito→origine in esercizio + disegno del verso consegna→requisiti** (mandato Achille 15/09, emendamento a D-206; msg loomy `75c320dc`). Nessuna build, stato proposto/bozza come da mandato. Catena: (1) board-mcp → (2) dba → (3) it-manager → (4) board-mcp → (5) forge + auditor.
+
+**Verso 1 misurato dal vivo, non dal disegno** (script scratch sotto `doc_rw` con identità `board-mcp`, `SET LOCAL ROLE doc_rw` + `request.agent_slug`; perimetro RLS: 19 progetti con requisiti su 75 — dichiarato parziale, la misura di flotta è di dba con identità di servizio, SQL consegnata in SDES-SUB-013): 437 REQ in vigore, **426 collegati** a un'origine ammessa (97%), **218 sottoscritti** all'origine a grana riga (50%: 33 `fact`, 186 `choice`, 0 a grana documento), **208 collegati-e-non-sottoscritti** (48%). Per progetto: 8 al 100% tutti a mano; decision-enforcement 33/168; board-mcp 0/41. **Causa strutturale**: i legami requisito→origine sono `refines` (235), `relates_to` (231, 143 cross verso decisioni), `references` (74); solo 32 `satisfies` — e `doc_fact_sync`/hook 4bis derivano solo da `verifies`/`satisfies`. **Il rilevatore M2 marca davvero** i requisiti sottoscritti: 25 marcature aperte da riscritture reali delle origini (project-governance 17), **0 chiuse** (registro intero: 112 aperte, 9 chiuse). **La ripubblicazione dell'origine è marginale**: 88% delle origini sottoscritte mai pubblicate; dove pubblicate il ciclo pubblicazione→esito ha girato (SoW Items Subscription 12/12, Org Registry 6/6 ×3), decisioni cross 12 sottoscrizioni/0 esiti. Baseline verso 2: 139 consegne, 49 con legami a requisiti (171: refines 131, relates_to 23, satisfies 20), **1 sola** sottoscrizione consegna→requisito (DEL-008→REQ-036, fact da satisfies).
+
+**Verso 2 disegnato nel progetto Items Subscription** (`52f9b563`): `REQ-SUB-015..019` (proposed, doc `3c60496e`), `SDES-SUB-013..016` (draft, doc `65f618f4`), `UAT-SUB-013..018` (draft, doc `ef0f92b1`, 2 negativi puri). Scelte: sottoscrizione consegna→requisito **derivata** (`fact`, `module`) dai legami `refines`/`satisfies` req→consegna, **a pavimento DB** (trigger su `doc_item_links` + funzione di recupero idempotente, dba) perché i legami nascono anche fuori dal server; `relates_to` escluso e **riportato**; nessuna marcatura alla nascita; `republish_due` derivato (marcatura aperta ∧ documento del subscriber pubblicato), booleano con base; seconda sorgente dello sweep con chiave `docstale:{doc}:{owner}:{bucket}` e aggregazione da registro (it-manager); `doc_publish` chiude `updated` solo le marcature delle righe nel delta ed elenca le altre (board-mcp, fase 4); stesso trigger/mappa anche per il verso 1 (`refines` req→origine → `module`). Punto aperto **non deciso qui** (D-136 §5): derivazione cross-progetto verso decisioni (226 legami) → proposta di cross-decision a loomy. Ordine con la catena «ritiro progetto»: nessuna tabella condivisa, ma **prima questa, poi il ritiro** (il ritiro è l'atto massivo che M2 rileva riga per riga).
+
+**Tracciabilità a zero scoperte** sul progetto dopo le righe nuove: `req_without_sdes` 0/18, `sdes_without_uat` 0/17, `req_without_origin` 0/18. Legami: REQ→D-206 `references` ×5, REQ→DEL-001/003/008/010/OBJ-004 `refines` ×6, SDES `satisfies` REQ ×5 e UAT `verifies` SDES ×6 (11 `fact` derivate dall'hook 4bis, progetto già opt-in), 9 righe + D-206 legate al WI. Verso 1 applicato alle righe nuove **a mano** (11 `choice/module`: 5 verso D-206 come decisione cross del cappello, 6 verso il capitolato) — esattamente il difetto che il disegno chiude.
+
+**Difetti d'uso incontrati, non del tool:** 11 titoli > 80 e 4 sommari > 280 caratteri rifiutati da `doc_item_upsert` con messaggio esplicito (constraint `doc_items_title_len`/`summary_len`) — nessuna troncatura silenziosa, righe riscritte. `create_only=true` usato su tutte le 15 righe (v0.32.5 già live sul server della window).
+
+**Decisioni prese:** nessuna decisione formale — disegno in stato proposto/bozza; due proposte a loomy (DEL-014 nel SoW; cross-decision sulle decisioni cross come origine derivata).
+**Blocchi / note:** working tree con la sessione #175 (v0.32.5) ancora non committata — non toccata, nessun commit qui (nessuna modifica al codice). Le misure sono nel perimetro RLS di board-mcp: il numero di flotta lo firma dba.
+**Prossima sessione:** fase 4 (GTD `89ace060`, in waiting) parte al wake di dba: `doc_publish` con saldo per delta, `republish_due` in `doc_staleness_query`/`doc_structure`, hook 4bis esteso alla composizione e a `refines` d'origine, `doc_fact_sync` allineato, CLAUDE.md, deploy amministrato. Done a loomy `19278842`; wake a dba `8d27bc76` e it-manager `b84f175d` inviati.
+
+---
+
+## Sessione #175 — 2026-09-15 (wake cold-start, msg loomy `45547e51`, WI `7a03eae2`)
+
+**Task — smaltimento coda loomy 15/09: 2 GTD riassegnati.** (1) `423baf3a`: registrare nell'Agent Issue Tracker il difetto "document-level watch non scatta mai" già misurato e riportato a loomy il 28/08 (thread `cef53087`/`108e517f`). (2) `ad1df7ac`: costruire la guardia su `doc_item_upsert` proposta da it-manager (msg `7c719c4a`, 22/07) contro la 2ª sovrascrittura silenziosa di un REQ (stesso pattern di REQ-120, HISTORY #92) — di competenza board-mcp; lo scope-migrazione DECISIONS.md del Tracker (stesso messaggio) è di loomx-tracker, non toccato qui.
+
+**Issue registrato** (skill `/report-issue` v2.0.0 — niente più `[ISS-NNN]`, niente riassegnazione owner): `765d5f81` (`tool/board-mcp`, owner=board-mcp, `waiting_on=it-manager`, linkato al progetto `agent-issue-tracker`). Verificato prima che non fosse già presente (`gtd_query(project_id=agent-issue-tracker)` sulle righe di owner board-mcp: nessun duplicato). GTD `423baf3a` chiuso.
+
+**Guard `create_only` costruita** (`src/docs.ts` `docItemUpsert`, v0.32.5). Opt-in, default `false` (comportamento invariato): se `true` e `code` esiste già nel progetto, **rifiuta** invece di aggiornare — messaggio esplicito con item/document/status esistenti, e suggerimento di usare `doc_item_resolve` in caso di dubbio. Guardia **solo-codice**: `create_only=true` senza `code` è un errore esplicito dichiarato (l'idempotenza delle righe code-less è `client_token`/`sort_order`, un concetto diverso da "il codice è già preso"). Non implementata la parte 1 della proposta it-manager (le skill `requirements-engineer`/`design` devono chiamare `doc_item_resolve` prima di un codice nuovo) — è di competenza di quelle skill, non del tool; segnalata come da fare a valle, non qui.
+
+**Verifiche.** `tsc` pulito, `npm run build` pulita, `npm test` **401/401** (+1 nuovo: create_only rifiuta un codice esistente senza toccare la riga, si comporta come prima senza il flag, e rifiuta esplicito se passato senza `code`). Nessuna regressione su `strict-tool-args`/`capability-parity` (il nuovo parametro è opzionale, zod-validato come gli altri).
+
+**Decisioni prese:** nessuna decisione formale — esecuzione di un mandato già delegato ("la guardia è tua", msg loomy `45547e51`), non una scelta di design nuova.
+**Blocchi / note:** nessuno. Restart di flotta non forzato (G4): le altre window vedranno `create_only` solo al prossimo riavvio.
+**Prossima sessione:** nessun follow-on aperto da questo task.
+
+---
+
 ## Sessione #174 — 2026-09-15 (wake cold-start, msg frame `30b4b1f7`, WI `1a43b4e1`)
 
 **Task — rework forma payload `agent_context()` (SDES-001, 4 scostamenti segnalati da frame dopo aver confrontato la consegna #173 col testo integrale del disegno, ora leggibile: dba ha concesso membership viewer su `c0f419d8`, msg `bcd08fd2`).** La consegna precedente era stata costruita dal riassunto di frame nel dispatch (SDES-001 non leggibile all'epoca, D-015/RLS) — il riassunto era impreciso su un punto (`work` a due liste, non una).

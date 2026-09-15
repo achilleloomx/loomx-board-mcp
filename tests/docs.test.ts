@@ -53,6 +53,51 @@ test("doc_create → doc_item_upsert returns a UUID, idempotent on (project_id, 
   assert.equal(store.doc_items.filter((r) => r.code === "REQ-001").length, 1, "no duplicate");
 });
 
+test("doc_item_upsert create_only: refuses to overwrite an existing code, unchanged behavior without it (GTD ad1df7ac)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req — App A" }, ctx);
+  const docId = (doc as any).data.document_id;
+
+  const first = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    code: "REQ-001", body: "must send a message", create_only: true,
+  }, ctx);
+  assert.ok(first.ok, `first create_only upsert ok: ${JSON.stringify(first)}`);
+  assert.equal((first as any).data.created, true);
+  const itemId = (first as any).data.item_id;
+
+  // Second call with create_only=true and the same code → refused, no write.
+  const second = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    code: "REQ-001", body: "silently overwritten?", create_only: true,
+  }, ctx);
+  assert.equal(second.ok, false, "create_only must refuse an existing code");
+  assert.match((second as any).error, /already exists/);
+  const row = store.doc_items.find((r) => r.id === itemId);
+  assert.equal(row?.body, "must send a message", "body untouched by the refused call");
+
+  // Without create_only, the same call still updates as before (unchanged default behavior).
+  const third = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    code: "REQ-001", body: "updated normally",
+  }, ctx);
+  assert.ok(third.ok);
+  assert.equal((third as any).data.created, false);
+  const row2 = store.doc_items.find((r) => r.id === itemId);
+  assert.equal(row2?.body, "updated normally");
+
+  // create_only without a code is rejected explicitly (guard is code-scoped).
+  const noCode = await docItemUpsert(db, {
+    project_id: PROJ_A, document_id: docId, item_type: "requirement",
+    body: "no code here", create_only: true,
+  }, ctx);
+  assert.equal(noCode.ok, false);
+  assert.match((noCode as any).error, /only meaningful with a code/);
+});
+
 test("doc_create: an insert that lands with different values than sent fails LOUD (D-132 read-back, GTD 8b97b1ca)", async () => {
   const store: Store = {};
   seedProjects(store);

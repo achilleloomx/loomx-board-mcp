@@ -3688,6 +3688,9 @@ export function registerTools(
       `attrs is validated against the item_type's JSON-Schema (call doc_item_types('<item_type>') for schema + example). ` +
       `title/summary (DEC-01j / SDES-DOCM-022) are first-level fields — uniform across item_types, NOT inside attrs — for a readable index without opening bodies; same PATCH semantics (omit = preserved). ` +
       `Insert-only defaults: status=type default (usually draft), sort_order=append. item_type ∈ {${ITEM_TYPES_LIST}}. ` +
+      `create_only (opt-in guard, it-manager GTD ad1df7ac): fails instead of updating when \`code\` already exists — catches an accidental ` +
+      `second write onto an existing REQ/SDES/etc when you meant to CREATE a new item. Default false (unchanged behavior); pass it whenever ` +
+      `you are about to write a code you have NOT just resolved/confirmed as new. ` +
       `Example: doc_item_upsert({project_id:"<uuid>", document_id:"<uuid>", item_type:"requirement", code:"REQ-001", body:"The system must…", title:"Short name", summary:"What this asserts.", attrs:{moscow:"must", acceptance_criteria:["x"]}}).`,
     {
       project_id: z.string().uuid().describe("Must equal the document's project (anti-divergence FK)"),
@@ -3703,6 +3706,7 @@ export function registerTools(
       client_token: z.string().optional().describe("Idempotency token for code-less items (stored in attrs._client_token)"),
       title: z.string().optional().describe("Short index title (DEC-01j / SDES-DOCM-022) — first-level, uniform across item_types (not inside attrs). Omit on update = keep the stored value."),
       summary: z.string().optional().describe("One-two sentence index summary (DEC-01j / SDES-DOCM-022) — first-level, same patch semantics as title. Omit on update = keep the stored value."),
+      create_only: z.boolean().optional().describe("Opt-in guard: fail (instead of updating) when `code` already exists in the project. Default false. Only meaningful together with `code`."),
     },
     async (args) => {
       const { docItemUpsert } = await import("./docs.js");
