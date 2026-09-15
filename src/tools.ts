@@ -3823,6 +3823,69 @@ export function registerTools(
     }
   );
 
+  // --- doc_item_retire (SDES-DOCM-026, Ritiro progetto fase 3) ---
+  server.tool(
+    "doc_item_retire",
+    `Mark a doc_item status='retired' — the case doc_supersede can't cover: this is the end, DELIBERATELY, no ` +
+      `successor. Writes attrs.no_successor_reason=reason on the SAME update the terminal-status guard trigger ` +
+      `(gov.doc_items_require_successor_on_terminal) reads as its own declared escape hatch. reason is required ` +
+      `(same discipline as doc_unsubscribe). Does NOT block on incoming links/subscriptions — that would defeat its ` +
+      `purpose as the deliberate override; instead the response returns \`notify\`: every active subscription ` +
+      `touched, for the caller to tell its owner (REQ-DOCM-027) — project_retire does this automatically, a direct ` +
+      `call does not send anything by itself. DBA dependency NOT yet confirmed live (2026-09-16): doc_items status ` +
+      `CHECK must admit 'retired' AND the trigger's own terminal-status set must be extended to include it — until ` +
+      `both land this call fails with a CHECK violation, or (if only the CHECK lands) this tool's own precheck is ` +
+      `the only real guard. Exactly one of item_id or code is required. ` +
+      `Example: doc_item_retire({project_id:"<uuid>", code:"REQ-001", reason:"superseded by a different approach, no direct heir"}).`,
+    {
+      project_id: z.string().uuid().describe("Must equal the item's project (anti-divergence FK)"),
+      item_id: z.string().uuid().optional().describe("Item UUID to retire (exactly one of item_id/code)"),
+      code: z.string().optional().describe("Item code to retire, resolved via doc_item_resolve (exactly one of item_id/code)"),
+      reason: z.string().min(1).describe("Required — why there is no successor (written to attrs.no_successor_reason)"),
+    },
+    async (args) => {
+      const { docItemRetire } = await import("./docs.js");
+      return runDocTool((db) => docItemRetire(db, args, docCtx));
+    }
+  );
+
+  // --- project_retire (SDES-DOCM-030/031/032/033/035, Ritiro progetto fase 3) ---
+  server.tool(
+    "project_retire",
+    `Retire an ENTIRE project: iterates doc_item_retire over every non-terminal doc_item (never doc_promote, which ` +
+      `EVAL-PG-007 measured bypassing the row-grain guard entirely — it only touches documents.status). Two-phase, ` +
+      `dry_run=true DEFAULT: previews every row with unresolved incoming links/xproject_links/active subscriptions ` +
+      `as a \`block\`, informational, nothing written. dry_run=false recomputes FRESH (never trusts a stale prior ` +
+      `dry_run) and REFUSES wholesale if any TRACEABILITY block (links/xproject_links) remains anywhere in the ` +
+      `project — REQ-DOCM-025's guard applied at project grain, never bypassed in bulk. Active subscriptions alone ` +
+      `do NOT gate execution — their remedy is notification (below), not a permanent hold; gating on their mere ` +
+      `existence would make "successful retirement notifies its subscribers" (SDES-DOCM-032) unreachable by ` +
+      `construction. On a clean execute: retires every row, sends board_send notifications to every touched ` +
+      `subscriber's owner (SDES-DOCM-032), closes unambiguously-parked GTD items scoped to the project via ` +
+      `loomx_item_projects (someday/waiting only — anything else lands in gtd_needs_reassignment, reassignment ` +
+      `itself stays loomy-only per the 15/09 ratification on gtd_update(owner=...)), and ONLY THEN writes the ` +
+      `project tombstone (loomx_projects.retired_at/retired_reason, DBA dependency NOT yet confirmed live) — never ` +
+      `if any row failed or any GTD still needs reassignment. Not atomic across the whole project (each row is its ` +
+      `own doc_rw transaction) — a partial failure reports exactly what landed, never a bare count. KNOWN GAPS, ` +
+      `declared not hidden: blocks count RAW incoming references regardless of the referencer's own status ` +
+      `(REQ-DOCM-029/SDES-DOCM-034 proposes the "in vigore" filter already used for traceability but is NOT applied ` +
+      `— it changes a live DB trigger and needs Achille's ratification, D-136 §5); Work Items scoped to the project ` +
+      `are not enumerated (wi_query has no project_id scoping today, SDES-DOCM-035 open question). Legitimacy: the ` +
+      `project's responsible agent (loomx_projects.agent_id) or loomy only — same rule as gtd_query(project_id) ` +
+      `cross-owner read (DEC-002). ` +
+      `Example (preview): project_retire({project_id:"<uuid>", reason:"superseded by <other project>"}). ` +
+      `Example (execute): project_retire({project_id:"<uuid>", reason:"...", dry_run:false}).`,
+    {
+      project_id: z.string().uuid().describe("Project to retire (loomx_projects)"),
+      reason: z.string().min(1).describe("Required — the project-grain tombstone reason"),
+      dry_run: z.boolean().optional().describe("Default true. false actually executes — only if a fresh recomputation finds zero blocks."),
+    },
+    async (args) => {
+      const { projectRetire } = await import("./projectRetire.js");
+      return runDocTool((db) => projectRetire(db, args, docCtx));
+    }
+  );
+
   // --- doc_query ---
   server.tool(
     "doc_query",

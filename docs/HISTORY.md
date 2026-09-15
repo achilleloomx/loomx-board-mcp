@@ -4,6 +4,32 @@
 
 ---
 
+## Sessione #178 — 2026-09-16 (autopilot dispatch, GTD `1061ce6e`, WI `3f38b6fe`, modello standard/sonnet)
+
+**Task — «Ritiro progetto · fase 3»: strumento di ritiro progetto + deploy amministrato** (mandato Achille 15/09, catena a 5 fasi — fase 1 già consegnata sessione #177, dba fase 2 non ancora confermata live). Prima di iniziare: committato separatamente il lavoro pendente non collegato della sessione #175 (guard `create_only`, v0.32.5, GTD `ad1df7ac`) rimasto sul working tree per 3 sessioni — 6 file, 400/400 test verdi, mai il mio task ma corretto metterlo a terra prima di aprire un nuovo diff sopra.
+
+**Costruito (v0.32.6), build+test, NESSUN deploy/restart:**
+- `doc_item_retire(project_id, item_id|code, reason)` (SDES-DOCM-026): il caso che `doc_supersede` non copre — fine deliberata, senza erede. Riusa il meccanismo esistente del trigger terminale (`gov.doc_items_require_successor_on_terminal`) scrivendo `attrs.no_successor_reason=reason` sulla STESSA update, invece di inventare un secondo canale. Non blocca su riferimenti/sottoscrizioni in ingresso (bloccherebbe il suo stesso scopo di override deliberato) — li restituisce in `notify` perché il chiamante avvisi (REQ-DOCM-027).
+- `project_retire(project_id, reason, dry_run=true default)` (SDES-DOCM-030/031/032/033/035): itera `doc_item_retire` su ogni riga non-terminale del progetto, mai `doc_promote` (fix del difetto misurato da EVAL-PG-007 punto 1). `dry_run=false` ricalcola fresco e rifiuta in blocco se resta un blocco di **tracciabilità** (link/xproject_link); le sole sottoscrizioni non bloccano — notificate a esecuzione riuscita via `board_send` (owner risolto via `board_agents`). Chiude i GTD scoped al progetto solo se inequivocabilmente parcheggiati (`someday`/`waiting`), il resto in `gtd_needs_reassignment` (riassegnazione resta loomy-only). Tombstone di progetto (`loomx_projects.retired_at/retired_reason`) scritto SOLO se zero errori di ritiro e zero `needs_reassignment`.
+- `DB_DOC_ITEM_STATUSES` esteso con `'retired'` (docTypes.ts) + capability-parity gate aggiornato (`reachableStatuses.add("retired")`, via `doc_item_retire`).
+- Modulo `src/projectRetire.ts` aggiunto a `LAZY_MODULES` (server.ts) — stesso fix G4 già applicato al resto del set, per costruzione da subito.
+
+**Scoperta non nel disegno originale, segnalata non taciuta:** SDES-DOCM-026 chiedeva a dba una sola estensione — la CHECK `doc_items.status`. Misurato leggendo il trigger `gov.doc_items_require_successor_on_terminal` (commento `LINK_TYPE_REGISTRY.doc`, `docTypes.ts`): il suo insieme di stati terminali è cablato (`superseded`/`deprecated`/`archived`) e NON include `'retired'` — servono DUE modifiche dba, non una, altrimenti il trigger non scatta mai per una transizione a `'retired'` e il precheck TS di `doc_item_retire` (costruito apposta, indipendente dal trigger) resta l'unica guardia reale finché non atterra anche la seconda.
+
+**Scelta di design non nel disegno letterale, dichiarata:** SDES-DOCM-030 dice "esegue... SOLO se la dry-run ha riportato zero blocchi residui" — letto alla lettera includerebbe le sottoscrizioni fra i blocchi, il che renderebbe irraggiungibile per costruzione il ramo "ritiro riuscito notifica i sottoscrittori" di SDES-DOCM-032 (una sottoscrizione che blocca l'esecuzione non può mai arrivare al ramo che la notifica). Scelto: solo link/xproject_link (riferimenti di tracciabilità, senza rimedio automatico) bloccano l'esecuzione bulk; le sottoscrizioni fluiscono nella notifica invece che nel blocco. Segnalato qui, non deciso in silenzio.
+
+**REQ-DOCM-029/SDES-DOCM-034 (filtro "solo in vigore" sui referenzianti) NON applicato** — resta proposta che cambia un trigger DB già live, serve la firma di Achille (D-136 §5). Conseguenza dichiarata nel tool stesso: `project_retire` segnalerà un blocco su quasi ogni progetto con una catena REQ→SDES→UAT viva, anche quando ogni referenziante è nello stesso giro di ritiro.
+
+**wi_query non ha scoping per `project_id`** (verificato leggendo `src/wi.ts` — nessuna colonna project sulle WI, nessun filtro): gap dichiarato in SDES-DOCM-035, confermato non risolto. `project_retire` enumera solo i GTD scoped (via `loomx_item_projects`), i WI intestati al progetto NON sono controllati — dichiarato nella risposta stessa (`wi_scoping_gap`).
+
+**Verifiche.** `tsc` pulito, `npm run build` pulita, `npm test` **411/411** (+11 rispetto a prima del task: 4 su `doc_item_retire`, 7 su `project_retire` — inclusi i due casi negativi mandatori: rifiuto senza `reason`, e rifiuto wholesale di `project_retire(dry_run=false)` quando resta un blocco di tracciabilità). Nessuna regressione su `strict-tool-args`/`capability-parity`.
+
+**Decisioni prese:** nessuna decisione formale — implementazione di un disegno già proposto (fase 1, sessione #177), con due scelte tecniche dichiarate sopra (gate sottoscrizioni escluso, gap trigger dba) mai promosse a decisione ratificata.
+**Blocchi / note:** **Deploy NON eseguito** — dipendenza DBA non confermata live (`doc_items.status` CHECK + trigger terminale + `loomx_projects.retired_at/retired_reason`); il codice compila e i test (fake DB) passano, ma una chiamata reale a `doc_item_retire`/`project_retire(dry_run=false)` fallirebbe oggi con un CHECK violation finché dba non applica lo schema. Deploy amministrato (CP-009: finestra dichiarata + verifica flotta, coordinamento it-manager) rimandato al prossimo ciclo, dopo conferma dba.
+**Prossima sessione:** al wake di dba con schema applicato — verificare dal vivo (non solo per lettura di codice) `doc_item_retire`/`project_retire` contro un fixture reale (stesso pattern usato per D-201/staleness, sessione dedicata), poi coordinare il deploy amministrato con it-manager, poi fase 4 (documentazione, GTD `22640631`). Segnalare a loomy la scelta sul gate sottoscrizioni e la scoperta del secondo requisito dba (trigger terminale), non solo il primo.
+
+---
+
 ## Sessione #177 — 2026-09-15 (wake cold-start, msg forge `ab055a53`, WI `41c46f6a` + `6278df7d`)
 
 **Task — «Ritiro progetto · fase 1»: disegno del meccanismo di ritiro a grana progetto** (mandato Achille 15/09, catena a 5 fasi — forge fase 0 esplorativa già eseguita su `EVAL-PG-007`, mie le fasi 1/3/4). Nessuna build, tutto `draft`/proposto come da mandato. Casa: progetto Doc-in-DB (`1e59391d`).

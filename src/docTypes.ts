@@ -42,9 +42,20 @@ export const DB_ITEM_TYPES = [
   "config_pattern",      // D-070 onda-3
 ] as const;
 
+// "retired" (SDES-DOCM-026, Ritiro progetto fase 3): DBA dependency, NOT yet
+// confirmed live — see doc_item_retire in projectRetire.ts. Added here ahead
+// of the migration (same discipline as any other DB_* mirror edit) so the
+// code and tests exist and only the actual DB write is gated on dba. Two
+// DBA-side changes are required together, not one: (1) doc_items_status_check
+// CHECK must admit 'retired', AND (2) gov.doc_items_require_successor_on_terminal
+// (migration 20260822091000) must add 'retired' to its OWN terminal-status set
+// — SDES-DOCM-026 only asked for (1). Without (2) the trigger never fires for
+// a status='retired' transition and doc_item_retire's own read-only precheck
+// becomes the ONLY guard (see projectRetire.ts header note) — which is why
+// that precheck exists independent of the trigger, not merely as a UX nicety.
 export const DB_DOC_ITEM_STATUSES = [
   "draft", "proposed", "in_review", "approved", "committed",
-  "active", "superseded", "deprecated", "rejected", "archived", "done",
+  "active", "superseded", "deprecated", "rejected", "archived", "done", "retired",
 ] as const;
 
 export const DB_DOC_ITEM_LINK_TYPES = [
@@ -511,6 +522,7 @@ export function checkCapabilityParity(): ParityReport {
     for (const s of spec.statuses) reachableStatuses.add(s);
   }
   reachableStatuses.add("superseded"); // doc_supersede guarantees this path
+  reachableStatuses.add("retired");    // doc_item_retire guarantees this path (SDES-DOCM-026)
   const missingStatuses = DB_DOC_ITEM_STATUSES.filter((s) => !reachableStatuses.has(s));
 
   // 3. Every link relation_type is routed by doc_link (target_kind) / doc_supersede.

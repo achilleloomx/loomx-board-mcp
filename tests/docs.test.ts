@@ -16,6 +16,7 @@ import {
   docLink,
   docLinkByCode,
   docSupersede,
+  docItemRetire,
   docQuery,
   docItemTypes,
   docPromote,
@@ -1848,4 +1849,88 @@ test("doc_promote: a write that silently affects 0 rows fails LOUD (D-132 read-b
   assert.equal(res.ok, false, "must not answer ok:true on a write that landed differently than sent");
   assert.match((res as any).error, /still reads/);
   assert.equal(store.documents.find((d) => d.id === id)!.status, "draft", "swallowed update never actually changed the row");
+});
+
+// ---------------------------------------------------------------------------
+// doc_item_retire (SDES-DOCM-026, Ritiro progetto fase 3, GTD 1061ce6e)
+// ---------------------------------------------------------------------------
+
+test("doc_item_retire: reason required, refuses without touching the row", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const docId = (doc as any).data.document_id;
+  const up = await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "requirement", code: "REQ-001", body: "x" }, ctx);
+  const itemId = (up as any).data.item_id;
+
+  const res = await docItemRetire(db, { project_id: PROJ_A, item_id: itemId, reason: "" }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /reason is required/);
+  assert.equal(store.doc_items.find((r) => r.id === itemId)!.status, "draft");
+});
+
+test("doc_item_retire: happy path — status='retired', attrs.no_successor_reason set, re-read confirms", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const docId = (doc as any).data.document_id;
+  const up = await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "requirement", code: "REQ-001", body: "x", attrs: { moscow: "must" } }, ctx);
+  const itemId = (up as any).data.item_id;
+
+  const res = await docItemRetire(db, { project_id: PROJ_A, code: "REQ-001", reason: "superseded by a different approach, no direct heir" }, ctx);
+  assert.ok(res.ok, `retire ok: ${JSON.stringify(res)}`);
+  if (!res.ok) return;
+  assert.equal(res.data.item_id, itemId);
+  assert.equal(res.data.previous_status, "draft");
+  assert.deepEqual(res.data.incoming, { links: 0, xproject_links: 0, subscriptions: 0 });
+  assert.deepEqual(res.data.notify, []);
+
+  const row = store.doc_items.find((r) => r.id === itemId)!;
+  assert.equal(row.status, "retired");
+  assert.equal(row.attrs.no_successor_reason, "superseded by a different approach, no direct heir");
+  assert.equal(row.attrs.moscow, "must", "existing attrs preserved, not wiped");
+});
+
+test("doc_item_retire: already-terminal row refused, not silently re-retired", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const doc = await docCreate(db, { project_id: PROJ_A, document_type: "req", title: "Req" }, ctx);
+  const docId = (doc as any).data.document_id;
+  const up = await docItemUpsert(db, { project_id: PROJ_A, document_id: docId, item_type: "requirement", code: "REQ-001", body: "x" }, ctx);
+  const itemId = (up as any).data.item_id;
+  store.doc_items.find((r) => r.id === itemId)!.status = "archived";
+
+  const res = await docItemRetire(db, { project_id: PROJ_A, item_id: itemId, reason: "x" }, ctx);
+  assert.equal(res.ok, false);
+  assert.match((res as any).error, /already terminal/);
+});
+
+test("doc_item_retire: does NOT block on active subscribers — surfaces them in `notify` with owner resolved instead", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const sdesDoc = await docCreate(db, { project_id: PROJ_A, document_type: "sdes", title: "SDES" }, ctx);
+  const sdesDocId = (sdesDoc as any).data.document_id;
+  const target = await docItemUpsert(db, { project_id: PROJ_A, document_id: sdesDocId, item_type: "sdes_entry", code: "SDES-001", body: "x" }, ctx);
+  const targetId = (target as any).data.item_id;
+  const uatDoc = await docCreate(db, { project_id: PROJ_A, document_type: "uat", title: "UAT" }, ctx);
+  const uatDocId = (uatDoc as any).data.document_id;
+  const subscriber = await docItemUpsert(db, { project_id: PROJ_A, document_id: uatDocId, item_type: "uat_case", code: "UAT-001", body: "x", owner: "atlas" }, ctx);
+  assert.ok(subscriber.ok, `subscriber item created: ${JSON.stringify(subscriber)}`);
+  const subscriberId = (subscriber as any).data.item_id;
+  store["gov.doc_subscriptions"] = [
+    { id: uuid(), subscriber_item_id: subscriberId, subscriber_project_id: PROJ_A, target_item_id: targetId, intent: "critical", origin: "fact", status: "active", note: "n" },
+  ];
+
+  const res = await docItemRetire(db, { project_id: PROJ_A, item_id: targetId, reason: "deliberately no successor" }, ctx);
+  assert.ok(res.ok, `retire ok despite live subscriber: ${JSON.stringify(res)}`);
+  if (!res.ok) return;
+  assert.equal(res.data.incoming.subscriptions, 1);
+  assert.equal(res.data.notify.length, 1);
+  assert.equal(res.data.notify[0].subscriber_owner, "atlas");
+  assert.equal(res.data.notify[0].intent, "critical");
+  assert.equal(store.doc_items.find((r) => r.id === targetId)!.status, "retired");
 });

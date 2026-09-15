@@ -1752,6 +1752,194 @@ export async function docSupersede(
 }
 
 // ---------------------------------------------------------------------------
+// doc_item_retire — SDES-DOCM-026 (Ritiro progetto fase 3, GTD 1061ce6e).
+//
+// The missing case doc_supersede can't cover: "this is the end, deliberately,
+// no successor." Same terminal-status trigger as supersede
+// (gov.doc_items_require_successor_on_terminal, migration 20260822091000),
+// but instead of a heir edge this sets attrs.no_successor_reason on the SAME
+// update — the trigger's own documented escape hatch for exactly this case.
+//
+// DBA dependency, NOT yet confirmed live (2026-09-16): doc_items_status_check
+// must admit 'retired' AND the trigger's terminal-status set must be extended
+// to include it — see the DB_DOC_ITEM_STATUSES comment in docTypes.ts for why
+// both are required, not just the CHECK. Until both land, the UPDATE below
+// fails with a CHECK violation; this function's own read-only precheck
+// (incoming links/xproject_links/subscriptions, computed BEFORE the write,
+// independent of whether the trigger already knows about 'retired') is what
+// makes REQ-DOCM-025 hold even if the trigger extension lags the CHECK.
+//
+// This tool does not BLOCK on what it finds (that would make it useless — its
+// whole purpose is the deliberate override doc_item_upsert refuses). It
+// notifies instead (REQ-DOCM-027): the caller gets back every active
+// subscription touched (`notify`), owner resolution done by the caller
+// (project_retire.ts sends the actual board_send; this function only reads).
+// ---------------------------------------------------------------------------
+
+const GOV_DOC_SUBSCRIPTIONS = "gov.doc_subscriptions";
+
+export interface DocItemRetireArgs {
+  project_id: string;
+  item_id?: string;
+  code?: string;
+  reason: string;
+}
+
+export interface DocItemRetireNotifyRow {
+  subscription_id: string;
+  subscriber_item_id: string;
+  subscriber_owner: string | null;
+  intent: string;
+  origin: string;
+}
+
+export interface DocItemRetireResult {
+  item_id: string;
+  code: string | null;
+  document_id: string;
+  project_id: string;
+  item_type: string;
+  previous_status: string;
+  incoming: { links: number; xproject_links: number; subscriptions: number };
+  notify: DocItemRetireNotifyRow[];
+  warnings: string[];
+}
+
+export async function docItemRetire(
+  db: SupabaseClient,
+  args: DocItemRetireArgs,
+  ctx: DocContext
+): Promise<DocResult<DocItemRetireResult>> {
+  const reason = (args.reason ?? "").trim();
+  if (!reason) {
+    return err(
+      `reason is required — doc_item_retire declares a deliberate "no successor" (same discipline as doc_unsubscribe). ` +
+      `It is written into attrs.no_successor_reason, which is also the terminal-status trigger's own escape hatch.`
+    );
+  }
+  if (!args.item_id && !args.code) return err(`Exactly one of item_id or code is required.`);
+  if (args.item_id && args.code) return err(`Pass item_id OR code, not both.`);
+
+  let itemId = args.item_id;
+  if (!itemId && args.code) {
+    const resolved = await docItemResolve(db, { project_id: args.project_id, code: args.code }, ctx);
+    if (!resolved.ok) return resolved;
+    itemId = resolved.data.item_id;
+  }
+
+  const { data: row, error: rowErr } = await db
+    .from(DOC_ITEMS)
+    .select("id, document_id, project_id, item_type, code, status, attrs")
+    .eq("id", itemId!)
+    .maybeSingle();
+  if (rowErr) return err(`Failed to load item '${itemId}': ${rowErr.message}`);
+  if (!row) return err(`item '${itemId}' not found (or hidden by RLS).`);
+  const current = row as {
+    id: string; document_id: string; project_id: string; item_type: string;
+    code: string | null; status: string; attrs: Record<string, unknown> | null;
+  };
+  if (current.project_id !== args.project_id) {
+    return err(`item '${current.id}' belongs to project '${current.project_id}', not '${args.project_id}' (anti-divergence FK).`);
+  }
+  const TERMINAL_STATUSES = new Set(["superseded", "deprecated", "archived", "rejected", "retired"]);
+  if (TERMINAL_STATUSES.has(current.status)) {
+    return err(`item '${current.id}' is already terminal (status='${current.status}'). Nothing to retire.`);
+  }
+
+  // Own precheck — see header note on why this cannot wait for the DB trigger.
+  const { data: linkRows, error: linkErr } = await db.from(DOC_ITEM_LINKS).select("id").eq("to_item", current.id);
+  if (linkErr) return err(`Failed to count incoming links: ${linkErr.message}`);
+  const { data: xlinkRows, error: xlinkErr } = await db.from(DOC_ITEM_XPROJECT_LINKS).select("id").eq("to_item", current.id);
+  if (xlinkErr) return err(`Failed to count incoming cross-project links: ${xlinkErr.message}`);
+
+  const { data: subsData, error: subsErr } = await db
+    .from(GOV_DOC_SUBSCRIPTIONS)
+    .select("id, subscriber_item_id, intent, origin")
+    .eq("target_item_id", current.id)
+    .eq("status", "active");
+  if (subsErr) return err(`Failed to read active subscriptions on '${current.id}': ${subsErr.message}`);
+  const subs = (Array.isArray(subsData) ? subsData : []) as Array<{
+    id: string; subscriber_item_id: string; intent: string; origin: string;
+  }>;
+
+  const warnings: string[] = [];
+  const notify: DocItemRetireNotifyRow[] = [];
+  if (subs.length > 0) {
+    const { data: subscriberRows, error: subscriberErr } = await db
+      .from(DOC_ITEMS)
+      .select("id, owner")
+      .in("id", subs.map((s) => s.subscriber_item_id));
+    if (subscriberErr) warnings.push(`Could not resolve subscriber owners for notification: ${subscriberErr.message}`);
+    const ownerById = new Map(
+      ((Array.isArray(subscriberRows) ? subscriberRows : []) as Array<{ id: string; owner: string | null }>)
+        .map((r) => [r.id, r.owner])
+    );
+    for (const s of subs) {
+      notify.push({
+        subscription_id: s.id,
+        subscriber_item_id: s.subscriber_item_id,
+        subscriber_owner: ownerById.get(s.subscriber_item_id) ?? null,
+        intent: s.intent,
+        origin: s.origin,
+      });
+    }
+  }
+
+  // Captured as a primitive BEFORE the update below — current may be the same
+  // object reference the store update mutates in place (fake-DB semantics;
+  // harmless against the real DB, which never aliases a prior SELECT's result
+  // with a later UPDATE), so reading current.status again afterwards would
+  // silently report the NEW status as "previous".
+  const previousStatus = current.status;
+  const prevAttrs: Record<string, unknown> = current.attrs ?? {};
+  const nextAttrs = { ...prevAttrs, no_successor_reason: reason };
+  const now = nowIso();
+  const { error: updErr } = await db
+    .from(DOC_ITEMS)
+    .update({ status: "retired", attrs: nextAttrs, updated_at: now })
+    .eq("id", current.id);
+  if (updErr) return err(`Retire refused for '${current.id}': ${updErr.message}`);
+
+  // D-132: re-read before declaring ok — under doc_rw a denied UPDATE affects
+  // 0 rows without raising.
+  const { data: after, error: afterErr } = await db
+    .from(DOC_ITEMS)
+    .select("id, status, attrs")
+    .eq("id", current.id)
+    .maybeSingle();
+  if (afterErr || !after) {
+    return err(
+      `Retire on '${current.id}' reported success but the row could not be re-read: ${afterErr?.message ?? "row not found"}. Treat as UNCONFIRMED.`
+    );
+  }
+  const mismatches = diffAgainstRow({ status: "retired" }, after as Record<string, unknown>);
+  if (mismatches.length > 0) {
+    return err(
+      `Retire on '${current.id}' reported success but the row does not match (RLS denial affects 0 rows silently under doc_rw):\n  - ${mismatches.join("\n  - ")}`
+    );
+  }
+
+  return {
+    ok: true,
+    data: {
+      item_id: current.id,
+      code: current.code,
+      document_id: current.document_id,
+      project_id: current.project_id,
+      item_type: current.item_type,
+      previous_status: previousStatus,
+      incoming: {
+        links: (Array.isArray(linkRows) ? linkRows : []).length,
+        xproject_links: (Array.isArray(xlinkRows) ? xlinkRows : []).length,
+        subscriptions: subs.length,
+      },
+      notify,
+      warnings,
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // doc_query — filter items + traceability checks (e.g. REQ without SDES).
 // ---------------------------------------------------------------------------
 
