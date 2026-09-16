@@ -282,6 +282,17 @@ export function gtdQueryProjectCrossOwnerRead(params: {
   return isLoomy || isBroker || projectOwnerAgentId === selfSlug;
 }
 
+// Pure — extracted so it's unit-testable without a DB, same rationale as
+// buildColdRecipientHint (D-118 c2) just above. IA-009: a human recipient
+// forces the GTD regardless of the caller's auto_gtd choice — opt-in makes
+// no sense for a target that has no other inbox.
+export function shouldForceAutoGtd(params: {
+  requestedAutoGtd: boolean | undefined;
+  isHumanRecipient: boolean;
+}): boolean {
+  return params.requestedAutoGtd === true || params.isHumanRecipient;
+}
+
 const MessageTypeSchema = z.enum(MESSAGE_TYPES);
 const StatusFilterSchema = z.enum(MESSAGE_STATUSES);
 const WakePrioritySchema = z.enum(WAKE_PRIORITIES);
@@ -354,6 +365,26 @@ export function registerTools(
     }
   };
 
+  // IA-009 / CORE-019 inv. 2 (GTD 72436ca3, "agente interfaccia" deploy): a
+  // recipient slug that appears as someone's human_ref in loomx_role_cards
+  // stands for a person, not an agent — every card's human_ref names the
+  // human that agent serves, so a slug showing up there is by construction a
+  // human, never a board-mcp-driven inbox anyone polls with board_inbox.
+  // Never throws: fails closed to "not human" so a lookup error degrades to
+  // the pre-existing opt-in auto_gtd behavior instead of blocking the send.
+  const isHumanRecipient = async (
+    db: ReturnType<typeof getSupabaseClient>,
+    slug: string
+  ): Promise<boolean> => {
+    const { data, error } = await db
+      .from(ROLE_CARDS_TABLE)
+      .select("agent_slug")
+      .eq("human_ref", slug.toLowerCase())
+      .limit(1);
+    if (error) return false;
+    return Boolean(data && data.length > 0);
+  };
+
   // --- board_send ---
   server.tool(
     "board_send",
@@ -377,7 +408,7 @@ export function registerTools(
         "D-098: model to launch the recipient with on this ping's cold-wake (e.g. 'sonnet', 'opus', 'fable'). Only meaningful together with wake_priority — ignored on a message with no wake. Omit = no preference (reconciler falls back to Sonnet; never Haiku in autopilot, §0quater)."
       ),
       auto_gtd: z.boolean().optional().describe(
-        "GTD 994b3bbc: also create a GTD item (owner=recipient, source='board', source_ref=this message's id) so the recipient sees it in gtd_inbox without relying on manual triage. Default false (unchanged behavior). Deduped against re-sends of the same message."
+        "GTD 994b3bbc: also create a GTD item (owner=recipient, source='board', source_ref=this message's id) so the recipient sees it in gtd_inbox without relying on manual triage. Default false (unchanged behavior). Deduped against re-sends of the same message. Forced on regardless of this flag when to_agent is a human recipient (IA-009/CORE-019) — no one polls board_inbox for a person, so the GTD is the only delivery that reaches them."
       ),
     },
     async ({ to_agent, type, subject, body, summary, tags, ref_id, wake_priority, requested_model, auto_gtd }) => {
@@ -419,8 +450,11 @@ export function registerTools(
         };
       }
 
+      const humanRecipient = await isHumanRecipient(db, to_agent);
+      const effectiveAutoGtd = shouldForceAutoGtd({ requestedAutoGtd: auto_gtd, isHumanRecipient: humanRecipient });
+
       let gtdError: string | null = null;
-      if (auto_gtd) {
+      if (effectiveAutoGtd) {
         gtdError = await autoCreateGtdForRecipient(db, {
           owner: to_agent,
           title: subject,
@@ -467,6 +501,9 @@ export function registerTools(
                 id: data.id,
                 created_at: data.created_at,
                 ...(gtdError ? { gtd_creation_error: gtdError } : {}),
+                ...(humanRecipient && !auto_gtd
+                  ? { auto_gtd_forced: "IA-009/CORE-019: to_agent is a human recipient (loomx_role_cards.human_ref match) — a GTD was created regardless of auto_gtd, since board_inbox is never polled for a person." }
+                  : {}),
                 ...(coldHint ? { hint: coldHint } : {}),
               },
               null,

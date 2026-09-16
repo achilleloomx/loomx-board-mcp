@@ -4,6 +4,29 @@
 
 ---
 
+## Sessione #180 — 2026-09-16 (autopilot dispatch, GTD `72436ca3`, WI `5c537573`, modello sonnet)
+
+**Task — «[deploy agente interfaccia] board-mcp»: norme interfaccia sempre importate, firma ID+norma, messaggi alla persona come GTD** (mandato loomy, CORE-019/CORE-020 ratificate da Achille il 16/09). Perimetro dichiarato di 4 punti nel corpo del GTD, ma con una dipendenza esplicita: "tipo di ruolo interfaccia" posato da dba (GTD `25de1ec8`).
+
+**Pre-flight — blocco verificato, non assunto.** Prima di costruire, controllato lo stato reale della dipendenza: `org_lookup(agent="loomy")` NON mostra ancora `reports_to: "achille"` (dovrebbe, per l'invariante 1 di CORE-019 — "Loomy è la prima interfaccia") né un campo di tipo ruolo sulla card; il progetto cappello **"Interface Agents"** citato da CORE-019 ("le regole comuni... vivono nel manifesto del progetto cappello") **non esiste** in `loomx_projects` (83 progetti elencati, nessuno con quel nome) — quindi i codici IA-007/IA-008/IA-009/IA-012 citati nel corpo del GTD non sono leggibili da una fonte primaria, solo dalla parafrasi di loomy nel GTD stesso.
+
+**Decisione presa (non promossa a D-NNN, tecnica):** dei 4 punti del perimetro, **1 (adozione norme per tipo ruolo), 2 (firma ID+norma) e 4 (sottoscrizioni → coda persona)** dipendono tutti dal campo "tipo di ruolo interfaccia" (per sapere QUALE agente è un'interfaccia) — genuinamente bloccati, non aggirabili senza indovinare un contratto non ancora scritto (D-136 §5). Il punto **3 (messaggio a un umano → GTD, IA-009)** è invece autonomo: la sua regola è già data per intero nel corpo del GTD da loomy stesso ("un board_send con destinatario umano genera un GTD intestato alla persona, invece di fallire come target non registrato") — costruibile senza il campo mancante, con un segnale DB-driven esistente (`loomx_role_cards.human_ref`) invece di un elenco umani hardcoded.
+
+**Costruito (v0.32.8), build+test, NESSUN deploy/restart:**
+- `board_send`: quando `to_agent` combacia (case-insensitive) con un `human_ref` presente su una qualunque `loomx_role_cards` (segnale che quello slug denota una persona — ogni scheda nomina l'umano che serve, quindi uno slug che compare lì è per costruzione un umano, mai un agente con scheda propria), il GTD per il destinatario viene creato **a prescindere** dal flag `auto_gtd` (nuova `shouldForceAutoGtd()`, pura/testabile, + `isHumanRecipient()` per la query). Prima, senza `auto_gtd=true` esplicito, un messaggio a un umano finiva in un `board_messages` che nessuno interroga (nessun `board_inbox` per una persona). Risposta porta `auto_gtd_forced` quando scatta la forzatura.
+- **Verificato dal vivo** (`tests/verify-ia009-human-recipient.ts`, sola lettura): `Achille` è oggi l'unico destinatario umano registrato (`board_agents.slug='Achille'`, `agent_code='000'`, nessuna riga propria in `loomx_role_cards`); `human_ref='achille'` è realmente condiviso da altre schede (controllo positivo); un controllo negativo (`human_ref='board-mcp'`) conferma che un normale agent slug non collide mai col segnale.
+- **Non copre** (gap dichiarato, non aggirato): `board_broadcast` ha lo stesso varco (follow-on); un umano MAI registrato prima non è raggiungibile lo stesso — serve comunque una riga `board_agents` a monte (D-005, fuori scope di un tool-layer).
+
+**Parcheggiato (punti 1/2/4):** GTD `72436ca3` aggiornato con `waiting_on=dba`, `resume_hint` che riporta esattamente cosa manca (campo tipo-ruolo + progetto cappello Interface Agents assente) e cosa è già stato consegnato (punto 3, v0.32.8). `board_send` a dba (question) per lo stato di GTD `25de1ec8`; `board_send` a loomy (info) con l'esito del giro e la segnalazione che il progetto cappello non risulta creato.
+
+**Verifiche.** `tsc` pulito, `npm run build` pulita, `npm test` **418/418** (+4 rispetto alla sessione #179: `shouldForceAutoGtd`). Nessuna regressione su `strict-tool-args` (75/75 tool, nessun tool nuovo) né `capability-parity`.
+
+**Decisioni prese:** nessuna decisione formale — scoping tecnico (punto 3 autonomo, punti 1/2/4 bloccati) dichiarato sopra, non promosso a D-NNN.
+**Blocchi / note:** in `waiting_on=dba` per il campo tipo-ruolo interfaccia (GTD `25de1ec8`) e per conferma/creazione del progetto cappello Interface Agents (competenza loomy, D-070/D-039 — allocazione progetti).
+**Prossima sessione:** al wake con GTD `25de1ec8` confermato e/o il progetto cappello Interface Agents creato — leggere IA-007/008/012 dalla fonte primaria (non più dalla parafrasi) e costruire i punti 1/2/4. Estendere la stessa forzatura anche a `board_broadcast` (gap dichiarato sopra).
+
+---
+
 ## Sessione #179 — 2026-09-16 (wake cold-start, msg dba `9c2add8d`, WI `3f38b6fe` ripreso)
 
 **Task — «Ritiro progetto · fase 3», seguito:** dba ha applicato fase 2 in produzione (4 migrazioni, msg `9c2add8d`) e ha corretto 3 punti sulla mia lettura del trigger. Ripreso il WI in pausa della sessione #178, applicati i 3 punti + verificato dal vivo (non solo per lettura di codice) prima di richiudere.
