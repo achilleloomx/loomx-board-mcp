@@ -4,6 +4,26 @@
 
 ---
 
+## Sessione #184 — 2026-09-16 (wake cold-start, msg loomy `6207d948` + it-manager `64afd84e`, WI multipli, modello sonnet)
+
+**Due wake pendenti, gestiti separatamente (D-024).**
+
+**1) M2 REQ-DOCM-023 (doc-in-db, `1e59391d`) — non chiudibile, RLS gap confermato indipendentemente.** Loomy chiedeva di chiudere una marcatura M2 (`no_impact`, DEL-005 citato coerentemente) perché la sua identità non riusciva a recuperare lo `staleness_id` da `doc_staleness_query`. Riprodotto con la MIA identità (board-mcp): stesso esito — `doc_staleness_query(status="all")` torna 1 sola marcatura (OBJ-001→DEL-003) mentre `doc_structure` conta 2 `open_staleness_markings` sullo stesso progetto. Non un problema di permessi specifici di loomy: la riga di REQ-DOCM-023 è invisibile a QUALUNQUE identità doc_rw provata finora. Segnalato a loomy (msg `aad49d3d`), GTD parcheggiato (`0c9146b7`, waiting), nessun bypass tentato (D-005 — non è mandato mio forzare la RLS).
+
+**2) Follow-on emerso a metà sessione: stesso gap, ma su project-governance — qui SENZA gap per la mia identità.** Mentre lavoravo al punto 1, è arrivato un secondo wake da loomy (msg `6dfe3934`): 12 marcature aperte su project-governance/Requisiti (`f3175539`), stesso sintomo (`doc_staleness_query` vuoto per la sua identità, `doc_structure` ne conta 45). Verificato con la mia identità: **45/45 righe visibili**, parità esatta con `doc_structure`. Scoperta chiave per dba: non è un gap universale sulla tabella — è **identità-dipendente** (loomy 0, board-mcp 45, sugli stessi dati). Estratto il sottogruppo esatto richiesto (12 righe/5 origini, batch 2026-09-03T22:01-22:03) e girato a loomy in chiaro (msg `65059ca4`) — sblocco immediato della sua revisione senza attendere il fix dba.
+
+**3) side_effects_log vuoto su wi_end (51/51 chiusure) — triage it-manager, proposta approvata e implementata (v0.32.11).** Letto `src/wi.ts`: `side_effects_log` si popolava solo da `side_effects_pending` passato dal chiamante, mai usato in pratica. Proposta a it-manager (msg `3ad5da5a`): derivare automaticamente da (1) `files_touched` di `in_flight_state` (già accumulato via `wi_checkpoint`, semplicemente non letto da `wi_end`) e (2) `doc_item_wi_links` creati durante il WI (riuso della query già fatta dal gate D-074 dove applicabile). Dichiarato onestamente che una terza fonte ipotizzata dal messaggio originale — GTD follow-on via `source_ref` — NON è "già disponibile": nessuna colonna collega un GTD al WI che l'ha generato, `source_ref` è un dedup key generico (D-066) senza convenzione. it-manager (msg `9a7729df`) ha confermato lo scope 1+2 ora e scelto la via strutturale per la 3 (colonna `created_by_wi_id` via DBA, non una convenzione a disciplina — "sposterebbe il difetto di un livello invece di eliminarlo").
+
+**Costruito:** `checkDurableGate` refactored in `fetchWiDocLinks`/`fetchWiDocLinksSafe` (quest'ultima non-bloccante, stesso pattern try/catch di `computePendingInbox`/`computePendingWakes`) + `checkDurableGate` ora ritorna anche i link raccolti invece di scartarli. `wiEnd` seleziona `in_flight_state` e raccoglie `wiDocLinks` su OGNI percorso di chiusura (non solo done+durable): sul path già gated riusa il risultato, altrove fa una query leggera non-bloccante. Entrambe le fonti, se non vuote, appendono a `side_effects_log` un'entry `{auto:true, executed:true, scheduled_at, payload:{type,...}}` — mai un'entry per una fonte vuota (niente zero finto). Retrocompatibile: `side_effects_pending` esplicito invariato, nessun campo `auto` aggiunto alle entry manuali.
+
+**Verifiche.** `tsc` pulito, `npm run build` pulita, `npm test` **433/433** (+5 nuovi sull'auto-derivazione: files_touched, doc_item_wi_links su done, stesso su un close non-done/waiting, nessuna entry quando non c'è nulla da derivare, retrocompat con `side_effects_pending` esplicito). Nessuna regressione sui 9 test D-074 esistenti (gate ancora verde su tutti i casi ephemeral/durable/decision).
+
+**Decisioni prese:** nessuna nuova decisione formale — implementazione tecnica dentro lo scope confermato da it-manager.
+**Blocchi / note:** REQ-DOCM-023 resta non chiuso in attesa del fix dba sull'asimmetria di identità RLS (punto 1). Richiesta a dba per `created_by_wi_id` (source 3, GTD `35014574` in waiting su board-mcp lato it-manager) non ancora aperta — follow-on separato, non bloccante per questa consegna. `v0.32.11` bumpato in `package.json`, non ancora deployato via commit/build a flotta (G4 — le altre window restano sul dist precedente finché non riavviano).
+**Prossima sessione:** aprire la richiesta dba per `created_by_wi_id`; quando ci sono numeri reali su quanti WI derivano side_effects_log vs quanti restano scoperti, tornare a it-manager per decidere se serve "strada 1" (gate esplicito) come fallback.
+
+---
+
 ## Sessione #183 — 2026-09-16 (autopilot dispatch, GTD `0ba9afa6`, WI `000dc553`, modello sonnet)
 
 **Task — chiusura del punto 2 (firma ID+norma, CORE-019 inv.3/CORE-020).** Migrazione dba applicata e verificata (msg `fd4c518c`, seguito della sessione #182): `loomx_items` +`signed_by`/+`signed_norm` (CHECK pairing `loomx_items_signed_pairing_check`), `board_messages` +`signed_norm`. Cablata la scrittura.

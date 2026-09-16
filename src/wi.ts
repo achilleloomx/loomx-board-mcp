@@ -51,60 +51,103 @@ function isEphemeralWi(
 // with a fake in-memory db instead of a real doc_rw backend.
 export type DocRunner = <T>(slug: string, fn: (db: DocRwDb) => Promise<T>) => Promise<T>;
 
-// Gate D-074 (REQ-033): durable WI must have at least one REQ or SDES linked
-// via doc_item_wi_links before it can be closed as done.
-//
+// doc_item_wi_links created during a WI's lifetime — shared by the D-074 gate
+// below and by the side_effects_log auto-derivation (it-manager msg 9a7729df,
+// "strada 2" source 2): both need the same rows, so fetch once.
+export interface WiDocLinkInfo {
+  doc_item_id: string;
+  item_type: string;
+  code: string | null;
+}
+
 // Must run through runDocRw (not the plain board client): doc_item_wi_links /
 // doc_items are RLS-gated (D-015) on request.agent_slug, which is only set
 // inside the doc_rw transaction wrapper. Querying them with the plain client
 // silently returns 0 rows under RLS-enforcing backends (native DATABASE_URL,
 // D-084) — a false "no links found" even when doc_link already succeeded.
-async function checkDurableGate(
+async function fetchWiDocLinks(
   runDoc: DocRunner,
   slug: string,
   wiId: string
-): Promise<string | null> {
+): Promise<WiDocLinkInfo[]> {
   return runDoc(slug, async (db) => {
     const { data: wiLinks } = await db
       .from(DOC_ITEM_WI_LINKS_TABLE)
       .select("doc_item_id")
       .eq("wi_id", wiId);
 
-    if (!Array.isArray(wiLinks) || wiLinks.length === 0) {
-      return (
+    if (!Array.isArray(wiLinks) || wiLinks.length === 0) return [];
+
+    const ids = (wiLinks as { doc_item_id: string }[]).map((l) => l.doc_item_id);
+    const { data: docItems } = await db
+      .from(DOC_ITEMS_TABLE)
+      .select("id, item_type, code")
+      .in("id", ids);
+
+    if (!Array.isArray(docItems)) return [];
+    return (docItems as { id: string; item_type: string; code: string | null }[]).map((d) => ({
+      doc_item_id: d.id,
+      item_type: d.item_type,
+      code: d.code ?? null,
+    }));
+  });
+}
+
+// Non-blocking wrapper for the side_effects_log derivation path (called on
+// EVERY close, not just the done+durable gate path): a doc_rw failure here
+// must never take wi_end down with it — same "report, don't break" contract
+// as computePendingInbox/computePendingWakes just below in wiEnd.
+async function fetchWiDocLinksSafe(
+  runDoc: DocRunner,
+  slug: string,
+  wiId: string
+): Promise<WiDocLinkInfo[]> {
+  try {
+    return await fetchWiDocLinks(runDoc, slug, wiId);
+  } catch (e) {
+    process.stderr.write(
+      `[wi_end][side_effects_log] doc_item_wi_links fetch failed (non-blocking): ${(e as Error).message}\n`
+    );
+    return [];
+  }
+}
+
+// Gate D-074 (REQ-033): durable WI must have at least one REQ or SDES linked
+// via doc_item_wi_links before it can be closed as done.
+async function checkDurableGate(
+  runDoc: DocRunner,
+  slug: string,
+  wiId: string
+): Promise<{ error: string | null; links: WiDocLinkInfo[] }> {
+  const links = await fetchWiDocLinks(runDoc, slug, wiId);
+
+  if (links.length === 0) {
+    return {
+      error:
         `Durable WI '${wiId}' must have ≥1 requirement, sdes_entry, or decision linked via doc_item_wi_links. ` +
         `Use doc_link(target_kind="wi", from_id=<req_uuid>, to_id="${wiId}") or ` +
         `doc_link_by_code(from_code="REQ-NNN", to_id="${wiId}", project_id=...). ` +
         `A governance/coordination WI whose durable output is a decision (D-074: Decisione is the top of the ` +
         `Decisione→REQ→SDES chain) may link the decision item directly instead. ` +
-        `Bypass with force_ephemeral=true + force_reason if this WI has no durable artifacts.`
-      );
-    }
+        `Bypass with force_ephemeral=true + force_reason if this WI has no durable artifacts.`,
+      links,
+    };
+  }
 
-    const ids = (wiLinks as { doc_item_id: string }[]).map((l) => l.doc_item_id);
-    const { data: docItems } = await db
-      .from(DOC_ITEMS_TABLE)
-      .select("id, item_type")
-      .in("id", ids);
+  const traced = links.filter(
+    (d) => d.item_type === "requirement" || d.item_type === "sdes_entry" || d.item_type === "decision"
+  );
 
-    const traced = Array.isArray(docItems)
-      ? (docItems as { item_type: string }[]).filter(
-          (d) =>
-            d.item_type === "requirement" ||
-            d.item_type === "sdes_entry" ||
-            d.item_type === "decision"
-        )
-      : [];
+  if (traced.length === 0) {
+    return {
+      error:
+        `Durable WI '${wiId}' has ${links.length} linked doc item(s) but none are requirement, sdes_entry, or decision. ` +
+        `Ensure the linked items are typed correctly or link a proper REQ/SDES/decision.`,
+      links,
+    };
+  }
 
-    if (traced.length === 0) {
-      return (
-        `Durable WI '${wiId}' has ${ids.length} linked doc item(s) but none are requirement, sdes_entry, or decision. ` +
-        `Ensure the linked items are typed correctly or link a proper REQ/SDES/decision.`
-      );
-    }
-
-    return null; // gate passed
-  });
+  return { error: null, links };
 }
 
 // --- D-118 reply-wake structural guards -----------------------------------
@@ -532,7 +575,7 @@ export async function wiEnd(
 ): Promise<WiResult<WiEndData>> {
   const { data: wi, error: findErr } = await db
     .from(WI_TABLE)
-    .select("id, agent_slug, gtd_item_id, status, side_effects_log, template_name, template_layer, started_at")
+    .select("id, agent_slug, gtd_item_id, status, side_effects_log, template_name, template_layer, started_at, in_flight_state")
     .eq("id", args.wi_id)
     .maybeSingle();
 
@@ -549,6 +592,7 @@ export async function wiEnd(
     template_name: string | null;
     template_layer: string | null;
     started_at?: string;
+    in_flight_state?: { files_touched?: unknown[] } | null;
   };
 
   if (row.agent_slug !== ctx.selfSlug && !ctx.isLoomy) {
@@ -603,19 +647,29 @@ export async function wiEnd(
   // Phase 1 D-074 gate (REQ-033): durable WIs closing as 'done' must have ≥1 REQ/SDES linked.
   // Ephemeral WIs (on-the-fly, EPHEMERAL_TEMPLATES, or force_ephemeral) skip the gate.
   // Failed/waiting closures skip the gate (gate only enforces on successful completion).
+  //
+  // wiDocLinks is collected on EVERY path (not just the gated one) — it feeds the
+  // side_effects_log auto-derivation below (it-manager msg 9a7729df, "strada 2"
+  // source 2) regardless of whether this WI happened to be durable. Non-blocking
+  // (fetchWiDocLinksSafe): a doc_rw hiccup here must never prevent the close.
   let gateBypassed = false;
+  let wiDocLinks: WiDocLinkInfo[] = [];
   if (args.status === "done") {
     if (isEphemeralWi(row.template_name, row.template_layer, args.force_ephemeral)) {
       if (args.force_ephemeral) {
         gateBypassed = true;
       }
+      wiDocLinks = await fetchWiDocLinksSafe(runDoc, row.agent_slug, args.wi_id);
     } else {
       // Use the WI owner's slug (not the closer's) — doc_item_wi_links/doc_items
       // are RLS-scoped to the project the WI owner belongs to (loomy closing on
       // someone else's behalf must see that owner's links, not its own).
-      const gateErr = await checkDurableGate(runDoc, row.agent_slug, args.wi_id);
-      if (gateErr) return { ok: false, error: gateErr };
+      const gate = await checkDurableGate(runDoc, row.agent_slug, args.wi_id);
+      if (gate.error) return { ok: false, error: gate.error };
+      wiDocLinks = gate.links;
     }
+  } else {
+    wiDocLinks = await fetchWiDocLinksSafe(runDoc, row.agent_slug, args.wi_id);
   }
 
   const newWiStatus = mapEndStatus(args.status);
@@ -631,7 +685,37 @@ export async function wiEnd(
     scheduled_at: now,
     payload: se,
   }));
-  const newLog = [...existingLog, ...pending];
+  // side_effects_log auto-derivation (it-manager msg 9a7729df/3ad5da5a, "strada 2"
+  // sources 1+2 — GTD register agent-issue-tracker 2c437678): the caller-declared
+  // side_effects_pending above was empty on 51/51 real closures, because nothing
+  // ever populated it. These entries derive from data the engine already has —
+  // `auto:true` marks them so a reader never confuses a derived fact with a
+  // caller's own declaration. Never logged when empty (no fake zero, D-201 style).
+  const autoFilesTouched = Array.isArray(row.in_flight_state?.files_touched)
+    ? (row.in_flight_state!.files_touched as unknown[]).filter((f): f is string => typeof f === "string")
+    : [];
+  const autoEntries: Record<string, unknown>[] = [];
+  if (autoFilesTouched.length > 0) {
+    autoEntries.push({
+      auto: true,
+      executed: true,
+      scheduled_at: now,
+      payload: { type: "files_touched", files: autoFilesTouched, count: autoFilesTouched.length },
+    });
+  }
+  if (wiDocLinks.length > 0) {
+    autoEntries.push({
+      auto: true,
+      executed: true,
+      scheduled_at: now,
+      payload: {
+        type: "doc_item_wi_links",
+        links: wiDocLinks.map((l) => ({ doc_item_id: l.doc_item_id, item_type: l.item_type, code: l.code })),
+        count: wiDocLinks.length,
+      },
+    });
+  }
+  const newLog = [...existingLog, ...pending, ...autoEntries];
 
   const update: Record<string, unknown> = {
     status: newWiStatus,

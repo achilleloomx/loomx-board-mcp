@@ -1670,3 +1670,148 @@ test("D-238: pending_wakes survives a GTD-sync failure — the WI still closed",
   assert.match(res.data.gtd_sync_warning ?? "", /GTD sync failed/);
   assert.equal(res.data.pending_wakes?.count, 1);
 });
+
+// ---- side_effects_log auto-derivation (it-manager msg 9a7729df/3ad5da5a,
+// "strada 2" sources 1+2 — GTD register agent-issue-tracker 2c437678) --------
+
+test("side_effects_log auto-derive: files_touched from in_flight_state appended on done close", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      {
+        id: "wi-1",
+        agent_slug: "app",
+        gtd_item_id: "gtd-1",
+        status: "active",
+        side_effects_log: [],
+        template_name: "session-meta", // ephemeral — skips D-074 gate
+        in_flight_state: { files_touched: ["src/a.ts", "src/b.ts"], tool_uses: 3 },
+      },
+    ],
+    doc_item_wi_links: [],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxOwn);
+  assert.equal(res.ok, true);
+  const log = store.loomx_work_items[0].side_effects_log as Array<Record<string, unknown>>;
+  assert.equal(log.length, 1);
+  assert.equal(log[0].auto, true);
+  assert.equal(log[0].executed, true);
+  const payload = log[0].payload as Record<string, unknown>;
+  assert.equal(payload.type, "files_touched");
+  assert.deepEqual(payload.files, ["src/a.ts", "src/b.ts"]);
+  assert.equal(payload.count, 2);
+});
+
+test("side_effects_log auto-derive: doc_item_wi_links appended on done close (durable WI, reuses gate fetch)", async () => {
+  const reqId = "req-uuid-901";
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      {
+        id: "wi-1",
+        agent_slug: "app",
+        gtd_item_id: "gtd-1",
+        status: "active",
+        side_effects_log: [],
+        template_name: "fix-bug",
+        template_layer: "L1",
+      },
+    ],
+    doc_item_wi_links: [{ id: "link-1", wi_id: "wi-1", doc_item_id: reqId }],
+    doc_items: [{ id: reqId, item_type: "requirement", code: "REQ-901" }],
+  };
+  const db = makeDb(store);
+  const fakeRunDoc = async (_slug: string, fn: (db: SupabaseClient) => Promise<unknown>) => fn(db);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxOwn, fakeRunDoc as never);
+  assert.equal(res.ok, true);
+  const log = store.loomx_work_items[0].side_effects_log as Array<Record<string, unknown>>;
+  assert.equal(log.length, 1);
+  assert.equal(log[0].auto, true);
+  const payload = log[0].payload as Record<string, unknown>;
+  assert.equal(payload.type, "doc_item_wi_links");
+  assert.equal(payload.count, 1);
+  assert.deepEqual(payload.links, [{ doc_item_id: reqId, item_type: "requirement", code: "REQ-901" }]);
+});
+
+test("side_effects_log auto-derive: doc_item_wi_links also collected on a non-done close (waiting)", async () => {
+  const reqId = "req-uuid-902";
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [] },
+    ],
+    doc_item_wi_links: [{ id: "link-1", wi_id: "wi-1", doc_item_id: reqId }],
+    doc_items: [{ id: reqId, item_type: "sdes_entry", code: "SDES-902" }],
+  };
+  const db = makeDb(store);
+  const fakeRunDoc = async (_slug: string, fn: (db: SupabaseClient) => Promise<unknown>) => fn(db);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "waiting" }, ctxOwn, fakeRunDoc as never);
+  assert.equal(res.ok, true);
+  const log = store.loomx_work_items[0].side_effects_log as Array<Record<string, unknown>>;
+  assert.equal(log.length, 1);
+  const payload = log[0].payload as Record<string, unknown>;
+  assert.equal(payload.type, "doc_item_wi_links");
+  assert.equal(payload.count, 1);
+});
+
+test("side_effects_log auto-derive: nothing to derive → no fake-empty entry logged", async () => {
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      {
+        id: "wi-1",
+        agent_slug: "app",
+        gtd_item_id: "gtd-1",
+        status: "active",
+        side_effects_log: [],
+        template_name: "session-meta",
+        in_flight_state: { files_touched: [], tool_uses: 0 },
+      },
+    ],
+    doc_item_wi_links: [],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxOwn);
+  assert.equal(res.ok, true);
+  const log = store.loomx_work_items[0].side_effects_log as Array<Record<string, unknown>>;
+  assert.equal(log.length, 0);
+});
+
+test("side_effects_log auto-derive: retro-compat — manual side_effects_pending entry stays auto-less, auto entries append alongside", async () => {
+  const reqId = "req-uuid-903";
+  const store: Store = {
+    loomx_items: [{ id: "gtd-1", owner: "app", gtd_status: "in_progress" }],
+    loomx_work_items: [
+      {
+        id: "wi-1",
+        agent_slug: "app",
+        gtd_item_id: "gtd-1",
+        status: "active",
+        side_effects_log: [],
+        template_name: "fix-bug",
+        template_layer: "L1",
+        in_flight_state: { files_touched: ["src/c.ts"], tool_uses: 1 },
+      },
+    ],
+    doc_item_wi_links: [{ id: "link-1", wi_id: "wi-1", doc_item_id: reqId }],
+    doc_items: [{ id: reqId, item_type: "requirement", code: "REQ-903" }],
+  };
+  const db = makeDb(store);
+  const fakeRunDoc = async (_slug: string, fn: (db: SupabaseClient) => Promise<unknown>) => fn(db);
+  const res = await wiEnd(
+    db,
+    { wi_id: "wi-1", status: "done", side_effects_pending: [{ kind: "summary_loomy" }] },
+    ctxOwn,
+    fakeRunDoc as never
+  );
+  assert.equal(res.ok, true);
+  const log = store.loomx_work_items[0].side_effects_log as Array<Record<string, unknown>>;
+  assert.equal(log.length, 3);
+  assert.equal(log[0].pending, true);
+  assert.equal(log[0].auto, undefined);
+  assert.equal(log[1].auto, true);
+  assert.equal((log[1].payload as Record<string, unknown>).type, "files_touched");
+  assert.equal(log[2].auto, true);
+  assert.equal((log[2].payload as Record<string, unknown>).type, "doc_item_wi_links");
+});
