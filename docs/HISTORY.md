@@ -4,6 +4,22 @@
 
 ---
 
+## Sessione #185 — 2026-09-16 (autopilot dispatch, GTD `e9871ab6`, WI multipli, modello sonnet)
+
+**1) Chiusura register: `[ISS-???] doc_query broken_refs abstained_items troncato` — già risolto, mai chiuso formalmente.** GTD dispatchata dal reconciler ma il fix (`a94fd7c`, `abstained_truncated`) era già in master dal 2026-09-03 (CV-8, stessa sessione). Verificato dal vivo: `git merge-base --is-ancestor a94fd7c HEAD` → sì, `grep abstained_truncated src/docs.ts` → presente (riga 2971). Nessun codice da scrivere: aggiornato lo Stato della riga register con la verifica e motivo, poi `gtd_complete` — la riga era rimasta aperta solo perché nessuno l'aveva chiusa formalmente dopo il fix.
+
+**2) CP-2 (guardia sul modello) — accesa, v0.32.12.** Wake da loomy: CV-6 chiusa da 3 settimane (21 codici/141 controlli/zero fallimenti, "i dodici collaudi del risveglio"), mandato: o si accende `LOOMX_MODEL_GUARDS_ENABLED` o si scrive perché questa non è la sede giusta. **Verificato prima di flippare, non fidandosi della citazione:** CV-6 misura un catalogo diverso (12 collaudi del risveglio) da quello che il codice di `modelGuardsEnabled()` documenta esplicitamente come proprio gate (suite `E2E-MODEL-*` in `loomx_evals`) — stessa cautela già presa in una sessione precedente (rif. HISTORY, gap mai chiuso). Invece di fermarmi di nuovo sull'ambiguità, ho misurato cosa serve DAVVERO: grep dei call site reali di `modelGuardsEnabled()` in `src/tools.ts` → **solo due**, nell'handler `runtime_request` (rifiuto Haiku-in-autopilot, cost-notice). Entrambi hanno verdict `pass` già registrato (`E2E-MODEL-06`/`08`, riverificato su HEAD `a19da81` via `tests/model-switch-guards.test.ts`, 84/84 verdi all'epoca). I gap residui del catalogo più ampio (`E2E-MODEL-05` not_run, `01/04/07/09` mai confermati qui, `03/10` esclusi per scelta esplicita dba sul roster modelli) non toccano nessuno dei due comportamenti che questo flag governa — verificato per grep, non assunto.
+
+**Costruito:** `modelGuardsEnabled()` (`src/flags.ts`) da `=== "1"` (off-by-default) a `!== "0"` (on-by-default, escape hatch esplicito per ops). Commento esteso con l'accounting completo (cosa è provato, cosa resta aperto e perché non blocca) — nessun flip silenzioso. 3 nuovi test (`tests/model-switch-guards.test.ts`): default ON, escape hatch `=0`, valore legacy `=1` resta ON. Nessun impatto retroattivo: il blocco Haiku vale solo su un futuro switch-a-haiku in autopilot, il cost-notice è puro avviso.
+
+**Verifiche.** `tsc` pulito, `npm run build` pulita, `npm test` **436/436**. Aggiornato CLAUDE.md (sezione D-101) con l'accounting completo della decisione, per chi la rilegge senza il contesto di questa sessione.
+
+**Decisioni prese:** nessuna nuova decisione formale — esecuzione del mandato CP-2 già ratificato (Achille/loomy), con verifica indipendente della sua premessa prima di agire (D-136 §5: non ho ampliato né ristretto lo scope di CP-2, ho verificato che il "sì" fosse ben fondato prima di eseguirlo).
+**Blocchi / note:** `v0.32.12` bumpato in `package.json`, commit locale non ancora pushato — le altre window restano sul dist precedente finché non riavviano (G4). Il flip è quindi **non ancora effettivo in flotta**: prende effetto solo dopo build+restart di ogni finestra.
+**Prossima sessione:** nessun follow-on aperto da questi due task. Riportare a loomy l'accounting CP-2 con l'invito a verificare se la lettura "solo i due call site contano" è quella intesa da Achille, o se serve comunque il catalogo E2E-MODEL completo prima che il flip sia considerato definitivo.
+
+---
+
 ## Sessione #184 — 2026-09-16 (wake cold-start, msg loomy `6207d948` + it-manager `64afd84e`, WI multipli, modello sonnet)
 
 **Due wake pendenti, gestiti separatamente (D-024).**

@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { strict as assert } from "node:assert";
 
 import { isHaikuModelSlug, buildHaikuAutopilotBlock, buildModelCostNotice } from "../src/tools.ts";
+import { modelGuardsEnabled } from "../src/flags.ts";
 
 test("isHaikuModelSlug: matches haiku aliases and full IDs, case-insensitive", () => {
   assert.equal(isHaikuModelSlug("haiku"), true);
@@ -49,4 +50,40 @@ test("buildModelCostNotice: no notice on downgrade or lateral move", () => {
 test("buildModelCostNotice: no notice when either model is unrecognized (unknown tier)", () => {
   assert.equal(buildModelCostNotice({ currentModel: null, requestedModel: "opus" }), undefined);
   assert.equal(buildModelCostNotice({ currentModel: "sonnet", requestedModel: "some-future-model" }), undefined);
+});
+
+// ---- modelGuardsEnabled default flip (CP-2/CV-6, registro loomx-ai-governance
+// doc 34aef3d4, loomy msg 1bd39554, 2026-09-16) ------------------------------
+
+test("modelGuardsEnabled: ON by default (unset env)", () => {
+  const prev = process.env.LOOMX_MODEL_GUARDS_ENABLED;
+  delete process.env.LOOMX_MODEL_GUARDS_ENABLED;
+  try {
+    assert.equal(modelGuardsEnabled(), true);
+  } finally {
+    if (prev === undefined) delete process.env.LOOMX_MODEL_GUARDS_ENABLED;
+    else process.env.LOOMX_MODEL_GUARDS_ENABLED = prev;
+  }
+});
+
+test("modelGuardsEnabled: escape hatch — explicit '0' forces it back off", () => {
+  const prev = process.env.LOOMX_MODEL_GUARDS_ENABLED;
+  process.env.LOOMX_MODEL_GUARDS_ENABLED = "0";
+  try {
+    assert.equal(modelGuardsEnabled(), false);
+  } finally {
+    if (prev === undefined) delete process.env.LOOMX_MODEL_GUARDS_ENABLED;
+    else process.env.LOOMX_MODEL_GUARDS_ENABLED = prev;
+  }
+});
+
+test("modelGuardsEnabled: any other value (including legacy '1') stays ON", () => {
+  const prev = process.env.LOOMX_MODEL_GUARDS_ENABLED;
+  process.env.LOOMX_MODEL_GUARDS_ENABLED = "1";
+  try {
+    assert.equal(modelGuardsEnabled(), true);
+  } finally {
+    if (prev === undefined) delete process.env.LOOMX_MODEL_GUARDS_ENABLED;
+    else process.env.LOOMX_MODEL_GUARDS_ENABLED = prev;
+  }
 });
