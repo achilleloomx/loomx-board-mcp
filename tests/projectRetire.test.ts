@@ -178,6 +178,48 @@ test("project_retire dry_run=false: tombstone IS written when no GTD needs reass
   assert.equal(proj.status, "archived", "loomx_projects_retired_implies_archived CHECK requires status in the SAME update");
 });
 
+test("project_retire dry_run=false: subscriber owner is a human recipient (loomx_role_cards.human_ref) → notification also creates a GTD (IA-008/IA-009)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  seedOwnedProject(store, "board-mcp");
+  const db = makeDb(store);
+  const d = uuid();
+  seedDoc(store, d);
+  const a = seedItem(store, d, { code: "REQ-001" });
+  // doc_items.owner mirrors board_agents.slug exactly (no lowercasing on that
+  // write path) — "Achille", matching the one human slug actually registered
+  // in board_agents (agent_code 000). isHumanRecipient lowercases internally
+  // before comparing against loomx_role_cards.human_ref, so casing here still
+  // resolves to the same person either way.
+  const b = seedItem(store, d, { code: "REQ-002", owner: "Achille" });
+  store["gov.doc_subscriptions"] = [
+    { id: uuid(), subscriber_item_id: b, subscriber_project_id: PROJ_A, target_item_id: a, intent: "module", origin: "choice", status: "active", note: "n" },
+  ];
+  store.board_agents = [
+    { agent_code: "005", slug: "board-mcp" },
+    { agent_code: "000", slug: "Achille" },
+  ];
+  // human_ref is stored lowercased (matches isHumanRecipient's slug.toLowerCase()
+  // comparison) — any role card naming "achille" as its human_ref marks that
+  // slug as a person, by construction (CORE-019/IA-009 predicate).
+  store.loomx_role_cards = [{ agent_slug: "loomy", human_ref: "achille", role_type: "interfaccia" }];
+
+  const res = await projectRetire(db, { project_id: PROJ_A, reason: "superseded", dry_run: false }, ctxFor(db, "board-mcp"));
+  assert.ok(res.ok, JSON.stringify(res));
+  if (!res.ok) return;
+
+  assert.equal(res.data.notify_sent.length, 1);
+  assert.equal(res.data.notify_sent[0].to_slug, "Achille");
+  assert.equal(store.board_messages.length, 1, "the board_messages row is still sent — GTD is additive, not a replacement");
+  assert.equal(store.board_messages[0].to_agent, "000");
+
+  const gtdForHuman = store.loomx_items.filter((r) => r.owner === "achille");
+  assert.equal(gtdForHuman.length, 1, "IA-008/IA-009: a human subscriber gets a GTD, since nobody polls board_inbox for a person");
+  assert.equal(gtdForHuman[0].source, "board");
+  assert.equal(gtdForHuman[0].source_ref, store.board_messages[0].id);
+  assert.equal(res.data.notify_warnings.length, 0);
+});
+
 test("project_retire: 'rejected' rows are NOT terminal (dba correction, msg 9c2add8d) — included in the census, not silently skipped", async () => {
   const store: Store = {};
   seedProjects(store);

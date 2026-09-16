@@ -4,6 +4,26 @@
 
 ---
 
+## Sessione #181 — 2026-09-16 (wake cold-start, msg loomy `1a2f2ef2`, WI `0d7058c3`, modello sonnet)
+
+**Task — ripresa dei punti 1, 2, 4 di GTD `72436ca3`**, sbloccati da loomy: il progetto cappello **Interface Agents** esiste (`41086570`, manifesto `dfc64651`, IA-000..012 `approved`, validati da Achille il 16/09), il progetto figlio Achille/Loomy esiste (`8a11fddc`, manifesto `6c0c5ddd`, IAL-000 `approved`/IAL-001 `proposed` segnaposto), e `loomx_role_cards.role_type` è live (dba, sessione precedente) con `loomy.role_type='interfaccia'` confermato dal vivo — l'unico agente di tipo interfaccia oggi.
+
+**Letto da fonte primaria** (non dalla parafrasi del GTD): IA-002/004/007/008/009 (manifesto cappello) + CORE-019/CORE-020 (metodo-core, doc `2297ef4a`, project `9010b970`).
+
+**Punto 1 (adozione norme, IA-007) — verificato, NESSUN gap in board-mcp.** `agent_context()` (`src/agentContext.ts`) chiama `gov.applicable_norms(p_agent := self)` **senza alcun filtro di progetto** — è l'unica superficie di calcolo norme che board-mcp possiede (grep su tutto `src/`, zero altri riferimenti a `applicable_norms`/norms). La frase IA-007 "il calcolo delle norme applicabili al Work Item aggiunge solo quelle di progetto" descrive un meccanismo **diverso e non ancora costruito** (fattibilità "norme applicabili al WI" di loomy, GTD `c682cc4e`, ancora in revisione auditor) — non esiste oggi né in board-mcp né altrove per quanto visibile da qui. Nulla da costruire ora; vincolo registrato per chi costruirà quel meccanismo in futuro (deve AGGIUNGERE norme di progetto sopra la cascata già importata incondizionatamente, mai filtrarla).
+
+**Punto 4 (IA-008/IA-009, notifica sottoscrizioni → coda persona) — costruito (v0.32.9).** Trovato un gap concreto: `project_retire`'s notifica ai sottoscrittori (SDES-DOCM-032) fa un INSERT grezzo su `board_messages`, bypassando interamente la forzatura auto_gtd-per-umano introdotta in v0.32.8 su `board_send`/`board_broadcast` — un `doc_items.owner` umano (es. `Achille`) sarebbe stato notificato in un `board_inbox` che nessuno interroga per una persona, esattamente il difetto che v0.32.8 aveva chiuso sull'altro percorso. `isHumanRecipient`/`autoCreateGtdForRecipient` issate da chiusure locali dentro `registerTools` a funzioni esportate a livello modulo in `tools.ts` (zero dipendenza da closure, già prendevano `db` come parametro) — una sola implementazione, riusata da `projectRetire.ts` via `import("./tools.js")` dinamico (stesso pattern lazy già in uso, nessun rischio di import circolare: `tools.js` è già caricato staticamente da `server.ts` prima che `projectRetire.js` venga mai importato). Verificato: `wi.ts`'s escalation message (D-135) è l'unico altro INSERT grezzo su `board_messages` nel repo, e già gestisce correttamente il caso umano (skip deliberato, non notifica — corretto per quel caso specifico, diverso da qui dove la notifica è il punto).
+
+**Punto 2 (firma ID+norma, CORE-019 inv.3/CORE-020) — NON costruito, proposta invece di un contratto inventato (D-136 §5).** Introspezione schema dal vivo (`information_schema.columns` su `loomx_items`/`board_messages`/`loomx_work_items`): **nessuna colonna esistente** per persistere "ID agente + norma autorizzante" su una scrittura delegata — `board_messages.from_agent` copre già metà dell'invariante (ID stabile, mai il nome, per costruzione su ogni riga), ma la norma autorizzante non ha una casa. Lo schema `board_*`/`loomx_*` non è di board-mcp (D-005) e IAL-001 (soglie della delega Loomy→Achille) è ancora un segnaposto `proposed` — **nessuna scrittura autonoma legittima esiste oggi** per l'unica interfaccia viva, quindi non c'è nulla da firmare nel frattempo. Costruire ora un meccanismo con un contratto di schema inventato unilateralmente violerebbe D-136 §5; proposta la forma minima a loomy invece (messaggio separato), parcheggiato GTD follow-on.
+
+**Verifiche.** `tsc` pulito, `npm run build` pulita, `npm test` **419/419** (+1 rispetto alla sessione #180: notifica umana su `project_retire`). Aggiunto supporto `.not()` a `tests/fakeDb.ts` (mancava, richiesto dal riuso di `autoCreateGtdForRecipient` nel nuovo test) — stessa semantica di `pg-shim.ts` (eq/is/in negati).
+
+**Decisioni prese:** nessuna decisione formale — punto 1 è una verifica (nessun gap), punto 4 è un fix di parità con v0.32.8 già ratificato, punto 2 è una proposta in coda a loomy.
+**Blocchi / note:** punto 2 in attesa della risposta di loomy sulla forma dello schema (nessun DBA coinvolto finché loomy non conferma il contratto, poi PR standard D-005).
+**Prossima sessione:** al via libera di loomy sul punto 2 — richiedere la migrazione a dba e cablare la scrittura della firma su `gtd_update`/`board_send` quando il caller agisce cross-owner su un item di proprietà umana.
+
+---
+
 ## Sessione #180 — 2026-09-16 (autopilot dispatch, GTD `72436ca3`, WI `5c537573`, modello sonnet)
 
 **Task — «[deploy agente interfaccia] board-mcp»: norme interfaccia sempre importate, firma ID+norma, messaggi alla persona come GTD** (mandato loomy, CORE-019/CORE-020 ratificate da Achille il 16/09). Perimetro dichiarato di 4 punti nel corpo del GTD, ma con una dipendenza esplicita: "tipo di ruolo interfaccia" posato da dba (GTD `25de1ec8`).

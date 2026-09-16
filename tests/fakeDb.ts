@@ -39,7 +39,7 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
   const txState = { aborted: false };
 
   function query(table: string) {
-    const filters: Array<{ col: string; val: unknown; op: "eq" | "in" | "gte" | "lte" | "is" }> = [];
+    const filters: Array<{ col: string; val: unknown; op: "eq" | "in" | "gte" | "lte" | "is" | "not_eq" | "not_in" | "not_is" }> = [];
     let op: "select" | "insert" | "update" | "delete" = "select";
     let insertData: Row | null = null;
     let updateData: Row | null = null;
@@ -60,6 +60,15 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
           if (f.op === "gte") return typeof r[f.col] === "string" && (r[f.col] as string) >= (f.val as string);
           if (f.op === "lte") return typeof r[f.col] === "string" && (r[f.col] as string) <= (f.val as string);
           if (f.op === "is") return r[f.col] === f.val || (f.val === null && r[f.col] === undefined);
+          // .not() forms mirror pg-shim.ts's real-DB semantics (see its comment):
+          // not(col, "eq", val) → col <> val; not(col, "is", null) → IS NOT NULL;
+          // not(col, "in", "(a,b)") → col not in the parsed list.
+          if (f.op === "not_eq") return r[f.col] !== f.val;
+          if (f.op === "not_is") return f.val === null ? r[f.col] !== null && r[f.col] !== undefined : r[f.col] !== f.val;
+          if (f.op === "not_in") {
+            const items = (f.val as string).replace(/^\(|\)$/g, "").split(",").map((s) => s.trim()).filter(Boolean);
+            return !items.includes(r[f.col] as string);
+          }
           return true;
         })
       );
@@ -192,6 +201,10 @@ export function makeDb(store: Store, members: Set<string> = new Set(), opts: { r
       gte(col: string, val: unknown) { filters.push({ col, val, op: "gte" }); return builder; },
       lte(col: string, val: unknown) { filters.push({ col, val, op: "lte" }); return builder; },
       is(col: string, val: unknown) { filters.push({ col, val, op: "is" }); return builder; },
+      not(col: string, op: "eq" | "is" | "in", val: unknown) {
+        filters.push({ col, val, op: (`not_${op}` as "not_eq" | "not_is" | "not_in") });
+        return builder;
+      },
       order(col: string, opts: { ascending?: boolean } = {}) { orderCol = col; orderAsc = opts.ascending !== false; return builder; },
       limit(n: number) { limitN = n; return builder; },
       single() { single = true; return exec(); },

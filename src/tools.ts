@@ -297,6 +297,69 @@ const MessageTypeSchema = z.enum(MESSAGE_TYPES);
 const StatusFilterSchema = z.enum(MESSAGE_STATUSES);
 const WakePrioritySchema = z.enum(WAKE_PRIORITIES);
 
+// Best-effort GTD auto-creation for a message recipient (GTD 994b3bbc,
+// auto_gtd opt-in on board_send/board_broadcast). Dedup mirrors gtd_add
+// (D-066): scoped (owner, source_ref) so this never collides across
+// recipients — only guards against re-sending the same message id twice.
+// Never throws: a GTD-creation failure must not fail the message send.
+// Module-level (no closure over registerTools' scope) so other write paths
+// that notify a possibly-human recipient outside board_send — e.g.
+// project_retire's subscriber notification, IA-008/IA-009 — can reuse the
+// exact same mechanism instead of re-deriving it (one implementation, same
+// rationale as agentContext.ts's shared buildRoleCard).
+export async function autoCreateGtdForRecipient(
+  db: ReturnType<typeof getSupabaseClient>,
+  params: { owner: string; title: string; body: string | null; source_ref: string; priority?: "low" | "normal" | "high" | "urgent" }
+): Promise<string | null> {
+  try {
+    // Dedup pre-check must match on the same casing buildAutoGtdInsertPayload
+    // will write (see its comment) — otherwise a re-send with different
+    // to_agent casing than a prior insert would slip past the (owner,
+    // source_ref) dedup and create a duplicate.
+    const owner = params.owner.toLowerCase();
+    const { data: existing, error: dedupError } = await db
+      .from(GTD_TABLE)
+      .select("id")
+      .eq("owner", owner)
+      .eq("source_ref", params.source_ref)
+      .not("gtd_status", "eq", "trash")
+      .maybeSingle();
+    // it-manager msg 3385a4fa (GTD 224b3886): a discarded error here (RLS,
+    // network, or "multiple rows" — the exact state a first duplicate
+    // leaves behind) reads as "no duplicate" and inserts another one,
+    // self-perpetuating. Same fix as gtd_add's D-066 pre-check: fail loud
+    // instead of inserting blind.
+    if (dedupError) return `D-066 dedup pre-check failed: ${dedupError.message}`;
+    if (existing) return null;
+
+    const { error } = await db.from(GTD_TABLE).insert(buildAutoGtdInsertPayload(params));
+    return error ? error.message : null;
+  } catch (err) {
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+// IA-009 / CORE-019 inv. 2 (GTD 72436ca3, "agente interfaccia" deploy): a
+// recipient slug that appears as someone's human_ref in loomx_role_cards
+// stands for a person, not an agent — every card's human_ref names the
+// human that agent serves, so a slug showing up there is by construction a
+// human, never a board-mcp-driven inbox anyone polls with board_inbox.
+// Never throws: fails closed to "not human" so a lookup error degrades to
+// the pre-existing opt-in auto_gtd behavior instead of blocking the send.
+// Module-level for the same reuse reason as autoCreateGtdForRecipient above.
+export async function isHumanRecipient(
+  db: ReturnType<typeof getSupabaseClient>,
+  slug: string
+): Promise<boolean> {
+  const { data, error } = await db
+    .from(ROLE_CARDS_TABLE)
+    .select("agent_slug")
+    .eq("human_ref", slug.toLowerCase())
+    .limit(1);
+  if (error) return false;
+  return Boolean(data && data.length > 0);
+}
+
 export function registerTools(
   rawServer: McpServer,
   registry: AgentRegistry
@@ -326,63 +389,6 @@ export function registerTools(
     if (!(await ensureAgentKnown(slug))) return `Unknown agent "${slug}". Valid: ${[...slugToCode.keys()].join(", ")}`;
     if (slug === selfSlug) return "Cannot send a message to yourself";
     return null;
-  };
-
-  // Best-effort GTD auto-creation for a message recipient (GTD 994b3bbc,
-  // auto_gtd opt-in on board_send/board_broadcast). Dedup mirrors gtd_add
-  // (D-066): scoped (owner, source_ref) so this never collides across
-  // recipients — only guards against re-sending the same message id twice.
-  // Never throws: a GTD-creation failure must not fail the message send.
-  const autoCreateGtdForRecipient = async (
-    db: ReturnType<typeof getSupabaseClient>,
-    params: { owner: string; title: string; body: string | null; source_ref: string; priority?: "low" | "normal" | "high" | "urgent" }
-  ): Promise<string | null> => {
-    try {
-      // Dedup pre-check must match on the same casing buildAutoGtdInsertPayload
-      // will write (see its comment) — otherwise a re-send with different
-      // to_agent casing than a prior insert would slip past the (owner,
-      // source_ref) dedup and create a duplicate.
-      const owner = params.owner.toLowerCase();
-      const { data: existing, error: dedupError } = await db
-        .from(GTD_TABLE)
-        .select("id")
-        .eq("owner", owner)
-        .eq("source_ref", params.source_ref)
-        .not("gtd_status", "eq", "trash")
-        .maybeSingle();
-      // it-manager msg 3385a4fa (GTD 224b3886): a discarded error here (RLS,
-      // network, or "multiple rows" — the exact state a first duplicate
-      // leaves behind) reads as "no duplicate" and inserts another one,
-      // self-perpetuating. Same fix as gtd_add's D-066 pre-check: fail loud
-      // instead of inserting blind.
-      if (dedupError) return `D-066 dedup pre-check failed: ${dedupError.message}`;
-      if (existing) return null;
-
-      const { error } = await db.from(GTD_TABLE).insert(buildAutoGtdInsertPayload(params));
-      return error ? error.message : null;
-    } catch (err) {
-      return err instanceof Error ? err.message : String(err);
-    }
-  };
-
-  // IA-009 / CORE-019 inv. 2 (GTD 72436ca3, "agente interfaccia" deploy): a
-  // recipient slug that appears as someone's human_ref in loomx_role_cards
-  // stands for a person, not an agent — every card's human_ref names the
-  // human that agent serves, so a slug showing up there is by construction a
-  // human, never a board-mcp-driven inbox anyone polls with board_inbox.
-  // Never throws: fails closed to "not human" so a lookup error degrades to
-  // the pre-existing opt-in auto_gtd behavior instead of blocking the send.
-  const isHumanRecipient = async (
-    db: ReturnType<typeof getSupabaseClient>,
-    slug: string
-  ): Promise<boolean> => {
-    const { data, error } = await db
-      .from(ROLE_CARDS_TABLE)
-      .select("agent_slug")
-      .eq("human_ref", slug.toLowerCase())
-      .limit(1);
-    if (error) return false;
-    return Boolean(data && data.length > 0);
   };
 
   // --- board_send ---

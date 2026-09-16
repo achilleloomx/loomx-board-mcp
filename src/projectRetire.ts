@@ -273,12 +273,23 @@ export async function projectRetire(
   // Notify (SDES-DOCM-032) — resolve agent codes and send board_messages
   // directly (regular service-role client, not doc_rw: board_messages is
   // outside doc_rw's grants, same wall as loomx_projects).
+  //
+  // IA-008/IA-009 (GTD 72436ca3, CORE-019): a subscriber_owner can be a
+  // human (loomx_role_cards.human_ref match — e.g. a GTD or doc row directly
+  // owned by the person), not only an agent slug. board_send's tool handler
+  // already forces a GTD alongside the board_messages row for that case
+  // (nobody polls board_inbox for a person, v0.32.8) — this raw insert path
+  // bypassed that entirely until now. Reusing the exact same two functions
+  // board_send uses (isHumanRecipient / autoCreateGtdForRecipient, hoisted
+  // to module scope in tools.ts for this reuse) instead of re-deriving the
+  // predicate, so the two notification paths can never drift apart.
   const notifySent: Array<{ to_slug: string; item_id: string; code: string | null }> = [];
   const notifyWarnings: string[] = [];
   const ownersToNotify = Array.from(
     new Set(allNotify.map((n) => n.subscriber_owner).filter((o): o is string => !!o))
   );
   if (ownersToNotify.length > 0) {
+    const { isHumanRecipient, autoCreateGtdForRecipient } = await import("./tools.js");
     const { data: agentRows, error: agentErr } = await serviceDb
       .from(BOARD_AGENTS_TABLE)
       .select("agent_code, slug")
@@ -298,18 +309,27 @@ export async function projectRetire(
           notifyWarnings.push(`Owner '${owner}' unresolved in board_agents — no notification sent for item '${n.item_id}'.`);
           continue;
         }
-        const { error: msgErr } = await serviceDb.from(BOARD_MESSAGES_TABLE).insert({
-          from_agent: fromCode,
-          to_agent: toCode,
-          type: "info",
-          subject: `Project retired: item ${n.code ?? n.item_id} you subscribed to`,
-          body: `Project '${args.project_id}' was retired (reason: ${reason}). Item ${n.code ?? n.item_id} you subscribed to is now status='retired', no successor declared.`,
-          status: "pending",
-        });
-        if (msgErr) {
-          notifyWarnings.push(`Notification to '${owner}' for item '${n.item_id}' not sent: ${msgErr.message}`);
-        } else {
-          notifySent.push({ to_slug: owner, item_id: n.item_id, code: n.code });
+        const subject = `Project retired: item ${n.code ?? n.item_id} you subscribed to`;
+        const body = `Project '${args.project_id}' was retired (reason: ${reason}). Item ${n.code ?? n.item_id} you subscribed to is now status='retired', no successor declared.`;
+        const { data: msgRow, error: msgErr } = await serviceDb
+          .from(BOARD_MESSAGES_TABLE)
+          .insert({ from_agent: fromCode, to_agent: toCode, type: "info", subject, body, status: "pending" })
+          .select("id")
+          .maybeSingle();
+        if (msgErr || !msgRow) {
+          notifyWarnings.push(`Notification to '${owner}' for item '${n.item_id}' not sent: ${msgErr?.message ?? "no row returned"}`);
+          continue;
+        }
+        notifySent.push({ to_slug: owner, item_id: n.item_id, code: n.code });
+        if (await isHumanRecipient(serviceDb, owner)) {
+          const gtdErr = await autoCreateGtdForRecipient(serviceDb, {
+            owner,
+            title: subject,
+            body,
+            source_ref: (msgRow as { id: string }).id,
+            priority: "normal",
+          });
+          if (gtdErr) notifyWarnings.push(`IA-009 GTD not created for human recipient '${owner}' (item '${n.item_id}'): ${gtdErr}`);
         }
       }
     }
