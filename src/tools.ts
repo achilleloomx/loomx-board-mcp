@@ -30,6 +30,7 @@ const GTD_QUERY_FIELDS = new Set([
   "deleted_at", "project_id", "autopilot", "autopilot_model", "recurrence_days", "block_scope",
   "resume_hint", "clarified_at", "autopilot_attempts", "last_evoked_at", "blocks_wi",
   "proposed_options", "block_resume_hint", "priority_rank", "no_auto_arm",
+  "signed_by", "signed_norm",
 ]);
 const GTD_ITEM_PROJECTS_TABLE = "loomx_item_projects";
 const PROJECTS_TABLE = "loomx_projects";
@@ -166,6 +167,8 @@ export interface GtdUpdateFields {
   resume_hint?: string | null;
   clarified_at?: string | null;
   no_auto_arm?: boolean;
+  signed_by?: string;
+  signed_norm?: string;
 }
 
 // Broker may arm autopilot on another owner's GTD only while the owner has
@@ -220,6 +223,8 @@ export function buildGtdUpdatePayload(fields: GtdUpdateFields): Record<string, u
   if (fields.resume_hint !== undefined) updates.resume_hint = fields.resume_hint;
   if (fields.clarified_at !== undefined) updates.clarified_at = fields.clarified_at;
   if (fields.no_auto_arm !== undefined) updates.no_auto_arm = fields.no_auto_arm;
+  if (fields.signed_by !== undefined) updates.signed_by = fields.signed_by;
+  if (fields.signed_norm !== undefined) updates.signed_norm = fields.signed_norm;
   return updates;
 }
 
@@ -360,6 +365,56 @@ export async function isHumanRecipient(
   return Boolean(data && data.length > 0);
 }
 
+// CORE-019 inv.3/CORE-020 (GTD 0ba9afa6, migration dba msg fd4c518c, GO loomy
+// msg 20a1ddb4): a delegated write on behalf of a human records who signed
+// it (signed_by, always the caller's own slug — never caller-supplied, "mai
+// il nome") and which norm authorizes it (signed_norm, caller-supplied,
+// resolved before being trusted). loomx_items enforces both-or-neither at
+// the DB (loomx_items_signed_pairing_check); board_messages has no such
+// CHECK (from_agent already covers the ID half) but the tool layer applies
+// the same discipline for consistency. Pure — unit-testable without a DB.
+export function signaturePairingError(
+  signedNorm: string | undefined,
+  signedNormProjectId: string | undefined
+): string | null {
+  if ((signedNorm === undefined) !== (signedNormProjectId === undefined)) {
+    return "signed_norm and signed_norm_project_id must be given together — the norm code needs its project_id to resolve (codes are project-scoped, never global, D-167).";
+  }
+  return null;
+}
+
+// gtd_update's scope for CORE-019 inv.3: the write must actually be
+// delegated (caller acting cross-owner), never a self-write. Pure half of
+// the eligibility check — the other half (target owner is human) needs a DB
+// lookup (isHumanRecipient) and is combined at the call site.
+export function isCrossOwnerWrite(selfSlug: string, targetOwner: string | null | undefined): boolean {
+  return Boolean(targetOwner) && targetOwner !== selfSlug;
+}
+
+// Shared resolve step for both gtd_update and board_send, after their own
+// scope check passes. Runs under doc_rw (F4.5) exactly like the
+// doc_item_resolve tool itself (src/docs.ts docItemResolve) — never trusts a
+// norm code that doesn't resolve to a real, readable doc item. Returns null
+// on success, an actionable error string on failure.
+export async function resolveSignedNormCode(
+  selfSlug: string,
+  isLoomy: boolean,
+  serviceDb: ReturnType<typeof getSupabaseClient>,
+  projectId: string,
+  code: string
+): Promise<string | null> {
+  const { runDocRw } = await import("./docDb.js");
+  const { docItemResolve } = await import("./docs.js");
+  // Same `any` boundary registerTools' runDocTool uses (src/tools.ts) — the
+  // doc_rw client (DocRwDb) is structurally compatible with what
+  // docItemResolve actually needs at runtime, but not with its
+  // SupabaseClient parameter type.
+  const result = await runDocRw(selfSlug, (rdb: any) =>
+    docItemResolve(rdb, { project_id: projectId, code }, { selfSlug, isLoomy, serviceDb })
+  );
+  return result.ok ? null : (result.error ?? "signed_norm resolve failed");
+}
+
 export function registerTools(
   rawServer: McpServer,
   registry: AgentRegistry
@@ -416,8 +471,12 @@ export function registerTools(
       auto_gtd: z.boolean().optional().describe(
         "GTD 994b3bbc: also create a GTD item (owner=recipient, source='board', source_ref=this message's id) so the recipient sees it in gtd_inbox without relying on manual triage. Default false (unchanged behavior). Deduped against re-sends of the same message. Forced on regardless of this flag when to_agent is a human recipient (IA-009/CORE-019) — no one polls board_inbox for a person, so the GTD is the only delivery that reaches them."
       ),
+      signed_norm: z.string().min(1).optional().describe(
+        "CORE-019 inv.3/CORE-020 (GTD 0ba9afa6): norm code authorizing this message (e.g. 'IA-009'), required together with signed_norm_project_id. Only accepted when to_agent is a human recipient (loomx_role_cards.human_ref match) — rejected otherwise. Validated to resolve to a real doc item (doc_item_resolve) before being trusted. from_agent already covers the 'who signed' half of the invariant (stable ID by construction)."
+      ),
+      signed_norm_project_id: z.string().uuid().optional().describe("Project (loomx_projects.id) where signed_norm's code lives — codes are project-scoped, never global (D-167). Required together with signed_norm."),
     },
-    async ({ to_agent, type, subject, body, summary, tags, ref_id, wake_priority, requested_model, auto_gtd }) => {
+    async ({ to_agent, type, subject, body, summary, tags, ref_id, wake_priority, requested_model, auto_gtd, signed_norm, signed_norm_project_id }) => {
       const validationError = await validateRecipientSlug(to_agent);
       if (validationError) {
         return {
@@ -427,8 +486,31 @@ export function registerTools(
       }
 
       const toCode = slugToCode.get(to_agent)!;
-
       const db = getSupabaseClient();
+
+      // CORE-019 inv.3/CORE-020 signature (GTD 0ba9afa6): validated BEFORE
+      // the insert — a rejected signature must not send an unsigned message
+      // under the caller's mistaken belief that it carried authorization.
+      const pairingError = signaturePairingError(signed_norm, signed_norm_project_id);
+      if (pairingError) {
+        return { content: [{ type: "text", text: `Error: ${pairingError}` }], isError: true };
+      }
+      const humanRecipient = await isHumanRecipient(db, to_agent);
+      if (signed_norm !== undefined && signed_norm_project_id !== undefined) {
+        if (!humanRecipient) {
+          return {
+            content: [
+              { type: "text", text: `Error: signed_norm only applies when to_agent is a human recipient (CORE-019 inv.3) — '${to_agent}' is not one (no loomx_role_cards.human_ref match).` },
+            ],
+            isError: true,
+          };
+        }
+        const resolveError = await resolveSignedNormCode(selfSlug, isLoomy, db, signed_norm_project_id, signed_norm);
+        if (resolveError) {
+          return { content: [{ type: "text", text: `Error: signed_norm '${signed_norm}' does not resolve: ${resolveError}` }], isError: true };
+        }
+      }
+
       const { data, error } = await db
         .from(TABLE)
         .insert({
@@ -443,6 +525,7 @@ export function registerTools(
           status: "pending",
           ...(wake_priority !== undefined ? { wake_priority } : {}),
           ...(requested_model !== undefined ? { requested_model } : {}),
+          ...(signed_norm !== undefined ? { signed_norm } : {}),
         })
         .select("id, created_at")
         .maybeSingle();
@@ -456,7 +539,6 @@ export function registerTools(
         };
       }
 
-      const humanRecipient = await isHumanRecipient(db, to_agent);
       const effectiveAutoGtd = shouldForceAutoGtd({ requestedAutoGtd: auto_gtd, isHumanRecipient: humanRecipient });
 
       let gtdError: string | null = null;
@@ -511,6 +593,7 @@ export function registerTools(
                   ? { auto_gtd_forced: "IA-009/CORE-019: to_agent is a human recipient (loomx_role_cards.human_ref match) — a GTD was created regardless of auto_gtd, since board_inbox is never polled for a person." }
                   : {}),
                 ...(coldHint ? { hint: coldHint } : {}),
+                ...(signed_norm !== undefined ? { signed: { signed_by: selfSlug, signed_norm } } : {}),
               },
               null,
               2
@@ -1374,8 +1457,12 @@ export function registerTools(
       resume_hint: z.string().nullable().optional().describe("Hint for the agent on how to resume (or null to clear)"),
       clarified_at: z.union([z.literal(true), z.string(), z.null()]).optional().describe("Owner ack flag: true = set to now, ISO 8601 string = explicit timestamp, null = clear. NULL means the owner has never reviewed the item (loomy/broker may freely evaluate/arm autopilot); once set, the owner's autopilot choice is respected and must not be overridden by others. Settable by the GTD owner or loomy only (not broker on others' items)."),
       no_auto_arm: z.boolean().optional().describe("D-100: permanently park this item from autopilot re-arming — set true so the reconciler/broker stop flipping autopilot back to true on their cycle (autopilot=false alone is not sticky). Set false to unpark."),
+      signed_norm: z.string().min(1).optional().describe(
+        "CORE-019 inv.3/CORE-020 (GTD 0ba9afa6): norm code authorizing this write (e.g. 'IA-009'), required together with signed_norm_project_id. Only accepted when this call is a cross-owner write (loomy/broker acting on someone else's item) on an item whose (post-update) owner is a human recipient (isHumanRecipient — same predicate IA-009 already forces auto_gtd on) — rejected otherwise. Validated to resolve to a real doc item (doc_item_resolve) before being trusted. signed_by is set automatically to your own slug, never caller-supplied."
+      ),
+      signed_norm_project_id: z.string().uuid().optional().describe("Project (loomx_projects.id) where signed_norm's code lives — codes are project-scoped, never global (D-167). Required together with signed_norm."),
     },
-    async ({ id, title, body, gtd_status, priority, deadline, waiting_on, owner, autopilot, autopilot_model, recurrence_days, block_scope, resume_hint, clarified_at, no_auto_arm }) => {
+    async ({ id, title, body, gtd_status, priority, deadline, waiting_on, owner, autopilot, autopilot_model, recurrence_days, block_scope, resume_hint, clarified_at, no_auto_arm, signed_norm, signed_norm_project_id }) => {
       const db = getSupabaseClient();
 
       // Only loomy/broker can reassign owner
@@ -1463,10 +1550,42 @@ export function registerTools(
         }
       }
 
+      // CORE-019 inv.3/CORE-020 signature (GTD 0ba9afa6): validated BEFORE
+      // the update lands, same discipline as the autopilot arm guard above —
+      // a rejected signature must not partially apply.
+      const pairingError = signaturePairingError(signed_norm, signed_norm_project_id);
+      if (pairingError) {
+        return { content: [{ type: "text", text: `Error: ${pairingError}` }], isError: true };
+      }
+      let resolvedSignedBy: string | undefined;
+      if (signed_norm !== undefined && signed_norm_project_id !== undefined) {
+        const { data: sigTarget } = await db
+          .from(GTD_TABLE)
+          .select("owner")
+          .eq("id", id)
+          .maybeSingle();
+        const targetOwner: string | undefined = owner ?? (sigTarget as { owner?: string } | null)?.owner;
+        const eligible = isCrossOwnerWrite(selfSlug, targetOwner) && targetOwner !== undefined && (await isHumanRecipient(db, targetOwner ?? ""));
+        if (!eligible) {
+          return {
+            content: [
+              { type: "text", text: `Error: signed_norm only applies to a cross-owner write on a human-owned item (CORE-019 inv.3) — item id='${id}' owner='${targetOwner ?? "unknown"}' does not qualify (either you are the owner, or the owner is not a registered human recipient).` },
+            ],
+            isError: true,
+          };
+        }
+        const resolveError = await resolveSignedNormCode(selfSlug, isLoomy, db, signed_norm_project_id, signed_norm);
+        if (resolveError) {
+          return { content: [{ type: "text", text: `Error: signed_norm '${signed_norm}' does not resolve: ${resolveError}` }], isError: true };
+        }
+        resolvedSignedBy = selfSlug;
+      }
+
       const updates = buildGtdUpdatePayload({
         title, body, gtd_status, priority, deadline, waiting_on, owner,
         autopilot, autopilot_model, recurrence_days, block_scope, resume_hint,
         clarified_at: resolvedClarifiedAt, no_auto_arm,
+        ...(resolvedSignedBy !== undefined ? { signed_by: resolvedSignedBy, signed_norm } : {}),
       });
 
       let query = db
@@ -1504,7 +1623,11 @@ export function registerTools(
         content: [
           {
             type: "text",
-            text: JSON.stringify({ ok: true, ...data }, null, 2),
+            text: JSON.stringify(
+              { ok: true, ...data, ...(resolvedSignedBy !== undefined ? { signed: { signed_by: resolvedSignedBy, signed_norm } } : {}) },
+              null,
+              2
+            ),
           },
         ],
       };

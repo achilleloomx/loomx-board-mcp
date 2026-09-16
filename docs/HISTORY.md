@@ -4,6 +4,27 @@
 
 ---
 
+## Sessione #183 — 2026-09-16 (autopilot dispatch, GTD `0ba9afa6`, WI `000dc553`, modello sonnet)
+
+**Task — chiusura del punto 2 (firma ID+norma, CORE-019 inv.3/CORE-020).** Migrazione dba applicata e verificata (msg `fd4c518c`, seguito della sessione #182): `loomx_items` +`signed_by`/+`signed_norm` (CHECK pairing `loomx_items_signed_pairing_check`), `board_messages` +`signed_norm`. Cablata la scrittura.
+
+**Costruito (v0.32.10 — build non ancora bumpato in package.json, vedi nota):**
+- `gtd_update`: nuovi param opzionali `signed_norm`/`signed_norm_project_id` (obbligo di coppia — `signaturePairingError`, pura). Scrittura accettata **solo** quando la chiamata è una scrittura cross-owner (loomy/broker che agiscono su un item non proprio — `isCrossOwnerWrite`, pura) il cui owner (post-update) è un destinatario umano (`isHumanRecipient`, stesso predicato IA-009) — altrimenti rifiuto esplicito, mai un'accettazione silenziosa fuori scopo. Il codice norma è risolto **prima** dello UPDATE via `doc_item_resolve` reale (`resolveSignedNormCode`, stesso `runDocRw`+`docItemResolve` del tool `doc_item_resolve` — nessuna query diretta nuova). `signed_by` è sempre `selfSlug`, mai accettato dal chiamante ("mai il nome").
+- `board_send`: stessa coppia di param. Validazione (pairing + resolve) spostata **prima** dell'INSERT (era: prima si inviava, poi si valutava `humanRecipient` per l'auto_gtd) — un `signed_norm` respinto non deve mai risultare in un messaggio spedito senza firma sotto la falsa convinzione del chiamante di averla data. Accettato solo quando `to_agent` è un destinatario umano; `signed_norm` scritto nello stesso INSERT (mai un update separato).
+- Risposta di entrambi i tool porta `signed: {signed_by, signed_norm}` quando la firma è stata scritta (stesso pattern di `auto_gtd_forced`).
+
+**Verificato dal vivo (sola lettura, nessuna scrittura di test in produzione):** `doc_item_resolve(project_id="41086570-…" /*interface-agents*/, code="IA-009")` risolve a `27ab0c1b-d80e-4b75-aba2-273d3485d683` (item_type=decision, doc `dfc64651`) — lo stesso meccanismo che `resolveSignedNormCode` richiama, nessuna query nuova, nessun rischio non già coperto dal tool `doc_item_resolve` esistente.
+
+**Scope deciso, non un gap (D-136 §5): `project_retire`'s notify path e l'escalation message di `wi.ts` (D-135) restano INSERT grezzi senza `signed_norm`.** Non è un buco lasciato aperto: sono notifiche di sistema automatiche (un abbonato informato che il suo item è stato ritirato; un WI che risale l'organigramma), non un atto di delega deciso da un agente che cita la norma che lo autorizza — CORE-019 inv.3 riguarda la seconda categoria, non la prima. Il perimetro negoziato con loomy (msg `20a1ddb4`, "poi cablo la scrittura in gtd_update/board_send") era già esattamente questo — non allargato né ristretto. `ping` (raw insert separato da `board_send`, thin wrapper solo a parole) stesso ragionamento: un cold-wake nudge non è un atto delegato da firmare.
+
+**Verifiche.** `tsc` pulito, `npm run build` pulita, `npm test` **428/428** (+9 su sessione #182: `signaturePairingError`, `isCrossOwnerWrite`, `buildGtdUpdatePayload` signed_by/signed_norm passthrough). `strict-tool-args`: 75/75 tool (nessun tool nuovo, solo param aggiunti a due esistenti). `capability-parity`: verde, invariato.
+
+**Decisioni prese:** nessuna promossa a D-NNN (tecnica, dentro il perimetro già confermato da loomy) — la delimitazione di scope (project_retire/wi.ts/ping esclusi) è dichiarata sopra, non un contratto nuovo.
+**Blocchi / note:** nessuno. GTD `0ba9afa6` → chiuso a fine sessione (`wi_end`).
+**Prossima sessione:** nessuna aperta su questo filone. Se in futuro loomy decide che anche le notifiche di sistema (project_retire/wi escalation) devono citare una norma, serve prima la sua conferma sulla forma (quale norma cita un'azione automatica? — non è deducibile da qui, D-136 §5) prima di costruire.
+
+---
+
 ## Sessione #181 — 2026-09-16 (wake cold-start, msg loomy `1a2f2ef2`, WI `0d7058c3`, modello sonnet)
 
 **Task — ripresa dei punti 1, 2, 4 di GTD `72436ca3`**, sbloccati da loomy: il progetto cappello **Interface Agents** esiste (`41086570`, manifesto `dfc64651`, IA-000..012 `approved`, validati da Achille il 16/09), il progetto figlio Achille/Loomy esiste (`8a11fddc`, manifesto `6c0c5ddd`, IAL-000 `approved`/IAL-001 `proposed` segnaposto), e `loomx_role_cards.role_type` è live (dba, sessione precedente) con `loomy.role_type='interfaccia'` confermato dal vivo — l'unico agente di tipo interfaccia oggi.

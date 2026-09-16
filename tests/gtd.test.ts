@@ -4,7 +4,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 
-import { buildGtdUpdatePayload, brokerAutopilotArmBlocked, resolveBoardActorFilterCode, buildAutoGtdInsertPayload, buildProjectWarning, gtdQueryProjectCrossOwnerRead } from "../src/tools.ts";
+import { buildGtdUpdatePayload, brokerAutopilotArmBlocked, resolveBoardActorFilterCode, buildAutoGtdInsertPayload, buildProjectWarning, gtdQueryProjectCrossOwnerRead, signaturePairingError, isCrossOwnerWrite } from "../src/tools.ts";
 
 test("buildGtdUpdatePayload: body-only leaves gtd_status untouched (footgun regression)", () => {
   const updates = buildGtdUpdatePayload({ body: "just a note" });
@@ -249,4 +249,53 @@ test("gtdQueryProjectCrossOwnerRead: unresolved project (agent_id missing/null) 
     gtdQueryProjectCrossOwnerRead({ isLoomy: false, isBroker: false, selfSlug: "it-manager", projectOwnerAgentId: undefined }),
     false
   );
+});
+
+// CORE-019 inv.3/CORE-020 signature (GTD 0ba9afa6, migration dba msg fd4c518c,
+// GO loomy msg 20a1ddb4): gtd_update/board_send accept signed_norm paired
+// with signed_norm_project_id.
+test("signaturePairingError: both given is fine", () => {
+  assert.equal(signaturePairingError("IA-009", "11111111-1111-1111-1111-111111111111"), null);
+});
+
+test("signaturePairingError: neither given is fine (no signature intended)", () => {
+  assert.equal(signaturePairingError(undefined, undefined), null);
+});
+
+test("signaturePairingError: only signed_norm given is rejected", () => {
+  const err = signaturePairingError("IA-009", undefined);
+  assert.ok(err && /together/.test(err));
+});
+
+test("signaturePairingError: only signed_norm_project_id given is rejected", () => {
+  const err = signaturePairingError(undefined, "11111111-1111-1111-1111-111111111111");
+  assert.ok(err && /together/.test(err));
+});
+
+test("isCrossOwnerWrite: different owner is cross-owner", () => {
+  assert.equal(isCrossOwnerWrite("loomy", "achille"), true);
+});
+
+test("isCrossOwnerWrite: same owner is a self-write, not cross-owner", () => {
+  assert.equal(isCrossOwnerWrite("loomy", "loomy"), false);
+});
+
+test("isCrossOwnerWrite: no target owner (item not found) is never cross-owner", () => {
+  assert.equal(isCrossOwnerWrite("loomy", undefined), false);
+  assert.equal(isCrossOwnerWrite("loomy", null), false);
+});
+
+// buildGtdUpdatePayload: signed_by/signed_norm passthrough (written only
+// together by the caller in src/tools.ts, but the payload builder itself
+// stays a plain optional-field passthrough like every other field here).
+test("buildGtdUpdatePayload: signed_by/signed_norm omitted when not given", () => {
+  const updates = buildGtdUpdatePayload({ body: "note" });
+  assert.equal("signed_by" in updates, false);
+  assert.equal("signed_norm" in updates, false);
+});
+
+test("buildGtdUpdatePayload: signed_by/signed_norm included when given", () => {
+  const updates = buildGtdUpdatePayload({ signed_by: "loomy", signed_norm: "IA-009" });
+  assert.equal(updates.signed_by, "loomy");
+  assert.equal(updates.signed_norm, "IA-009");
 });
