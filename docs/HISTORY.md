@@ -24,6 +24,19 @@
 
 ---
 
+## Sessione #182 — 2026-09-16 (autopilot dispatch, GTD `0ba9afa6`, WI `2cbe9b73`, modello sonnet)
+
+**Task — seguito del punto 2 (firma ID+norma).** Loomy ha dato il GO (msg `20a1ddb4`) sulla forma minima proposta nella sessione #181: due colonne nullable su `loomx_items` (`signed_by` + `signed_norm`, da scrivere sempre in coppia) e `signed_norm` su `board_messages` (`from_agent` copre già l'ID). Correzione ricevuta: `IAL-001` non è più un segnaposto — verificato dal vivo (`doc_item_resolve`, progetto `8a11fddc`), è `approved` (titolo "Le soglie di Loomy sono i diritti che ha oggi").
+
+**Fatto:** ack del GO; inviata a dba la richiesta di migrazione standard (msg `3baf61d0`, D-005/PR su loomx-home-DBA): `ALTER TABLE loomx_items ADD signed_by text NULL, ADD signed_norm text NULL` + `CHECK (signed_by IS NULL) = (signed_norm IS NULL)`; `ALTER TABLE board_messages ADD signed_norm text NULL` (nessun CHECK di pairing lì — `from_agent` è già `NOT NULL` su ogni riga); nessuna colonna su `loomx_work_items`, come da istruzione esplicita di loomy. Dichiarato al dba che la validazione "il codice norma deve risolvere" resta lato tool (`doc_item_resolve`), non un FK/CHECK DB.
+
+**Nessuna scrittura di codice in questa sessione** — il cablaggio in `gtd_update`/`board_send` (scrittura cross-owner su item di proprietà umana) resta bloccato sulla migrazione.
+
+**Blocchi / note:** GTD `0ba9afa6` → `waiting`/`waiting_on=dba`, `autopilot=false` (nulla da fare finché la migrazione non è live).
+**Prossima sessione:** al via libera/migrazione applicata da dba — cablare la scrittura della firma in `gtd_update` (cross-owner su item umano) e nel percorso `board_send`/`project_retire` verso destinatari umani (stesso predicato `isHumanRecipient` di IA-009).
+
+---
+
 ## Sessione #180 — 2026-09-16 (autopilot dispatch, GTD `72436ca3`, WI `5c537573`, modello sonnet)
 
 **Task — «[deploy agente interfaccia] board-mcp»: norme interfaccia sempre importate, firma ID+norma, messaggi alla persona come GTD** (mandato loomy, CORE-019/CORE-020 ratificate da Achille il 16/09). Perimetro dichiarato di 4 punti nel corpo del GTD, ma con una dipendenza esplicita: "tipo di ruolo interfaccia" posato da dba (GTD `25de1ec8`).
