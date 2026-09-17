@@ -1778,6 +1778,63 @@ test("side_effects_log auto-derive: nothing to derive → no fake-empty entry lo
   assert.equal(log.length, 0);
 });
 
+test("side_effects_log auto-derive: gtd_follow_on from created_by_wi_id appended on done close (source 3, GTD 8332ff1b)", async () => {
+  const store: Store = {
+    loomx_items: [
+      { id: "gtd-1", owner: "app", gtd_status: "in_progress" },
+      { id: "gtd-2", owner: "app", title: "Follow-on A", gtd_status: "next_action", created_by_wi_id: "wi-1" },
+      { id: "gtd-3", owner: "app", title: "Follow-on B", gtd_status: "next_action", created_by_wi_id: "wi-1" },
+      { id: "gtd-4", owner: "app", title: "Unrelated item", gtd_status: "next_action", created_by_wi_id: "wi-other" },
+    ],
+    loomx_work_items: [
+      {
+        id: "wi-1",
+        agent_slug: "app",
+        gtd_item_id: "gtd-1",
+        status: "active",
+        side_effects_log: [],
+        template_name: "session-meta", // ephemeral — skips D-074 gate
+      },
+    ],
+    doc_item_wi_links: [],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "done" }, ctxOwn);
+  assert.equal(res.ok, true);
+  const log = store.loomx_work_items[0].side_effects_log as Array<Record<string, unknown>>;
+  assert.equal(log.length, 1);
+  assert.equal(log[0].auto, true);
+  assert.equal(log[0].executed, true);
+  const payload = log[0].payload as Record<string, unknown>;
+  assert.equal(payload.type, "gtd_follow_on");
+  assert.equal(payload.count, 2);
+  assert.deepEqual(payload.items, [
+    { id: "gtd-2", title: "Follow-on A", gtd_status: "next_action" },
+    { id: "gtd-3", title: "Follow-on B", gtd_status: "next_action" },
+  ]);
+});
+
+test("side_effects_log auto-derive: gtd_follow_on also collected on a non-done close (waiting)", async () => {
+  const store: Store = {
+    loomx_items: [
+      { id: "gtd-1", owner: "app", gtd_status: "in_progress" },
+      { id: "gtd-2", owner: "app", title: "Follow-on", gtd_status: "next_action", created_by_wi_id: "wi-1" },
+    ],
+    loomx_work_items: [
+      { id: "wi-1", agent_slug: "app", gtd_item_id: "gtd-1", status: "active", side_effects_log: [] },
+    ],
+    doc_item_wi_links: [],
+  };
+  const db = makeDb(store);
+  const res = await wiEnd(db, { wi_id: "wi-1", status: "waiting" }, ctxOwn);
+  assert.equal(res.ok, true);
+  const log = store.loomx_work_items[0].side_effects_log as Array<Record<string, unknown>>;
+  assert.equal(log.length, 1);
+  const payload = log[0].payload as Record<string, unknown>;
+  assert.equal(payload.type, "gtd_follow_on");
+  assert.equal(payload.count, 1);
+});
+
 test("side_effects_log auto-derive: retro-compat — manual side_effects_pending entry stays auto-less, auto entries append alongside", async () => {
   const reqId = "req-uuid-903";
   const store: Store = {

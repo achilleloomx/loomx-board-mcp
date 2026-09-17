@@ -112,6 +112,42 @@ async function fetchWiDocLinksSafe(
   }
 }
 
+// side_effects_log auto-derivation source 3 (GTD 8332ff1b, it-manager msg
+// 9a7729df "strada 2" — dba applied created_by_wi_id, msg 0f3d05e5): GTD
+// follow-ons stamped with this WI's id by gtd_add (loomx_items is a plain
+// board table, not RLS-gated behind doc_rw like doc_item_wi_links — queried
+// directly with the board client). Non-blocking, same contract as
+// fetchWiDocLinksSafe: a lookup failure must never take wi_end down with it.
+export interface WiGtdFollowOnInfo {
+  id: string;
+  title: string;
+  gtd_status: string;
+}
+
+async function fetchGtdFollowOnsSafe(
+  db: SupabaseClient,
+  wiId: string
+): Promise<WiGtdFollowOnInfo[]> {
+  try {
+    const { data, error } = await db
+      .from(GTD_TABLE)
+      .select("id, title, gtd_status")
+      .eq("created_by_wi_id", wiId);
+    if (error) {
+      process.stderr.write(
+        `[wi_end][side_effects_log] created_by_wi_id fetch failed (non-blocking): ${error.message}\n`
+      );
+      return [];
+    }
+    return Array.isArray(data) ? (data as WiGtdFollowOnInfo[]) : [];
+  } catch (e) {
+    process.stderr.write(
+      `[wi_end][side_effects_log] created_by_wi_id fetch threw (non-blocking): ${(e as Error).message}\n`
+    );
+    return [];
+  }
+}
+
 // Gate D-074 (REQ-033): durable WI must have at least one REQ or SDES linked
 // via doc_item_wi_links before it can be closed as done.
 async function checkDurableGate(
@@ -671,6 +707,7 @@ export async function wiEnd(
   } else {
     wiDocLinks = await fetchWiDocLinksSafe(runDoc, row.agent_slug, args.wi_id);
   }
+  const gtdFollowOns = await fetchGtdFollowOnsSafe(db, args.wi_id);
 
   const newWiStatus = mapEndStatus(args.status);
   const newGtdStatus = mapEndToGtdStatus(args.status);
@@ -712,6 +749,18 @@ export async function wiEnd(
         type: "doc_item_wi_links",
         links: wiDocLinks.map((l) => ({ doc_item_id: l.doc_item_id, item_type: l.item_type, code: l.code })),
         count: wiDocLinks.length,
+      },
+    });
+  }
+  if (gtdFollowOns.length > 0) {
+    autoEntries.push({
+      auto: true,
+      executed: true,
+      scheduled_at: now,
+      payload: {
+        type: "gtd_follow_on",
+        items: gtdFollowOns.map((g) => ({ id: g.id, title: g.title, gtd_status: g.gtd_status })),
+        count: gtdFollowOns.length,
       },
     });
   }

@@ -1356,6 +1356,28 @@ export function registerTools(
         source: source ?? null,
         source_ref: source_ref ?? null,
       };
+
+      // created_by_wi_id (GTD 8332ff1b, side_effects_log auto-derivation
+      // source 3 — it-manager msg 9a7729df "strada 2"): stamp the CALLER's own
+      // active WI (selfSlug, not targetOwner) onto the new item. This is what
+      // lets wi_end later find "GTD follow-ons created during this WI" without
+      // a source_ref convention — source_ref is a generic dedup key (D-066)
+      // with no such contract. Best-effort: a lookup failure must never block
+      // item creation (dba confirmed column live, msg 0f3d05e5).
+      const { data: activeWiRows, error: activeWiErr } = await db
+        .from(WI_TABLE)
+        .select("id")
+        .eq("agent_slug", selfSlug)
+        .eq("status", "active")
+        .limit(1);
+      if (activeWiErr) {
+        process.stderr.write(
+          `[gtd_add][created_by_wi_id] active WI lookup failed (non-blocking): ${activeWiErr.message}\n`
+        );
+      } else if (Array.isArray(activeWiRows) && activeWiRows.length > 0) {
+        insertPayload.created_by_wi_id = (activeWiRows[0] as { id: string }).id;
+      }
+
       if (autopilot !== undefined) insertPayload.autopilot = autopilot;
       if (autopilot_model !== undefined) insertPayload.autopilot_model = autopilot_model;
       if (recurrence_days !== undefined) insertPayload.recurrence_days = recurrence_days;
@@ -1366,7 +1388,7 @@ export function registerTools(
       const { data, error } = await db
         .from(GTD_TABLE)
         .insert(insertPayload)
-        .select("id, title, gtd_status, owner, created_at")
+        .select("id, title, gtd_status, owner, created_at, created_by_wi_id")
         .maybeSingle();
 
       // D-066 race backstop: the pre-INSERT SELECT above is not atomic, so concurrent
