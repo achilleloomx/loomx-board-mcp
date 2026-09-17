@@ -768,7 +768,18 @@ export async function wiEnd(
 
   const update: Record<string, unknown> = {
     status: newWiStatus,
-    side_effects_log: newLog,
+    // JSON.stringify a JS array before it reaches pg-shim's plain client
+    // (direct-postgres backend, D-192 report pending): node-pg formats a bare
+    // JS array parameter using Postgres ARRAY-literal syntax, not JSON — fine
+    // for a genuine text[] column (e.g. board_messages.tags), but for a jsonb
+    // column an empty array silently becomes the text "{}" (which happens to
+    // parse as a valid, WRONG-shaped empty JSON object — no error, silent
+    // corruption) and a non-empty array of objects becomes invalid JSON
+    // outright ("invalid input syntax for type json", hit live closing WI
+    // 5853c256, GTD 8332ff1b). A string parameter isn't touched by pg's array
+    // formatter — Postgres casts it to jsonb normally, same idiom docDb.ts
+    // already uses for its own SQL builder (`::jsonb` cast there).
+    side_effects_log: JSON.stringify(newLog),
   };
   // Only set ended_at for terminal statuses. wi_end --waiting maps to paused,
   // which is a suspension not a closure — consistent with wi_pause (no ended_at).

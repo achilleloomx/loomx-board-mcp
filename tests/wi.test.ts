@@ -89,7 +89,15 @@ function makeDb(store: Store, behaviour: Behaviour = {}): SupabaseClient {
       }
       if (op === "update") {
         const matched = applyFilters(store[table]);
-        matched.forEach((r) => Object.assign(r, updateData));
+        // wi.ts JSON.stringifies side_effects_log before handing it to the
+        // real pg client (jsonb-array footgun, see src/wi.ts comment) — mimic
+        // Postgres's jsonb round-trip here so the fake behaves like the real
+        // DB instead of storing a raw string.
+        const normalizedUpdate: Row = { ...updateData };
+        if (typeof normalizedUpdate.side_effects_log === "string") {
+          normalizedUpdate.side_effects_log = JSON.parse(normalizedUpdate.side_effects_log as string);
+        }
+        matched.forEach((r) => Object.assign(r, normalizedUpdate));
         const data = limitN != null ? matched.slice(0, limitN) : matched;
         return { data, error: null };
       }
