@@ -107,6 +107,46 @@ test("doc_staleness_query: a marking whose subscriber lives in a DIFFERENT proje
   assert.equal((res as any).data.markings.length, 0);
 });
 
+test("doc_staleness_query: project scoping is pushed before ORDER BY/LIMIT — a project's marking survives even when other projects' rows fill the global top-N window (it-manager msg 2e91632c)", async () => {
+  const store: Store = {};
+  seedProjects(store);
+  const db = makeDb(store);
+  const docId = uuid();
+  seedDocument(store, docId, PROJ_A);
+  const sdesId = uuid();
+  seedDocItem(store, sdesId, PROJ_A, docId, { item_type: "sdes_entry", code: "SDES-OLD" });
+  const uatId = uuid();
+  seedDocItem(store, uatId, PROJ_A, docId, { item_type: "uat_case", code: "UAT-OLD" });
+  const subId = uuid();
+  seedSubscription(store, subId, { subscriber_item_id: uatId, subscriber_project_id: PROJ_A, intent: "critical", target_item_id: sdesId });
+  // PROJ_A's own marking is the OLDEST by changed_at — first to fall out of
+  // any global top-N window ordered by changed_at DESC.
+  seedMarking(store, uuid(), { subscription_id: subId, target_item_id: sdesId, changed_at: "2026-01-01T00:00:00.000Z" });
+
+  // Flood a DIFFERENT project with markings newer than PROJ_A's, more than
+  // the default limit (50) — with the old code (global ORDER BY/LIMIT before
+  // the JS project filter) these alone fill the window and push PROJ_A's row
+  // out before it is ever looked at.
+  const otherProj = uuid();
+  const otherDocId = uuid();
+  seedDocument(store, otherDocId, otherProj);
+  for (let i = 0; i < 60; i++) {
+    const otherSdesId = uuid();
+    seedDocItem(store, otherSdesId, otherProj, otherDocId, { item_type: "sdes_entry", code: `SDES-OTHER-${i}` });
+    const otherUatId = uuid();
+    seedDocItem(store, otherUatId, otherProj, otherDocId, { item_type: "uat_case", code: `UAT-OTHER-${i}` });
+    const otherSubId = uuid();
+    seedSubscription(store, otherSubId, { subscriber_item_id: otherUatId, subscriber_project_id: otherProj, intent: "critical", target_item_id: otherSdesId });
+    seedMarking(store, uuid(), { subscription_id: otherSubId, target_item_id: otherSdesId, changed_at: `2026-06-01T00:00:${String(i).padStart(2, "0")}.000Z` });
+  }
+
+  const res = await docStalenessQuery(db, { project_id: PROJ_A }, ctx);
+  assert.ok(res.ok, JSON.stringify(res));
+  const data = (res as any).data;
+  assert.equal(data.markings.length, 1);
+  assert.equal(data.markings[0].subscriber_item_code, "UAT-OLD");
+});
+
 test("doc_staleness_query: missing governance params are reported, never silently defaulted", async () => {
   const store: Store = {};
   seedProjects(store);

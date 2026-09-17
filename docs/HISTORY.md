@@ -4,6 +4,30 @@
 
 ---
 
+## Sessione #188 — 2026-09-17 (autopilot cold-wake, WI `ddc782a2`, modello sonnet)
+
+**Task — wake `high` da it-manager (msg `2e91632c`): fix `loadMarkingsForProject` (staleness.ts).** dba ha isolato la causa reale del gap "doc_staleness_query 0/6, 1/6" della sessione #187 — **non è RLS**: `loadMarkingsForProject` leggeva `gov.doc_subscription_staleness` SENZA `WHERE subscriber_project_id`, ordinava `changed_at DESC`, applicava `LIMIT(limit+1)` e SOLO DOPO filtrava in JS sul progetto richiesto. Con identità privilegiate (loomy 200 righe open fleet-wide, board-mcp 105) le righe del progetto richiesto restavano fuori dalla finestra top-N globale prima del filtro — riprodotto esatto: loomy 0/6, board-mcp 1/6 su `metodo-ambient`.
+
+**Fix (`src/staleness.ts`, `loadMarkingsForProject`):** lo scoping per progetto ora è spinto PRIMA di `ORDER BY`/`LIMIT`. La tabella `gov.doc_subscription_staleness` non ha una colonna `subscriber_project_id` propria (vive su `gov.doc_subscriptions`), quindi lo scope si spinge risolvendo prima l'insieme delle sottoscrizioni del progetto (`gov.doc_subscriptions WHERE subscriber_project_id=<id>`) e poi filtrando le marcature per `subscription_id IN (...)` — solo dopo si applica `ORDER BY changed_at DESC LIMIT`. Nessuna finestra globale attraversa più il filtro di progetto. Beneficia anche `doc_decay_apply`, che riusa la stessa funzione.
+
+**Test di regressione aggiunto** (`tests/staleness.test.ts`): un progetto flooded con 60 marcature più recenti di un altro progetto (oltre il limite di default 50) — con il codice vecchio la marcatura del progetto bersaglio, la più vecchia, sarebbe stata esclusa dalla finestra globale prima ancora di essere valutata; col fix sopravvive. Suite intera verde: 439/439 test, build pulita.
+
+**Chiusura:** risposto a it-manager (`done`, ref al task) con l'esito; GTD issue `4e2e6c0d` (stesso item della sessione #187) chiuso in cascata da `wi_end`.
+
+---
+
+## Sessione #187 — 2026-09-17 (autopilot cold-wake, WI `9665eecd`+`e1a2c415`, modello sonnet)
+
+**Task — wake da loomy: RLS gap `doc_staleness_query` su metodo-ambient, stesso sintomo di REQ-DOCM-023 (sessione precedente, msg `aad49d3d`/`65059ca4`).** Riprodotto con identità board-mcp su `metodo-ambient` (7cc78a2d): a differenza del precedente (project-governance, board-mcp vedeva 45/45), qui la mia identità vede **1/6** marcature — le 5 sul documento Requisiti che loomy doveva chiudere restano invisibili anche a me. `doc_structure` conferma `open_staleness_markings:6` ma dichiara `visibility.member:false` per la mia identità, nonostante `project_list` confermi che il titolare (`agent_id`) del progetto è loomy stessa — il gap non è "loomy vs board-mcp", è che nessuna identità finora provata supera il filtro RLS SELECT su questo progetto.
+
+**Registrato come issue** (`/report-issue`, GTD `4e2e6c0d`, `tool/doc_staleness_query`, waiting_on=it-manager, linkato al progetto `agent-issue-tracker`) — non un workaround, un difetto per triage.
+
+**Follow-up nella stessa sessione (2 messaggi arrivati durante il lavoro, letti a `wi_end` via `pending_inbox`):** (1) loomy conferma una **terza istanza sistemica** (bni-puccini-doorprize) — non più un caso isolato, e chiede un export unico con la mia identità "che vede tutto". Risposto correggendo la premessa: la mia identità NON vede sempre tutto (45/45 su un progetto, 1/6 su un altro) — un export fatto così rischierebbe un falso-completo, l'esatto errore di "zero non dichiarato" che D-206/REQ-DOCM-012 vietano. Proposto invece un fix diretto dba sulla policy RLS. (2) loomy chiede di chiudere 2 marcature su `metodo-core` (REQ-017/018→DEL-003) con motivazioni già pronte (`no_impact`). Qui la LETTURA funziona (entrambe visibili con la mia identità), ma il tentativo di chiusura per suo conto è stato **rifiutato silenziosamente dalla RLS** (rilevato dalla rilettura D-132 interna al tool: `status` resta `open` dopo l'UPDATE) — `doc_staleness_close` è vincolato all'identità del subscriber (`doc_subscription_staleness_close_own`). Girati a loomy i due `staleness_id` pronti per chiuderli lei stessa. Issue GTD `4e2e6c0d` aggiornato con l'evidenza lato scrittura (stesso sintomo di fondo, causa diversa: policy UPDATE ≠ policy SELECT).
+
+**Nessuna modifica di codice.** Entrambi i WI chiusi `force_ephemeral` (diagnosi/comunicazione, nessun artefatto REQ/SDES/decision).
+
+---
+
 ## Sessione #186 — 2026-09-17 (autopilot dispatch, GTD `8332ff1b`, WI `5853c256`, modello sonnet)
 
 **Task — chiusura della terza fonte di `side_effects_log` (created_by_wi_id), sessione #184 lasciata `[attende dba]`.** dba ha confermato in inbox (msg `0f3d05e5`, ref al GTD) l'applicazione in produzione della colonna `loomx_items.created_by_wi_id` (nullable, FK `loomx_work_items(id)` ON DELETE SET NULL, indice parziale, dual-apply verificato end-to-end su entrambi i lati) — con l'avvertenza esplicita di non confondere con `blocks_wi`, colonna preesistente sulla stessa tabella verso lo stesso target ma con semantica diversa.

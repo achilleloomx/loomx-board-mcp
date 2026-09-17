@@ -117,19 +117,44 @@ async function loadCurrentVersions(
 
 // Shared by docStalenessQuery and docDecayApply: load the open/closed staleness
 // markings whose SUBSCRIBER lives in project_id, joined to the subscription row.
-// No SQL JOIN in the pg-shim query builder — resolved in two round trips and
-// filtered in JS, same pattern doc_query uses for traceability checks.
+// No SQL JOIN in the pg-shim query builder — resolved in two round trips.
+//
+// Project scoping MUST happen before ORDER BY/LIMIT on the staleness table,
+// not after (it-manager msg 2e91632c-0c68-42c9-928a-391cbb11355d, dba
+// root-cause): gov.doc_subscription_staleness has no subscriber_project_id
+// column of its own — that lives on gov.doc_subscriptions — so the only way
+// to push the scope down is to resolve THIS project's subscription ids first
+// and filter staleness rows by subscription_id membership before the top-N
+// window is taken. The old code ordered+limited the GLOBAL staleness feed
+// first and filtered in JS only after: a privileged identity's global feed
+// (loomy 200 open rows fleet-wide, board-mcp 105) pushed this project's rows
+// out of the top-N window before the JS filter ever saw them — reproduced
+// exact: loomy 0/6, board-mcp 1/6 on progetto metodo-ambient.
 async function loadMarkingsForProject(
   db: SupabaseClient,
   projectId: string,
   status: "open" | "closed" | "all",
   limit: number
 ): Promise<DocResult<{ markings: StalenessRow[]; subs: Map<string, SubscriptionRow>; truncated: boolean }>> {
+  const { data: subRows, error: subErr } = await db
+    .from(GOV_SUBSCRIPTIONS)
+    .select("id, subscriber_item_id, subscriber_project_id, intent, target_item_id, target_document_id, status, subscribed_at_version")
+    .eq("subscriber_project_id", projectId);
+  if (subErr) return err(`Failed to resolve subscriptions for project ${projectId}: ${subErr.message}`);
+  const subsById = new Map<string, SubscriptionRow>();
+  for (const s of (subRows ?? []) as SubscriptionRow[]) subsById.set(s.id, s);
+  const subIds = [...subsById.keys()];
+
+  if (subIds.length === 0) {
+    return { ok: true, data: { markings: [], subs: subsById, truncated: false } };
+  }
+
   let q = db
     .from(GOV_STALENESS)
     .select(
       "id, subscription_id, target_item_id, op, changed_columns, changed_at, detection_source, changed_by, status, closed_outcome, closed_note, closed_at, closed_by, detected_at"
-    );
+    )
+    .in("subscription_id", subIds);
   if (status !== "all") q = q.eq("status", status);
   const { data, error } = await q.order("changed_at", { ascending: false }).limit(limit + 1);
   if (error) return err(`Failed to read gov.doc_subscription_staleness: ${error.message}`);
@@ -137,19 +162,7 @@ async function loadMarkingsForProject(
   const truncated = all.length > limit;
   const page = truncated ? all.slice(0, limit) : all;
 
-  const subIds = [...new Set(page.map((r) => r.subscription_id))];
-  const subsById = new Map<string, SubscriptionRow>();
-  if (subIds.length > 0) {
-    const { data: subRows, error: subErr } = await db
-      .from(GOV_SUBSCRIPTIONS)
-      .select("id, subscriber_item_id, subscriber_project_id, intent, target_item_id, target_document_id, status, subscribed_at_version")
-      .in("id", subIds);
-    if (subErr) return err(`Failed to resolve subscriptions for staleness markings: ${subErr.message}`);
-    for (const s of (subRows ?? []) as SubscriptionRow[]) subsById.set(s.id, s);
-  }
-
-  const scoped = page.filter((r) => subsById.get(r.subscription_id)?.subscriber_project_id === projectId);
-  return { ok: true, data: { markings: scoped, subs: subsById, truncated: truncated && scoped.length === page.length } };
+  return { ok: true, data: { markings: page, subs: subsById, truncated } };
 }
 
 async function loadDoc_items(db: SupabaseClient, ids: string[]): Promise<Map<string, DocItemRow>> {
