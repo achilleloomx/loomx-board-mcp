@@ -4,6 +4,20 @@
 
 ---
 
+## Sessione #189 — 2026-09-18 (wake cold-start, msg loomy `8c86ba26`, WI `ee0384cd`, modello sonnet)
+
+**Task — wake `normal` da loomy: alert monitoring `[git-remote-drift]` — HEAD locale diverso da origin da >24h.** Probe `git_remote_drift_scan.py` segnalava locale `3816ff3` / remote `c80078e` sullo stesso branch `master`, stessa divergenza da almeno 24h — origine dichiarata dal probe: GTD `7ef80b9d` (l'incidente D-237/D-244 di 3 mesi fa, storie non correlate).
+
+**Verificato (non solo per lettura del codice):** `git fetch` + `git merge-base HEAD origin/master` → risultato = `origin/master` stesso, cioè origin/master è un **antenato** di HEAD (fast-forward puro, zero commit divergenti dal lato remoto — `git log HEAD..origin/master` vuoto). Non è una recidiva di D-237 (storie non correlate): D-244 (sessione #142, 2026-08-29) aveva già eseguito il cutover firmato da Achille, e da lì la storia è unica. Il drift era semplicemente **30 commit locali mai pushati** dopo la sessione #142 (`b89ba78`, v0.29.0) fino a HEAD (`3816ff3`, v0.32.13) — lavoro reale, non un push/pull mancato per errore, solo mai spinto su origin nel frattempo.
+
+**Azione:** `git push origin master:master` — fast-forward `c80078e..3816ff3`, nessun force. Verificato con un secondo `fetch`: `HEAD` locale e `origin/master` combaciano byte per byte.
+
+**Pulizia collaterale:** trovati 2 GTD ancora `waiting` che referenziavano il vecchio problema D-237 pre-cutover (`fb59452d` "storie non correlate", `9cb2945b` "istruttoria riconciliazione per loomy/Achille") — mai chiusi dopo che D-244 li aveva di fatto superati il 29/08 (vedi riga 771 di questo file: "D-244 chiusa, verificata da loomy... nessuna azione board-mcp richiesta"). Chiusi entrambi (`gtd_complete`) — nessun'altra azione necessaria, la sintesi che chiedevano non serve più (Achille aveva già deciso/firmato il cutover diretto, non un merge dichiarato).
+
+**Chiusura:** ack sul messaggio di wake; risposto a loomy (`done`, ref `8c86ba26`) con l'esito (drift benigno, pushato, 2 GTD stale chiusi). Nessuna decisione nuova, nessun impatto su altri agenti.
+
+---
+
 ## Sessione #188 — 2026-09-17 (autopilot cold-wake, WI `ddc782a2`, modello sonnet)
 
 **Task — wake `high` da it-manager (msg `2e91632c`): fix `loadMarkingsForProject` (staleness.ts).** dba ha isolato la causa reale del gap "doc_staleness_query 0/6, 1/6" della sessione #187 — **non è RLS**: `loadMarkingsForProject` leggeva `gov.doc_subscription_staleness` SENZA `WHERE subscriber_project_id`, ordinava `changed_at DESC`, applicava `LIMIT(limit+1)` e SOLO DOPO filtrava in JS sul progetto richiesto. Con identità privilegiate (loomy 200 righe open fleet-wide, board-mcp 105) le righe del progetto richiesto restavano fuori dalla finestra top-N globale prima del filtro — riprodotto esatto: loomy 0/6, board-mcp 1/6 su `metodo-ambient`.
