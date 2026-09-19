@@ -11,6 +11,13 @@ import { runDocRw, type DocRwDb } from "./docDb.js";
 import { rwGuardsEnabled } from "./flags.js";
 import { computePendingInbox, type PendingInboxInfo, computePendingWakes, type PendingWakesInfo } from "./pendingInbox.js";
 import { paginate } from "./pagination.js";
+import {
+  prepareWiNorms,
+  commitWiNorms,
+  type WiNormsDeps,
+  type WiNormsFields,
+  type PreparedWiNorms,
+} from "./sessionNorms.js";
 
 const WI_TABLE = "loomx_work_items";
 const GTD_TABLE = "loomx_items";
@@ -369,6 +376,10 @@ interface WiContext {
   // any future non-board-aware caller) simply skip both features (no-op).
   slugToCode?: Map<string, string>;
   codeToSlug?: Map<string, string>;
+  // T2 minimo (SDES-005 v1): present ONLY when LOOMX_WI_NORMS covers this
+  // agent (tools.ts decides). Absent → wi_start/wi_resume are byte-for-byte
+  // today's: no RPC, no extra response keys, no registry write.
+  norms?: WiNormsDeps;
 }
 
 // --- helpers -------------------------------------------------------------
@@ -423,7 +434,7 @@ export async function wiStart(
   db: SupabaseClient,
   args: WiStartArgs,
   ctx: WiContext
-): Promise<WiResult<{ wi_id: string; gtd_item_id: string; gtd_created: boolean; template_warning?: string }>> {
+): Promise<WiResult<{ wi_id: string; gtd_item_id: string; gtd_created: boolean; template_warning?: string } & WiNormsFields>> {
   const agentSlug = args.agent_slug ?? ctx.selfSlug;
   if (agentSlug !== ctx.selfSlug && !ctx.isLoomy) {
     return { ok: false, error: `Only loomy can open a WI for another agent (requested ${agentSlug}).` };
@@ -437,6 +448,17 @@ export async function wiStart(
       ok: false,
       error: `Agent "${agentSlug}" already has an active WI (${active.id}). Use wi_switch, wi_pause, or wi_end first.`,
     };
+  }
+
+  // SDES-005 v1: due Decisions for this work, diffed against the session's
+  // current epoch. Only for one's own WI (the session is the caller's, not the
+  // agent loomy opens a WI for). Computed BEFORE any write so the REQ-032 hard
+  // phase (flag, off) can refuse without leaving a GTD/WI behind.
+  const normsDeps = agentSlug === ctx.selfSlug ? ctx.norms : undefined;
+  let preparedNorms: PreparedWiNorms | null = null;
+  if (normsDeps) {
+    preparedNorms = await prepareWiNorms(db, normsDeps, agentSlug, args.gtd_item_id);
+    if (preparedNorms.kind === "refused") return { ok: false, error: preparedNorms.error };
   }
 
   // Resolve or create the linked GTD item.
@@ -484,6 +506,11 @@ export async function wiStart(
     pre_conditions: args.pre_conditions ?? {},
     session_id: args.session_id ?? null,
   };
+  // The epoch the due set was diffed against — wi_resume recomputes the
+  // difference only when this has changed.
+  if (preparedNorms?.kind === "ready" && preparedNorms.session) {
+    insertPayload.in_flight_state = { norms_session: preparedNorms.session };
+  }
 
   const { data: wiRow, error: wiErr } = await db
     .from(WI_TABLE)
@@ -495,13 +522,25 @@ export async function wiStart(
     return { ok: false, error: `Failed to open WI: ${wiErr?.message ?? "no row returned"}` };
   }
 
+  const wiId = (wiRow as { id: string }).id;
+  let normsFields: WiNormsFields = {};
+  if (normsDeps && preparedNorms) {
+    normsFields =
+      preparedNorms.kind === "ready"
+        ? await commitWiNorms(normsDeps, preparedNorms, wiId, true)
+        : preparedNorms.kind === "unavailable"
+          ? preparedNorms.fields
+          : {};
+  }
+
   return {
     ok: true,
     data: {
-      wi_id: (wiRow as { id: string }).id,
+      wi_id: wiId,
       gtd_item_id: gtdId!,
       gtd_created: gtdCreated,
       ...(templateWarning ? { template_warning: templateWarning } : {}),
+      ...normsFields,
     },
   };
 }
@@ -1257,15 +1296,20 @@ export async function wiResume(
   db: SupabaseClient,
   args: { wi_id: string },
   ctx: WiContext
-): Promise<WiResult<{ wi_id: string; status: WiStatus }>> {
+): Promise<WiResult<{ wi_id: string; status: WiStatus; norms_epoch_unchanged?: boolean } & WiNormsFields>> {
   const { data: wi, error: findErr } = await db
     .from(WI_TABLE)
-    .select("id, agent_slug, status")
+    .select("id, agent_slug, status, gtd_item_id, in_flight_state")
     .eq("id", args.wi_id)
     .maybeSingle();
   if (findErr || !wi) return { ok: false, error: `WI '${args.wi_id}' not found. Use wi_query to list your WIs.` };
 
-  const row = wi as { agent_slug: string; status: WiStatus };
+  const row = wi as {
+    agent_slug: string;
+    status: WiStatus;
+    gtd_item_id: string | null;
+    in_flight_state: Record<string, unknown> | null;
+  };
   if (row.agent_slug !== ctx.selfSlug && !ctx.isLoomy) {
     return { ok: false, error: `Cannot resume WI owned by ${row.agent_slug}.` };
   }
@@ -1279,13 +1323,37 @@ export async function wiResume(
     return { ok: false, error: `Agent already has an active WI (${active.id}). Close or pause it first.` };
   }
 
+  // SDES-005 v1 / dba Q1: a resume NEVER rewrites gov.wi_norms, and recomputes
+  // the difference only if the session epoch changed since the due set was
+  // last diffed (same epoch → the agent still holds what wi_start delivered).
+  const normsDeps = row.agent_slug === ctx.selfSlug ? ctx.norms : undefined;
+  let normsFields: WiNormsFields & { norms_epoch_unchanged?: boolean } = {};
+  let newState: Record<string, unknown> | null = null;
+  if (normsDeps) {
+    const prepared = await prepareWiNorms(db, normsDeps, row.agent_slug, row.gtd_item_id ?? undefined);
+    if (prepared.kind === "refused") return { ok: false, error: prepared.error };
+    if (prepared.kind === "unavailable") {
+      normsFields = prepared.fields;
+    } else {
+      const prev = (row.in_flight_state?.norms_session ?? null) as { id?: unknown; epoch?: unknown } | null;
+      const same =
+        !!prev && !!prepared.session && prev.id === prepared.session.id && Number(prev.epoch) === prepared.session.epoch;
+      if (same) {
+        normsFields = { norms_epoch_unchanged: true, norms_session: prepared.session };
+      } else {
+        normsFields = await commitWiNorms(normsDeps, prepared, args.wi_id, false);
+        if (prepared.session) newState = { ...(row.in_flight_state ?? {}), norms_session: prepared.session };
+      }
+    }
+  }
+
   const { error: updErr } = await db
     .from(WI_TABLE)
-    .update({ status: "active" as WiStatus })
+    .update({ status: "active" as WiStatus, ...(newState ? { in_flight_state: newState } : {}) })
     .eq("id", args.wi_id);
   if (updErr) return { ok: false, error: updErr.message };
 
-  return { ok: true, data: { wi_id: args.wi_id, status: "active" } };
+  return { ok: true, data: { wi_id: args.wi_id, status: "active", ...normsFields } };
 }
 
 // --- wi_switch -----------------------------------------------------------

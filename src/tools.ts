@@ -9,7 +9,9 @@ import {
   DB_ITEM_TYPES,
   DB_DOC_ITEM_LINK_TYPES,
 } from "./docTypes.js";
-import { rwGuardsEnabled, modelGuardsEnabled } from "./flags.js";
+import { rwGuardsEnabled, modelGuardsEnabled, wiNormsEnabledFor, wiNormsHardGateFor } from "./flags.js";
+import { runDocRw } from "./docDb.js";
+import { makeDocRwSessionStore, processHostInfo } from "./sessionNorms.js";
 import { SUBSCRIBE_INTENTS, SUBSCRIPTION_OUTCOMES, BUMP_CLASSES } from "./subscriptions.js";
 import { STALENESS_STATUS_FILTERS, STALENESS_CLOSE_OUTCOMES } from "./staleness.js";
 import { FACT_SYNC_RELATIONS, MAX_FACT_SYNC_LINKS } from "./factSync.js";
@@ -3184,19 +3186,38 @@ export function registerTools(
   // D-118: slugToCode/codeToSlug let wi.ts's inbox-pending guard (a+) and
   // auto-set waiting_on heuristic (a) query board_messages (keyed by agent
   // code) without duplicating the registry lookup.
-  const wiCtx = { selfSlug, isLoomy, slugToCode, codeToSlug };
+  // T2 minimo (SDES-001 v1 / SDES-005 v1): one session store + host info per
+  // process. The store writes under doc_rw with this instance's slug in the GUC.
+  // `norms` is attached to the WI context ONLY when LOOMX_WI_NORMS covers this
+  // agent — otherwise wi_start/wi_resume are exactly today's.
+  const sessionStore = makeDocRwSessionStore(selfSlug, runDocRw);
+  const sessionHost = processHostInfo();
+  const wiCtx = {
+    selfSlug,
+    isLoomy,
+    slugToCode,
+    codeToSlug,
+    ...(wiNormsEnabledFor(selfSlug)
+      ? { norms: { store: sessionStore, host: sessionHost, hardGate: wiNormsHardGateFor(selfSlug) } }
+      : {}),
+  };
 
   // --- agent_context ---
   server.tool(
     "agent_context",
-    "SDES-001 (progetto frame-method-as-service, MaaS fase 0). No parameters — identity is always the caller's own (ctx.selfSlug), never an input. " +
-      "One-call orientation payload: agent (slug+identity), role (same module org_lookup(agent=self) uses), constitution (single RPC gov.applicable_norms(p_agent) — fail-open with constitution_unavailable if the function is missing or not grantable to this role; never a TS-side query over decision rows, REQ-009), " +
-      "work (active WI, armed_gtd top-5 + next_actions top-5 as separate lists, no body, pending_inbox/pending_wakes D-205/D-238), and session_hints. payload_version \"0\".",
+    "SDES-001 v1 (progetto frame-method-as-service). No parameters — identity is always the caller's own (ctx.selfSlug), never an input. " +
+      "One-call orientation payload: agent (slug+identity), role (same module org_lookup(agent=self) uses), session {id, epoch}, " +
+      "critical_core {norms[{code,title,summary,version,grade,grade_source,source}], critical_threads, critical_core_unpublished[], critical_registry_empty, core_bytes} — the Decisions published by the Threads the container registry marks critical, from ONE RPC call (never a TS-side query over decision rows, REQ-009; no body anywhere), " +
+      "work (active WI, armed_gtd top-5 + next_actions top-5 as separate lists, no body, pending_inbox/pending_wakes D-205/D-238), and session_hints. " +
+      "Calling it re-delivers the core inside the session's CURRENT epoch and records it in the session registry (idempotent) — it never opens a new epoch: the SessionStart hook does (board-cli agent-context). " +
+      "Fail-open: critical_core:null + critical_core_unavailable, session:null + session_unavailable. `constitution` is deprecated for one cycle ({deprecated:true, see:'critical_core'}). payload_version \"1\".",
     {},
     async () => {
       const { agentContext } = await import("./agentContext.js");
       const db = getSupabaseClient();
-      return toText(await agentContext(db, { selfSlug, slugToCode, codeToSlug }));
+      return toText(
+        await agentContext(db, { selfSlug, slugToCode, codeToSlug }, { kind: "current", store: sessionStore, host: sessionHost })
+      );
     }
   );
 
@@ -3204,7 +3225,8 @@ export function registerTools(
   server.tool(
     "wi_start",
     "Open a new Work Item. If gtd_item_id is given, the linked GTD moves to in_progress; otherwise a GTD is auto-created with owner=agent_slug and title=intent. " +
-      "template_name is soft-warn validated against the WI templates catalog when WI_TEMPLATES_PATH is configured (template_warning in response) — never blocks (grace period, GTD f67f9524).",
+      "template_name is soft-warn validated against the WI templates catalog when WI_TEMPLATES_PATH is configured (template_warning in response) — never blocks (grace period, GTD f67f9524). " +
+      "SDES-005 v1 (only for agents covered by LOOMX_WI_NORMS — pilots by default; everyone else gets exactly the response above): the response also carries the Decisions due for this work as a DIFFERENCE against the session's current epoch — delivered[] (new or version-changed, no body), already_in_session[] (codes only), critical_core_delivered_at_wi_start (REQ-032 grace: true when the critical core had to be delivered here), houses_unresolved, critical_core_unpublished, critical_registry_empty, list_bytes. The whole due set is recorded per WI. RPC down → norms_unavailable, the WI opens anyway.",
     {
       intent: z.string().min(1).describe("Human-readable intent (becomes GTD title if none provided)"),
       agent_slug: z.string().optional().describe(`Agent slug (default: ${selfSlug}). Only loomy can open for another agent.`),
@@ -3385,7 +3407,7 @@ export function registerTools(
   // --- wi_resume ---
   server.tool(
     "wi_resume",
-    "Resume a paused WI. Fails if another active WI already exists for the agent.",
+    "Resume a paused WI. Fails if another active WI already exists for the agent. SDES-005 v1 (agents covered by LOOMX_WI_NORMS only): never rewrites the WI's recorded due set; re-delivers the difference only if the session epoch changed since it was last computed (else norms_epoch_unchanged:true).",
     { wi_id: z.string().uuid().describe("Work Item id") },
     async (args) => {
       const { wiResume } = await import("./wi.js");

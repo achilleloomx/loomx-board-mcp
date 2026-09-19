@@ -129,7 +129,7 @@ async function loadCurrentVersions(
 // first and filtered in JS only after: a privileged identity's global feed
 // (loomy 200 open rows fleet-wide, board-mcp 105) pushed this project's rows
 // out of the top-N window before the JS filter ever saw them — reproduced
-// exact: loomy 0/6, board-mcp 1/6 on progetto metodo-ambient.
+// exact: loomy 0/6, board-mcp 1/6 on one governance Thread project (slug kept out of src/ on purpose: UAT-002 ramo C greps for it).
 async function loadMarkingsForProject(
   db: SupabaseClient,
   projectId: string,

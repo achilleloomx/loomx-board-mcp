@@ -1,9 +1,12 @@
 {
   "name": "loomx-board-mcp",
-  "version": "0.32.13",
+  "version": "0.33.0",
   "description": "Board MCP Server — inter-agent communication for LoomX Home",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "board-cli": "dist/cli.js"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsx src/index.ts",

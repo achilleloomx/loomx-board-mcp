@@ -32,3 +32,30 @@ export function rwGuardsEnabled(): boolean {
 export function modelGuardsEnabled(): boolean {
   return process.env.LOOMX_MODEL_GUARDS_ENABLED !== "0";
 }
+
+// T2 minimo (SDES-005 v1, REQ-032; task frame 1a7ed39d): delivery of the due
+// Decisions at wi_start/wi_resume. LOOMX_WI_NORMS = off | pilots | all,
+// default `pilots`; the pilot list is LOOMX_WI_NORMS_PILOTS (comma-separated
+// slugs). An agent the flag does not cover gets EXACTLY today's wi_start —
+// no RPC call, no extra keys, no registry write.
+const DEFAULT_WI_NORMS_PILOTS = ["dev-frame", "acme-lab", "analyst-pieroni"];
+
+function slugList(raw: string | undefined, fallback: string[]): string[] {
+  if (raw === undefined) return fallback;
+  return raw.split(",").map((s) => s.trim()).filter(Boolean);
+}
+
+export function wiNormsEnabledFor(slug: string): boolean {
+  const mode = (process.env.LOOMX_WI_NORMS ?? "pilots").trim().toLowerCase();
+  if (mode === "all") return true;
+  if (mode === "pilots") return slugList(process.env.LOOMX_WI_NORMS_PILOTS, DEFAULT_WI_NORMS_PILOTS).includes(slug);
+  // "off" and any unrecognized value: off (a typo must never widen a rollout).
+  return false;
+}
+
+// REQ-032 hard phase (T2-P6): wi_start REFUSES when the current epoch lacks the
+// critical core. Shipped OFF — empty list by default, named slugs only, and
+// only meaningful where wiNormsEnabledFor is already true. Grace is the default.
+export function wiNormsHardGateFor(slug: string): boolean {
+  return wiNormsEnabledFor(slug) && slugList(process.env.LOOMX_WI_NORMS_HARD_SLUGS, []).includes(slug);
+}

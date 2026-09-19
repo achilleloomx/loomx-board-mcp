@@ -31,28 +31,34 @@
 //   - no parameters, identity = ctx.selfSlug (never an input).
 //   - role: SAME module org_lookup(agent=self, question="card") uses —
 //     buildRoleCard below, shared by both call sites, not a duplicate.
-//   - constitution: ONE call to gov.applicable_norms(p_agent := self), every
-//     other parameter left to its SQL-side DEFAULT (NULL). Live now (dba msg
-//     bcd08fd2), but EXECUTE is granted to `doc_rw` only, on purpose — the
-//     native board-mcp role this tool runs under gets `permission denied`
-//     (measured live 2026-09-15). Fail-open already covers this exactly as
-//     it covered "function missing": constitution: null,
-//     constitution_unavailable: "gov.applicable_norms missing: <detail>".
-//     Not routing this call through the doc_rw transaction machinery here —
-//     that is an architectural change (this tool is not a doc_* tool) frame/
-//     dba should decide, not something to invent unilaterally (D-136 §5);
-//     flagged at delivery instead. Never a query built in TS against decision
-//     rows directly (REQ-009).
+//   - critical_core (v1, emendamento T2-P0 del 2026-09-19 — replaces v0's
+//     `constitution`, kept one cycle as {deprecated:true}): see the block
+//     above CriticalCore below. The RPC call itself lives in sessionNorms.ts.
+//   - session {id, epoch} (v1): the only write this tool makes is the session
+//     registry, through the SessionStore it is handed; see SessionMode.
 //   - work: active WI (findActiveForAgent) + GTD armed_gtd/next_actions (top
 //     5 each, no body — same omission the rest of the payload follows) +
 //     pending_inbox/pending_wakes (D-205/D-238, self-close semantics: caller
 //     IS the owner here by construction, so these are never the orphan-sweep
 //     `undefined`).
-//   - payload_version: "0". No free-text body anywhere in the response.
+//   - payload_version: "1". No free-text body anywhere in the response.
 
 import type { SupabaseClient } from "@supabase/supabase-js";
 import type { WiResult } from "./wi.js";
 import type { PendingInboxInfo, PendingWakesInfo, PendingInboxRegistry } from "./pendingInbox.js";
+import {
+  fetchApplicableNorms,
+  resolveCurrentSession,
+  compactNormLine,
+  bytesOf,
+  type Norm,
+  type NormSource,
+  type SessionStore,
+  type SessionRef,
+  type HostInfo,
+  type EpochTrigger,
+  type DeliveryForm,
+} from "./sessionNorms.js";
 
 const ROLE_CARDS_TABLE = "loomx_role_cards";
 const ORG_EDGES_TABLE = "loomx_org_edges";
@@ -137,25 +143,30 @@ export async function buildRoleCard(db: SupabaseClient, agentSlug: string): Prom
   };
 }
 
-// Single RPC, fail-open (SDES-001/005 contract per frame): the function may not
-// exist yet (dba building it in parallel) — never throws, never blocks the rest
-// of the payload, always names what happened.
-async function fetchConstitution(
-  db: SupabaseClient,
-  selfSlug: string
-): Promise<{ constitution: unknown[] | null; constitution_unavailable?: string }> {
-  try {
-    const { data, error } = await db.rpc("gov.applicable_norms", { p_agent: selfSlug });
-    if (error) {
-      process.stderr.write(`[agent_context] gov.applicable_norms unavailable (non-blocking): ${error.message}\n`);
-      return { constitution: null, constitution_unavailable: `gov.applicable_norms missing: ${error.message}` };
-    }
-    return { constitution: Array.isArray(data) ? data : data == null ? [] : [data] };
-  } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    process.stderr.write(`[agent_context] gov.applicable_norms threw (non-blocking): ${msg}\n`);
-    return { constitution: null, constitution_unavailable: `gov.applicable_norms missing: ${msg}` };
-  }
+// critical_core (SDES-001 v1): ONE call to the norms RPC with every parameter
+// but p_agent left NULL — the function then returns the critical core only
+// (Decisions published by the Threads the container registry marks
+// is_critical). Which Threads those are is never known to this code. The call
+// itself lives in sessionNorms.ts, shared with wi_start (REQ-009/UAT-014).
+// Fail-open: RPC missing or erroring → critical_core: null +
+// critical_core_unavailable, the rest of the payload stays useful.
+export interface CriticalCoreNorm {
+  code: string;
+  title: string | null;
+  summary: string | null;
+  version: string;
+  grade: number | null;
+  grade_source: string | null;
+  source: NormSource;
+}
+
+export interface CriticalCore {
+  norms: CriticalCoreNorm[];
+  critical_threads: string[];
+  critical_core_unpublished: string[];
+  critical_registry_empty: boolean;
+  core_bytes: number;
+  rpc_contract_version?: string;
 }
 
 interface ArmedGtdRow {
@@ -248,11 +259,15 @@ export interface SessionHints {
 }
 
 export interface AgentContextPayload {
-  payload_version: "0";
+  payload_version: "1";
   agent: AgentIdentity;
   role: RoleCardResult;
-  constitution: unknown[] | null;
-  constitution_unavailable?: string;
+  session: SessionRef | null;
+  session_unavailable?: string;
+  critical_core: CriticalCore | null;
+  critical_core_unavailable?: string;
+  // Deprecated for one cycle (SDES-001 v1), then removed.
+  constitution: { deprecated: true; see: "critical_core" };
   work: WorkResult;
   session_hints: SessionHints;
 }
@@ -263,26 +278,129 @@ export interface AgentContextCtx {
   codeToSlug: Map<string, string>;
 }
 
-export async function agentContext(db: SupabaseClient, ctx: AgentContextCtx): Promise<WiResult<AgentContextPayload>> {
+// How this call relates to the session registry:
+//   - "current": the MCP tool. Re-delivers inside the epoch the process is
+//     serving (idempotent on the registry key) — never opens a hook epoch.
+//   - "open": board-cli, run by the SessionStart hook. Every run opens a NEW
+//     epoch for that session_id (startup/resume/clear/compact).
+// Omitted → no registry at all (session: null, declared).
+export type SessionMode =
+  | { kind: "current"; store: SessionStore; host: HostInfo }
+  | { kind: "open"; store: SessionStore; sessionId: string; trigger: EpochTrigger; hostPid: number | null };
+
+function toCoreNorm(n: Norm): CriticalCoreNorm {
+  return {
+    code: n.code,
+    title: n.title,
+    summary: n.summary,
+    version: n.version,
+    grade: n.grade,
+    grade_source: n.grade_source,
+    source: n.source,
+  };
+}
+
+export async function agentContext(
+  db: SupabaseClient,
+  ctx: AgentContextCtx,
+  sessionMode?: SessionMode,
+  form: DeliveryForm = "full"
+): Promise<WiResult<AgentContextPayload>> {
   const roleRes = await buildRoleCard(db, ctx.selfSlug);
   if (!roleRes.ok) return roleRes;
 
   const now = new Date().toISOString();
-  const [constitutionRes, work] = await Promise.all([
-    fetchConstitution(db, ctx.selfSlug),
+  const [normsRes, work] = await Promise.all([
+    fetchApplicableNorms(db, ctx.selfSlug, null),
     fetchWork(db, ctx, ctx.selfSlug, now),
   ]);
+
+  let criticalCore: CriticalCore | null = null;
+  let criticalUnavailable: string | undefined;
+  let delivered: Norm[] = [];
+  if (normsRes.ok) {
+    delivered = normsRes.data.norms;
+    const norms = delivered.map(toCoreNorm);
+    criticalCore = {
+      norms,
+      critical_threads: normsRes.data.critical_threads,
+      critical_core_unpublished: normsRes.data.critical_core_unpublished,
+      critical_registry_empty: normsRes.data.critical_registry_empty,
+      // Weight of the core in the form actually delivered (T2-P7 measure).
+      core_bytes: form === "compact" ? bytesOf(delivered.map(compactNormLine).join("\n")) : bytesOf(norms),
+      ...(normsRes.data.rpc_contract_version ? { rpc_contract_version: normsRes.data.rpc_contract_version } : {}),
+    };
+  } else {
+    criticalUnavailable = normsRes.error;
+    process.stderr.write(`[agent_context] norms RPC unavailable (non-blocking): ${normsRes.error}\n`);
+  }
+
+  // The only write this tool ever makes. Never blocking (SDES-001 fail-open).
+  let session: SessionRef | null = null;
+  let sessionUnavailable: string | undefined;
+  if (!sessionMode) {
+    sessionUnavailable = "session registry not configured for this call";
+  } else {
+    try {
+      const ref =
+        sessionMode.kind === "open"
+          ? await sessionMode.store.openEpoch(sessionMode.sessionId, sessionMode.trigger, sessionMode.hostPid)
+          : await resolveCurrentSession(sessionMode.store, ctx.selfSlug, sessionMode.host);
+      session = { id: ref.id, epoch: ref.epoch };
+      await sessionMode.store.recordDelivered(session, delivered, form);
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      process.stderr.write(`[agent_context] session registry unavailable (non-blocking): ${msg}\n`);
+      // A delivery that could not be recorded is not a session: the next
+      // wi_start must see it as missing (REQ-032 grace covers it), not as held.
+      session = null;
+      sessionUnavailable = msg;
+    }
+  }
 
   return {
     ok: true,
     data: {
-      payload_version: "0",
+      payload_version: "1",
       agent: { slug: ctx.selfSlug, identity: ctx.slugToCode.get(ctx.selfSlug) ?? null },
       role: roleRes.data,
-      constitution: constitutionRes.constitution,
-      ...(constitutionRes.constitution_unavailable ? { constitution_unavailable: constitutionRes.constitution_unavailable } : {}),
+      session,
+      ...(sessionUnavailable ? { session_unavailable: sessionUnavailable } : {}),
+      critical_core: criticalCore,
+      ...(criticalUnavailable ? { critical_core_unavailable: criticalUnavailable } : {}),
+      constitution: { deprecated: true, see: "critical_core" },
       work,
       session_hints: { call_wi_start_before_writes: true, close_sequence: "AUTOPILOT_NORMS" },
     },
   };
+}
+
+// --compact (SDES-001 v1): short text for the SessionStart hook to print into
+// the context — role header (3 lines), one line per Decision, declared
+// absences. No bodies, no raw JSON.
+export function renderCompact(p: AgentContextPayload): string {
+  const lines: string[] = [];
+  const mission = p.role.role_card?.mission ?? "(nessuna role-card nel registro)";
+  lines.push(`[board] ${p.agent.slug} (${p.agent.identity ?? "?"}) — ${mission}`);
+  lines.push(`riporta a: ${p.role.reports_to ?? "—"} · umano: ${p.role.human_ref ?? "—"}`);
+  lines.push(
+    p.session
+      ? `sessione ${p.session.id} · epoca ${p.session.epoch}`
+      : `sessione non registrata: ${p.session_unavailable ?? "?"}`
+  );
+  if (!p.critical_core) {
+    lines.push(`NUCLEO CRITICO NON DISPONIBILE: ${p.critical_core_unavailable ?? "?"} — richiama agent_context() appena possibile.`);
+    return lines.join("\n");
+  }
+  const cc = p.critical_core;
+  lines.push(`Nucleo critico — ${cc.norms.length} Decisioni (dettaglio di un codice: doc_item_resolve):`);
+  for (const n of cc.norms) {
+    lines.push(compactNormLine({ ...n, sources: [] }));
+  }
+  if (cc.critical_registry_empty) lines.push("Assenza dichiarata: il registro dei contenitori non marca alcun Thread critico.");
+  if (cc.critical_core_unpublished.length > 0) {
+    lines.push(`Assenza dichiarata: Thread critici senza pubblicazione → ${cc.critical_core_unpublished.join(", ")}`);
+  }
+  if (cc.rpc_contract_version) lines.push(`(RPC ancora a contratto ${cc.rpc_contract_version}: registro dei contenitori non ancora in uso)`);
+  return lines.join("\n");
 }

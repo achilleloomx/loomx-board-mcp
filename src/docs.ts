@@ -1812,7 +1812,7 @@ export interface TerminalStatusesResult {
 
 // Single source of truth for "is this doc_item terminal" — reads
 // gov.doc_m5_terminal_statuses() (SECURITY DEFINER-equivalent config read,
-// same RPC-schema-qualified pattern as gov.applicable_norms) instead of
+// same RPC-schema-qualified pattern as the norms RPC (sessionNorms.ts)) instead of
 // re-declaring the list, so doc_item_retire/project_retire can never diverge
 // from what the DB trigger actually enforces (the divergence dba measured:
 // this file used to hardcode 'rejected' as terminal, the DB parameter

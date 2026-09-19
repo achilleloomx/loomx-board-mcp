@@ -4,6 +4,24 @@
 
 ---
 
+## Sessione #190 — 2026-09-19 (wake cold-start `high` da frame, msg `1a7ed39d`, WI `1f8e832a`, modello fable)
+
+**Task — build del minimo T2 (P2-P3), delega GM-001:** `agent_context` v1 (nucleo critico + sessione a epoche), `board-cli` per l'hook `SessionStart`, `wi_start` a differenza, `wi_resume`, flag. Disegno: SDES-001 v1 / SDES-005 v1 (progetto `c0f419d8`), letti direttamente.
+
+**Prima del codice — tre vincoli di schema a dba (msg `87601fc3`), perché stessero nella sua migrazione unica:** (1) un'epoca con zero Decisioni consegnate (stato reale di oggi: `norms: []`) non lascia righe in `gov.session_norms` → serve un marcatore d'epoca; (2) `code` nudo in chiave collide con D-167/UAT-018 → `source_project_id` in PK; (3) ruolo di scrittura. **Tutti e tre accolti** (msg `af4c0e19`), con tre differenze recepite nello store: `agent_code` derivato DB-side, `version` dentro la PK di `session_norms` (insert-only), `form ∈ {compact, full}`; epoche aperte solo da `gov.session_epoch_open`.
+
+**Costruito (v0.33.0):** `src/sessionNorms.ts` (unica chiamata RPC, store, risoluzione della sessione, prepare/commit delle norme del WI), `src/agentContext.ts` v1 + `renderCompact`, `src/cli.ts` (`board-cli`, bin), `src/wi.ts` (`wiStart`/`wiResume`), `src/flags.ts` (`LOOMX_WI_NORMS*`), `src/docDb.ts` (`sessionEpochOpen`), pg-shim (`noSyntheticId`, `ignoreDuplicates`). Dettaglio e scelte dichiarate in CLAUDE.md, sezione «T2 minimo».
+
+**Scelta dichiarata (chiesta da frame): come il processo stdio conosce la sessione.** Misurato: MCP figlio diretto di Claude (`ppid`) e `CLAUDE_PID` nell'ambiente dell'hook → legame per `host_pid`, stabile oltre `/clear`. Epoca di un `host_pid` diverso mai adottata (sessioni concorrenti); fallback `host_pid NULL` con limite dichiarato; nessuna epoca → `mcp_implicit` aperta dal processo.
+
+**Verifiche:** `npm test` 461/461 (24 nuovi: payload v1 senza `body`, epoche open/current, differenza, omonimi D-167, grazia e fase dura REQ-032 senza scritture a metà, resume, flag, non-pilota identico a prima, shim). Accettazione per grep: `applicable_norms` in `src/` → 1 riga; slug/uuid dei critici → 0 (tolto anche da un commento preesistente in `staleness.ts`). Dal vivo: `board-cli` 0,5 s, fail-open corretto col dato attuale (tabelle non ancora applicate), exit 0 a DB giù e a trigger invalido.
+
+**Non fatto, dichiarato:** misure dal vivo su un pilota (righe reali in `gov.session_norms`/`gov.wi_norms`, `core_bytes`/`list_bytes`) e sveglia a it-manager per il rilascio `dist/` — entrambe **dopo** l'apply della migrazione dba (staged, attende loomy): rilasciare prima darebbe ai piloti solo `norms_unavailable`. GTD follow-on in `waiting` su dba. Il `done` formale a frame parte da lì; a frame è andato uno stato intermedio con le scelte dichiarate.
+
+**A margine:** msg dba `32447fb0` (7/9: `container_type`/`is_critical` in `project_list`, alias per `org_lookup` alla rinomina) — parcheggiato in GTD, parere sul punto 2 dato a dba.
+
+---
+
 ## Sessione #189 — 2026-09-18 (wake cold-start, msg loomy `8c86ba26`, WI `ee0384cd`, modello sonnet)
 
 **Task — wake `normal` da loomy: alert monitoring `[git-remote-drift]` — HEAD locale diverso da origin da >24h.** Probe `git_remote_drift_scan.py` segnalava locale `3816ff3` / remote `c80078e` sullo stesso branch `master`, stessa divergenza da almeno 24h — origine dichiarata dal probe: GTD `7ef80b9d` (l'incidente D-237/D-244 di 3 mesi fa, storie non correlate).

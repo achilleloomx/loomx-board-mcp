@@ -59,6 +59,13 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
   private _insertData: Row | Row[] | null = null;
   private _updateData: Row | null = null;
   private _upsertOnConflict: string[] = [];
+  // T2 minimo (SDES-005 v1): gov.session_norms / gov.wi_norms have composite
+  // natural keys and NO `id` column, and wi_resume must not rewrite delivery
+  // facts (dba Q1: ON CONFLICT DO NOTHING). Both are per-call opt-ins — the
+  // defaults (synthetic id under noReturning, DO UPDATE on upsert) are
+  // unchanged for every existing call site.
+  private _ignoreDuplicates = false;
+  private _noSyntheticId = false;
   private _returning: string | null = null;
   private _single = false;
   private _maybeSingle = false;
@@ -87,9 +94,10 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
     return this;
   }
 
-  insert(data: Row | Row[]): this {
+  insert(data: Row | Row[], opts: { noSyntheticId?: boolean } = {}): this {
     this._op = "insert";
     this._insertData = data;
+    this._noSyntheticId = opts.noSyntheticId === true;
     return this;
   }
 
@@ -99,9 +107,14 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
     return this;
   }
 
-  upsert(data: Row | Row[], opts: { onConflict?: string } = {}): this {
+  upsert(
+    data: Row | Row[],
+    opts: { onConflict?: string; ignoreDuplicates?: boolean; noSyntheticId?: boolean } = {}
+  ): this {
     this._op = "upsert";
     this._insertData = data;
+    this._ignoreDuplicates = opts.ignoreDuplicates === true;
+    this._noSyntheticId = opts.noSyntheticId === true;
     this._upsertOnConflict = (opts.onConflict ?? "")
       .split(",")
       .map((c) => c.trim())
@@ -351,10 +364,12 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
           : [this._insertData!];
         if (rows.length === 0) throw new Error("insert: no rows");
         // doc_rw: inject a client-side id so we can return it without RETURNING.
-        if (this.opts.noReturning) {
+        if (this.opts.noReturning && !this._noSyntheticId) {
           rows = rows.map((r) =>
             (r as Row).id === undefined ? { id: randomUUID(), ...(r as Row) } : r
           );
+          synthesizedRows = rows as Row[];
+        } else if (this.opts.noReturning) {
           synthesizedRows = rows as Row[];
         }
         const cols = Object.keys(rows[0]!);
@@ -375,10 +390,12 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
           ? this._insertData
           : [this._insertData!];
         if (rows.length === 0) throw new Error("upsert: no rows");
-        if (this.opts.noReturning) {
+        if (this.opts.noReturning && !this._noSyntheticId) {
           rows = rows.map((r) =>
             (r as Row).id === undefined ? { id: randomUUID(), ...(r as Row) } : r
           );
+          synthesizedRows = rows as Row[];
+        } else if (this.opts.noReturning) {
           synthesizedRows = rows as Row[];
         }
         const cols = Object.keys(rows[0]!);
@@ -405,7 +422,9 @@ export class PgQuery<T = Row> implements PromiseLike<DbResult<T>> {
         const setSql = setCols
           .map((c) => `${ident(c)} = EXCLUDED.${ident(c)}`)
           .join(", ");
-        sql += ` ON CONFLICT (${conflictCols}) DO UPDATE SET ${setSql}`;
+        sql += this._ignoreDuplicates
+          ? ` ON CONFLICT (${conflictCols}) DO NOTHING`
+          : ` ON CONFLICT (${conflictCols}) DO UPDATE SET ${setSql}`;
         if (!this.opts.noReturning) sql += this._buildReturning();
       } else if (this._op === "update") {
         const cols = Object.keys(this._updateData!);
@@ -482,14 +501,14 @@ export class PgShimClient {
     try {
       // ident() (schema-qualified, same helper `.from()` uses for "gov.*"
       // tables) instead of the old bare identifier regex — a schema-qualified
-      // function call (e.g. "gov.applicable_norms", agent_context/SDES-001)
+      // function call (e.g. the norms RPC used by agent_context/SDES-001)
       // was previously rejected outright as "Invalid function name", even
       // though it's exactly as safe: still fully regex-validated per segment,
       // never string-built from unvalidated input.
       const fnIdent = ident(fn);
       // Postgres names a scalar function's result column after the function's
-      // own (unqualified) name, never schema-qualified — "gov.applicable_norms"
-      // comes back as a column called "applicable_norms".
+      // own (unqualified) name, never schema-qualified — "gov.some_fn"
+      // comes back as a column called "some_fn".
       const baseName = fn.includes(".") ? fn.split(".")[1]! : fn;
       const keys = Object.keys(params);
       const values = keys.map((k) => params[k]);

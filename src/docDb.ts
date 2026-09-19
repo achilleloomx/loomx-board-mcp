@@ -128,6 +128,13 @@ export interface DocRwDb {
   // its own named entry, see the rest of this interface); adding a one-off
   // generic escape hatch here would undo that discipline for one call site.
   docM5TerminalStatuses: () => Promise<string[]>;
+  // T2 minimo (SDES-001 v1, dba msg af4c0e19): the ONLY way to open a session
+  // epoch — doc_rw has SELECT on gov.session_epochs, never INSERT. SECURITY
+  // DEFINER, max+1 atomic (advisory lock per session_id), agent derived from
+  // gov.caller_identity(), never received. Raises 42501 if the session_id
+  // already carries epochs of ANOTHER agent, 23514 on a trigger outside the
+  // vocabulary. Returns the new epoch number.
+  sessionEpochOpen: (sessionId: string, trigger: string, hostPid: number | null) => Promise<number>;
   // Bug d6a57035 (atlas, DEL-006 dogfood): a handler runs in ONE open transaction
   // (BEGIN…COMMIT, see runWithPool below). An INSERT that hits a unique constraint
   // aborts that transaction — any subsequent query (e.g. the idempotent-retry
@@ -353,6 +360,12 @@ function makeDb(exec: PgExecutor, opts: { persistentTx?: boolean } = {}): DocRwD
       const r = rows[0] as Row | undefined;
       const changed = r && r.changed;
       return Array.isArray(changed) ? (changed as string[]) : [];
+    },
+    sessionEpochOpen: async (sessionId: string, trigger: string, hostPid: number | null) => {
+      const { rows } = await exec("SELECT gov.session_epoch_open($1, $2, $3::int) AS epoch", [sessionId, trigger, hostPid]);
+      const epoch = Number((rows[0] as Row | undefined)?.epoch);
+      if (!Number.isInteger(epoch) || epoch < 1) throw new Error("gov.session_epoch_open returned no epoch");
+      return epoch;
     },
     docM5TerminalStatuses: async () => {
       const { rows } = await exec("SELECT gov.doc_m5_terminal_statuses() AS statuses", []);

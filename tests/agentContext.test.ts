@@ -8,7 +8,8 @@ import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import type { SupabaseClient } from "@supabase/supabase-js";
 
-import { agentContext, buildRoleCard } from "../src/agentContext.ts";
+import { agentContext, buildRoleCard, renderCompact } from "../src/agentContext.ts";
+import { makeMemoryStore } from "./memorySessionStore.ts";
 
 type Row = Record<string, unknown>;
 type Store = { [table: string]: Row[] };
@@ -150,32 +151,132 @@ test("buildRoleCard: card + edges present -> reports_to/escalates_to/asks_help_f
 
 // ---- constitution (single RPC, fail-open) ----
 
-test("agent_context: gov.applicable_norms missing -> constitution:null + constitution_unavailable, never blocks the payload", async () => {
-  const db = makeDb({});
-  const res = await agentContext(db, ctx);
+// ---- critical_core + session (SDES-001 v1) ----
+
+const T_CRIT = "00000000-0000-4000-9000-00000000c001";
+
+function v1Rpc(norms: unknown[], extra: Record<string, unknown> = {}) {
+  return async (fn: string, params: Record<string, unknown>) => {
+    assert.equal(fn, "gov.applicable_norms");
+    assert.deepEqual(Object.keys(params), ["p_agent"], "critical core = every other parameter left NULL");
+    assert.equal(params.p_agent, "board-mcp");
+    return {
+      data: { norms, critical_threads: ["thr-x"], critical_core_unpublished: [], critical_registry_empty: false, houses_unresolved: [], ...extra },
+      error: null,
+    };
+  };
+}
+
+const NORM_A = {
+  code: "X-001", version: "1.2", grade: 2, grade_source: "source", title: "Titolo", summary: "Riassunto",
+  source: { thread_slug: "thr-x", project_id: T_CRIT, document_id: "doc-1" }, sources: ["critical"],
+  body: "MUST NEVER LEAK",
+};
+
+test("agent_context v1: RPC missing -> critical_core:null + critical_core_unavailable, payload still useful", async () => {
+  const res = await agentContext(makeDb({}), ctx);
   assert.equal(res.ok, true);
   if (!res.ok) return;
-  assert.equal(res.data.constitution, null);
-  assert.match(res.data.constitution_unavailable ?? "", /gov\.applicable_norms missing/);
-  assert.equal(res.data.payload_version, "0");
+  assert.equal(res.data.payload_version, "1");
+  assert.equal(res.data.critical_core, null);
+  assert.match(res.data.critical_core_unavailable ?? "", /does not exist/);
+  assert.deepEqual(res.data.constitution, { deprecated: true, see: "critical_core" });
+  assert.ok(res.data.work);
 });
 
-test("agent_context: gov.applicable_norms present -> constitution populated, no _unavailable field", async () => {
-  const db = makeDb(
-    {},
-    {
-      rpc: async (fn, params) => {
-        assert.equal(fn, "gov.applicable_norms");
-        assert.equal(params.p_agent, "board-mcp");
-        return { data: [{ code: "CORE-001", grade: 1, reason: "constitution" }], error: null };
-      },
-    }
-  );
-  const res = await agentContext(db, ctx);
+test("agent_context v1: norms carry exactly the contract keys — no body at any level (UAT-005)", async () => {
+  const res = await agentContext(makeDb({}, { rpc: v1Rpc([NORM_A]) }), ctx);
   assert.equal(res.ok, true);
   if (!res.ok) return;
-  assert.deepEqual(res.data.constitution, [{ code: "CORE-001", grade: 1, reason: "constitution" }]);
-  assert.equal(res.data.constitution_unavailable, undefined);
+  const cc = res.data.critical_core!;
+  assert.deepEqual(Object.keys(cc.norms[0]!).sort(), ["code", "grade", "grade_source", "source", "summary", "title", "version"]);
+  assert.equal(JSON.stringify(res.data).includes("MUST NEVER LEAK"), false);
+  assert.equal(JSON.stringify(res.data).includes('"body"'), false);
+  assert.deepEqual(cc.critical_threads, ["thr-x"]);
+  assert.equal(cc.core_bytes, Buffer.byteLength(JSON.stringify(cc.norms)));
+  assert.equal(res.data.critical_core_unavailable, undefined);
+});
+
+test("agent_context v1: declared absences pass through (unpublished Threads, empty registry)", async () => {
+  const res = await agentContext(
+    makeDb({}, { rpc: v1Rpc([], { critical_core_unpublished: ["thr-x", "thr-y"], critical_registry_empty: true }) }),
+    ctx
+  );
+  if (!res.ok) return assert.fail();
+  assert.deepEqual(res.data.critical_core!.norms, []);
+  assert.deepEqual(res.data.critical_core!.critical_core_unpublished, ["thr-x", "thr-y"]);
+  assert.equal(res.data.critical_core!.critical_registry_empty, true);
+});
+
+test("agent_context v1: a live v0 RPC answer is DECLARED (rpc_contract_version), never read as 'v1 says empty'", async () => {
+  const res = await agentContext(
+    makeDb({}, { rpc: async () => ({ data: { contract_version: "v0", applicable_norms: [], constitution_unpublished: true }, error: null }) }),
+    ctx
+  );
+  if (!res.ok) return assert.fail();
+  assert.equal(res.data.critical_core!.rpc_contract_version, "v0");
+});
+
+test("agent_context v1: no session mode -> session:null + session_unavailable (declared)", async () => {
+  const res = await agentContext(makeDb({}, { rpc: v1Rpc([NORM_A]) }), ctx);
+  if (!res.ok) return assert.fail();
+  assert.equal(res.data.session, null);
+  assert.match(res.data.session_unavailable ?? "", /not configured/);
+});
+
+test("agent_context v1 'open' (board-cli): every run opens a NEW epoch and records what it delivered", async () => {
+  const store = makeMemoryStore();
+  const db = makeDb({}, { rpc: v1Rpc([NORM_A]) });
+  const open = (trigger: "startup" | "clear") =>
+    agentContext(db, ctx, { kind: "open", store, sessionId: "S1", trigger, hostPid: 4242 }, "compact");
+  const r1 = await open("startup");
+  const r2 = await open("clear");
+  if (!r1.ok || !r2.ok) return assert.fail();
+  assert.deepEqual(r1.data.session, { id: "S1", epoch: 1 });
+  assert.deepEqual(r2.data.session, { id: "S1", epoch: 2 });
+  assert.deepEqual(store.epochs.map((e) => e.trigger), ["startup", "clear"]);
+  assert.deepEqual([...(await store.readDelivered({ id: "S1", epoch: 2 }))], [`${T_CRIT}:X-001@1.2`]);
+  assert.equal(store.delivered.every((d) => d.form === "compact"), true);
+});
+
+test("agent_context v1 'current' (MCP tool): re-delivers inside the hook's epoch, never opens a new one", async () => {
+  const store = makeMemoryStore();
+  const db = makeDb({}, { rpc: v1Rpc([NORM_A]) });
+  await agentContext(db, ctx, { kind: "open", store, sessionId: "S1", trigger: "startup", hostPid: 4242 });
+  const host = { hostPid: 4242, bootedAt: new Date(Date.now() - 1000), envSessionId: "S1" };
+  const a = await agentContext(db, ctx, { kind: "current", store, host });
+  const b = await agentContext(db, ctx, { kind: "current", store, host });
+  if (!a.ok || !b.ok) return assert.fail();
+  assert.deepEqual(a.data.session, { id: "S1", epoch: 1 });
+  assert.deepEqual(b.data.session, { id: "S1", epoch: 1 });
+  assert.equal(store.epochs.length, 1);
+  assert.equal(store.delivered.length, 1, "idempotent on (session, epoch, project, code)");
+});
+
+test("agent_context v1: registry write fails -> session:null + session_unavailable, core still delivered", async () => {
+  const store = makeMemoryStore();
+  store.openEpoch = async () => { throw new Error("relation gov.session_epochs does not exist"); };
+  const res = await agentContext(makeDb({}, { rpc: v1Rpc([NORM_A]) }), ctx, { kind: "open", store, sessionId: "S1", trigger: "startup", hostPid: null });
+  if (!res.ok) return assert.fail();
+  assert.equal(res.data.session, null);
+  assert.match(res.data.session_unavailable ?? "", /does not exist/);
+  assert.equal(res.data.critical_core!.norms.length, 1);
+});
+
+test("renderCompact: role header (3 lines), one line per Decision, declared absences, no JSON", async () => {
+  const store = makeMemoryStore();
+  const db = makeDb(
+    { loomx_role_cards: [{ agent_slug: "board-mcp", mission: "Board MCP dev", human_ref: "achille" }] },
+    { rpc: v1Rpc([NORM_A], { critical_core_unpublished: ["thr-y"] }) }
+  );
+  const res = await agentContext(db, ctx, { kind: "open", store, sessionId: "S1", trigger: "compact", hostPid: null }, "compact");
+  if (!res.ok) return assert.fail();
+  const lines = renderCompact(res.data).split("\n");
+  assert.match(lines[0]!, /board-mcp \(005\) — Board MCP dev/);
+  assert.match(lines[2]!, /sessione S1 · epoca 1/);
+  assert.ok(lines.includes("X-001 v1.2 [thr-x] Titolo — Riassunto"));
+  assert.ok(lines.some((l) => /senza pubblicazione → thr-y/.test(l)));
+  assert.equal(lines.some((l) => l.includes("{")), false);
 });
 
 // ---- work: active WI, GTD top-5, pending_inbox/wakes ----
