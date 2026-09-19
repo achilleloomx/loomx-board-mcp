@@ -74,8 +74,19 @@ export interface StructureDocument {
   item_codes?: string[];
 }
 
+export interface StructureProject {
+  name: string;
+  short_name: string | null;
+  container_type: string | null;
+  is_critical: boolean | null;
+}
+
 export interface DocStructureResult {
   project_id: string;
+  // T2 minimo / 7/9 (dba msg 85c8441e): the container's own facts. null when not
+  // readable from here — `project_unavailable` then says why (never a silent null).
+  project: StructureProject | null;
+  project_unavailable?: string;
   visibility: {
     caller: string;
     member: boolean | null; // null = the membership probe itself was unavailable
@@ -118,6 +129,37 @@ export async function docStructure(
       member = await rw.agentInProject(args.project_id);
     } catch {
       member = null;
+    }
+  }
+
+  // Container facts (container_type, is_critical) live on loomx_projects, which
+  // doc_rw cannot read — read through the service client (same wall as
+  // visibilityGap/verifyProjectExists). It is a SEPARATE connection, so a failure
+  // here cannot abort the doc_rw transaction: it is declared, not fatal.
+  let project: StructureProject | null = null;
+  let projectUnavailable: string | undefined;
+  if (!ctx.serviceDb) {
+    projectUnavailable = "no service client in context: container facts not readable from the doc_rw role";
+  } else {
+    try {
+      const { data: projData, error: projErr } = await ctx.serviceDb
+        .from("loomx_projects")
+        .select("name, short_name, container_type, is_critical")
+        .eq("id", args.project_id)
+        .maybeSingle();
+      if (projErr) projectUnavailable = `loomx_projects read failed: ${projErr.message}`;
+      else if (!projData) projectUnavailable = `no loomx_projects row with id ${args.project_id}`;
+      else {
+        const p = projData as StructureProject;
+        project = {
+          name: p.name,
+          short_name: p.short_name ?? null,
+          container_type: p.container_type ?? null,
+          is_critical: p.is_critical ?? null,
+        };
+      }
+    } catch (e) {
+      projectUnavailable = `loomx_projects read failed: ${(e as Error).message}`;
     }
   }
 
@@ -262,6 +304,8 @@ export async function docStructure(
     ok: true,
     data: {
       project_id: args.project_id,
+      project,
+      ...(projectUnavailable ? { project_unavailable: projectUnavailable } : {}),
       visibility,
       documents,
       totals: {

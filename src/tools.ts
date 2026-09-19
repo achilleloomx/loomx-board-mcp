@@ -17,6 +17,7 @@ import { STALENESS_STATUS_FILTERS, STALENESS_CLOSE_OUTCOMES } from "./staleness.
 import { FACT_SYNC_RELATIONS, MAX_FACT_SYNC_LINKS } from "./factSync.js";
 import { ID_KINDS } from "./idResolve.js";
 import { paginate } from "./pagination.js";
+import { resolveProjectRef } from "./projectRef.js";
 import { withStrictToolArgs } from "./strictTools.js";
 
 const TABLE = "board_messages";
@@ -2216,9 +2217,10 @@ export function registerTools(
   // --- project_list ---
   server.tool(
     "project_list",
-    "Read-only list of projects (loomx_projects) — id, name, short_name, status, agent_id, is_sandbox. Use to discover project_id without the Management API. Sandbox projects (is_sandbox=true, DEL-003/SDES-009) are excluded by default — pass include_sandbox=true to see them.",
+    "Read-only list of projects (loomx_projects) — id, name, short_name, status, agent_id, is_sandbox, container_type (Workspace|Thread|null), is_critical. Use to discover project_id without the Management API. Sandbox projects (is_sandbox=true, DEL-003/SDES-009) are excluded by default — pass include_sandbox=true to see them. container_type filters by container kind (T2 minimo, 7/9).",
     {
       status: z.string().optional().describe("Filter by status (default: all)"),
+      container_type: z.string().optional().describe("Filter by container_type (e.g. 'Workspace', 'Thread'), exact match"),
       agent_id: z.string().optional().describe("Filter by responsible agent slug"),
       limit: z.number().int().min(1).max(200).optional().describe("Max rows (default: 50)"),
       include_sandbox: z
@@ -2226,16 +2228,17 @@ export function registerTools(
         .optional()
         .describe("Include sandbox projects (is_sandbox=true) in the result (default: false, excluded)"),
     },
-    async ({ status, agent_id, limit, include_sandbox }) => {
+    async ({ status, container_type, agent_id, limit, include_sandbox }) => {
       const db = getSupabaseClient();
       const effectiveLimit = limit ?? 50;
       let query = db
         .from(PROJECTS_TABLE)
-        .select("id, name, short_name, status, agent_id, is_sandbox")
+        .select("id, name, short_name, status, agent_id, is_sandbox, container_type, is_critical")
         .order("name")
         .limit(effectiveLimit + 1);
       if (status) query = query.eq("status", status);
       if (agent_id) query = query.eq("agent_id", agent_id);
+      if (container_type) query = query.eq("container_type", container_type);
       if (!include_sandbox) query = query.eq("is_sandbox", false);
 
       const { data, error } = await query;
@@ -2298,7 +2301,7 @@ export function registerTools(
       agent: z.string().optional().describe("Agent slug — returns its role-card and org edges"),
       question: z.enum(["card", "chain", "escalation", "help"]).optional().describe("Query mode for `agent` (default: card)"),
       domain: z.string().optional().describe("Filter escalation/help edges by domain (e.g. 'infra')"),
-      project: z.string().optional().describe("Project slug (short_name) or UUID — returns its RACI matrix"),
+      project: z.string().optional().describe("Project reference — full UUID, id prefix (>=8 hex), short_name or name (case-insensitive); ambiguity is an error listing candidates. Returns its RACI matrix; response echoes matched_by"),
       sow: z.string().optional().describe("sow_document_id filter within a project (UUID of a documents row with document_type='sow')"),
       raci: z.enum(["R", "A", "C", "I"]).optional().describe("Filter the RACI matrix to one role (requires `project`)"),
     },
@@ -2314,23 +2317,21 @@ export function registerTools(
 
       // --- project/SoW RACI mode ---
       if (project) {
-        type ProjectRow = { id: string; name: string; short_name: string | null; agent_id: string | null };
-        const projectFilterCol = UUID_RE.test(project) ? "id" : "short_name";
-        const { data: projectData, error: projectErr } = await db
+        // Robust resolution (dba msg 85c8441e): id, 8+ hex prefix, short_name, name — see src/projectRef.ts.
+        // loomx_projects is small (~100 rows): fetch and resolve in JS, sandbox included.
+        const { data: projectRows, error: projectErr } = await db
           .from(PROJECTS_TABLE)
           .select("id, name, short_name, agent_id")
-          .eq(projectFilterCol, project)
-          .maybeSingle();
+          .limit(5000);
         if (projectErr) {
           return { content: [{ type: "text", text: `Error resolving project: ${projectErr.message}` }], isError: true };
         }
-        if (!projectData) {
-          return {
-            content: [{ type: "text", text: `Error: project "${project}" not found (looked up by ${projectFilterCol}). Use project_list to discover valid slugs/ids.` }],
-            isError: true,
-          };
+        const resolved = resolveProjectRef((projectRows ?? []) as any[], project);
+        if (!resolved.ok) {
+          return { content: [{ type: "text", text: `Error: ${resolved.error}` }], isError: true };
         }
-        const projectRow = projectData as ProjectRow;
+        const projectRow = resolved.row as { id: string; name: string; short_name: string | null; agent_id: string | null };
+        const projectMatchedBy = resolved.matched_by;
 
         let raciQuery = db
           .from(SOW_RACI_TABLE)
@@ -2355,7 +2356,7 @@ export function registerTools(
                 type: "text",
                 text: JSON.stringify(
                   {
-                    project: { id: projectRow.id, name: projectRow.name, short_name: projectRow.short_name },
+                    project: { id: projectRow.id, name: projectRow.name, short_name: projectRow.short_name, matched_by: projectMatchedBy },
                     raci: null,
                     fallback: {
                       reason: "no RACI registered for this project (D-091 fallback)",
@@ -2452,7 +2453,7 @@ export function registerTools(
               type: "text",
               text: JSON.stringify(
                 {
-                  project: { id: projectRow.id, name: projectRow.name, short_name: projectRow.short_name },
+                  project: { id: projectRow.id, name: projectRow.name, short_name: projectRow.short_name, matched_by: projectMatchedBy },
                   ratification,
                   raci: matrix,
                 },
@@ -4457,6 +4458,8 @@ export function registerTools(
       `response carries a visibility note and the count must be read as "not measurable from here", never as "empty" ` +
       `(D-167). Counts are never merged into one flattering total — an all-draft corpus and an all-hand-made ` +
       `subscription set are exactly what a single number hides. include_items=true adds the item codes per document. ` +
+      `The response also carries project {name, short_name, container_type, is_critical} (T2 minimo, 7/9) — null with ` +
+      `project_unavailable naming why when it cannot be read. ` +
       `Example: doc_structure({project_id:"<uuid>"}).`,
     {
       project_id: z.string().uuid().describe("Project to read the structure of"),

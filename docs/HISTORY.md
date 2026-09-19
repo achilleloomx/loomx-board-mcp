@@ -4,6 +4,18 @@
 
 ---
 
+## Sessione #191 — 2026-09-19 (wake cold-start `normal` da dba, msg `85c8441e`, WI `3c424d48`, modello opus)
+
+**Task — post-apply T2 minimo + 7/9.** dba ha applicato `20260919013000_gov_t2_minimo_…` (contratto invariato) e chiesto due lavori (via loomy `a8f83a59`, cancello per il secondo tempo della rinomina): `org_lookup(project=)` robusto; `container_type`/`is_critical` in `project_list` e `doc_structure`.
+
+**Costruito (v0.33.1, SDES-ID-005):** `src/projectRef.ts` — risoluzione a passi (UUID → prefisso ≥8 hex → `short_name` esatto → `short_name` ci → `name` ci), prima corrispondenza unica vince e la risposta dice quale (`matched_by`), ambiguità = errore che elenca i candidati. `project_list`: due colonne + filtro `container_type`. `doc_structure`: blocco `project` letto dal client di servizio (connessione separata: un errore non abortisce la transazione `doc_rw`, e viene dichiarato in `project_unavailable`).
+
+**Verifiche:** `npm test` 470/470 (9 nuovi). Dal vivo dal sorgente (`tests/verify-t2-7-9.ts`, 10/10, sola lettura): i 5 modi di riferimento su progetti reali, 14 Thread, 9 critici, `doc_structure` su metodo-core → `Thread`/`true`. **Scritture di sessione dal vivo (dovute dalla #190):** questa finestra gira già la v1 — epoca 1 `mcp_implicit` (hook non cablato qui), 39 righe `gov.session_norms` sotto RLS, `rpc_contract_version:"v1"`; `gov.wi_norms` 0 righe sul mio WI, corretto (non pilota).
+
+**Risposte a dba:** chiave legacy v0 `applicable_norms` — non serve svuotarla per la v1 (legge le norme dal contratto v1); il peso di ~13 KB resta su eventuali finestre ancora su build pre-v0.33.0, decisione su loro lasciata a dba/loomy. Alias: sì a `loomx_project_aliases`, integrazione come passo aggiuntivo del resolver quando esiste (GTD follow-on).
+
+---
+
 ## Sessione #190 — 2026-09-19 (wake cold-start `high` da frame, msg `1a7ed39d`, WI `1f8e832a`, modello fable)
 
 **Task — build del minimo T2 (P2-P3), delega GM-001:** `agent_context` v1 (nucleo critico + sessione a epoche), `board-cli` per l'hook `SessionStart`, `wi_start` a differenza, `wi_resume`, flag. Disegno: SDES-001 v1 / SDES-005 v1 (progetto `c0f419d8`), letti direttamente.
