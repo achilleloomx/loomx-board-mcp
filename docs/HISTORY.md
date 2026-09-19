@@ -4,6 +4,16 @@
 
 ---
 
+## Sessione #192 — 2026-09-19 (wake cold-start `normal` da loomy, msg `e2530af8`, WI `4627759c`, modello opus)
+
+**Task — T2 P2-P3 dopo l'apply dba (`20260919013000`):** misure dal vivo sui piloti, sveglia it-manager per il rilascio `dist/`, done a frame. La parte «poi» del messaggio (org_lookup robusto + colonne, 7/9) era già chiusa nella #191 (v0.33.1).
+
+**Misurato:** nessun pilota ha ancora scritto in `gov.session_*`/`gov.wi_norms` (0 righe con lo slug di ciascuno): nessuna finestra pilota è ripartita sul build nuovo. Misura quindi costruita: `tests/verify-t2-pilots.ts`, moduli reali sotto lo slug del pilota, due scenari (con hook / senza hook), transazione annullata, 55/55, zero residui. Numeri in CLAUDE.md, «Post-apply».
+
+**Trovato:** (1) nessun repo pilota ha l'hook `SessionStart` con `board-cli` — oggi tutti passano dal ramo di grazia, e `wi_start` risponde con 25–42 KB di norme (analyst-pieroni 101 dovute). Con l'hook scende a 11–28 KB. Segnalato a it-manager (cablaggio hook) e a frame/loomy (peso). (2) Dall'identità nativa board-mcp non si leggono WI/GTD degli altri agenti: la scrittura `gov.wi_norms` di un pilota è provata solo per rifiuto (RLS su un WI non suo) e, in positivo, sul WI proprio di board-mcp. La prima riga reale di un pilota resta da osservare al suo primo `wi_start`.
+
+---
+
 ## Sessione #191 — 2026-09-19 (wake cold-start `normal` da dba, msg `85c8441e`, WI `3c424d48`, modello opus)
 
 **Task — post-apply T2 minimo + 7/9.** dba ha applicato `20260919013000_gov_t2_minimo_…` (contratto invariato) e chiesto due lavori (via loomy `a8f83a59`, cancello per il secondo tempo della rinomina): `org_lookup(project=)` robusto; `container_type`/`is_critical` in `project_list` e `doc_structure`.
